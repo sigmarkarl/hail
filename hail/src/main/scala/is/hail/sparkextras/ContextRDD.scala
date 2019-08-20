@@ -4,6 +4,7 @@ import is.hail.utils._
 import org.apache.spark._
 import org.apache.spark.rdd._
 import org.apache.spark.ExposedUtils
+import org.apache.spark.util.TaskCompletionListener
 
 import scala.reflect.ClassTag
 
@@ -206,9 +207,10 @@ class ContextRDD[C <: AutoCloseable, T: ClassTag](
 
   private[this] def sparkManagedContext(): C = {
     val c = mkc()
-    TaskContext.get().addTaskCompletionListener { (_: TaskContext) =>
+    val tc : TaskCompletionListener = _ => {
       c.close()
     }
+    TaskContext.get().addTaskCompletionListener(tc)
     c
   }
 

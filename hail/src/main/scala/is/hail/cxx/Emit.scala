@@ -1430,7 +1430,7 @@ class Emitter(fb: FunctionBuilder, nSpecialArgs: Int, ctx: SparkFunctionContext)
 
         val sliceVars = mutable.ArrayBuffer[(Variable, Variable, Variable)]()
         val refVars = mutable.Map[Int, Variable]()
-        coerce[TTuple](slicesIR.typ).types.zipWithIndex.foreach { case (sliceOrIndex, dim) =>
+        /*coerce[TTuple](slicesIR.typ).types.zipWithIndex.foreach { case (sliceOrIndex, dim) =>
           val slice = slicesPType.cxxLoadField(slicesTup.toString, dim)
           sliceOrIndex match {
             case _: TTuple =>
@@ -1443,7 +1443,7 @@ class Emitter(fb: FunctionBuilder, nSpecialArgs: Int, ctx: SparkFunctionContext)
               val idx = fb.variable(s"ref_$dim", "int", slice)
               refVars += dim -> idx
           }
-        }
+        }*/
 
         val defineSliceVars = sliceVars.map { case (start, stop, step) =>
           Code(start.define, stop.define, step.define)

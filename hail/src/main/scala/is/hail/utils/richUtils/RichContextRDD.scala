@@ -11,6 +11,7 @@ import is.hail.sparkextras._
 import org.apache.hadoop.conf.{Configuration => HadoopConf}
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
+import org.apache.spark.util.TaskCompletionListener
 
 import scala.reflect.ClassTag
 
@@ -52,10 +53,11 @@ class RichContextRDD[T: ClassTag](crdd: ContextRDD[RVDContext, T]) {
           val context = TaskContext.get
           val partPath = fs.getTemporaryFile("file:///tmp")
           val idxPath = partPath + ".idx"
-          context.addTaskCompletionListener { (context: TaskContext) =>
+          val tc : TaskCompletionListener = _ => {
             fs.delete(partPath, recursive = false)
             fs.delete(idxPath, recursive = true)
           }
+          context.addTaskCompletionListener(tc)
           partPath -> idxPath
         } else
           finalFilename -> finalIdxFilename

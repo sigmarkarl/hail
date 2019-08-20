@@ -16,6 +16,7 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import org.apache.spark.{OneToOneDependency, Partition, SparkContext, TaskContext}
+import org.apache.spark.util.TaskCompletionListener
 
 import scala.language.reflectiveCalls
 
@@ -94,9 +95,10 @@ private class BgenRDD(
           new IndexBgenRecordIterator(ctx, p, settings, f()).flatten
         case p: LoadBgenPartition =>
           val index: IndexReader = indexBuilder(p.bcFS.value, p.indexPath, 8)
-          context.addTaskCompletionListener { (context: TaskContext) =>
+          val tc : TaskCompletionListener = _ => {
             index.close()
           }
+          context.addTaskCompletionListener(tc)
           if (keys == null)
             new BgenRecordIteratorWithoutFilter(ctx, p, settings, f(), index).flatten
           else {
