@@ -20,6 +20,7 @@ import org.apache.spark.{Partition, SparkContext, TaskContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
 import org.apache.spark.{Partition, SparkContext, TaskContext}
+import org.apache.spark.util.TaskCompletionListener
 import org.json4s.JsonAST.{JInt, JObject, JString}
 import org.json4s.jackson.JsonMethods
 
@@ -1413,9 +1414,10 @@ class PartitionedVCFRDD(
 
     // clean up
     val context = TaskContext.get
-    context.addTaskCompletionListener { (context: TaskContext) =>
+    val tc : TaskCompletionListener = _ => {
       lines.close()
     }
+    context.addTaskCompletionListener(tc)
 
     val it = new Iterator[String] {
       private var l = lines.next()

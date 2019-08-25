@@ -6,7 +6,7 @@ buildscript {
 }
 
 plugins {
-  id "com.gradle.build-scan" version "2.3"
+  id "com.gradle.build-scan" version "2.4.1"
   id 'java'
   id 'scala'
   id 'idea'
@@ -27,15 +27,15 @@ repositories {
     maven { url "http://repo.spring.io/plugins-release/" }
 }
 
-String sparkVersion = System.getProperty("spark.version", "2.4.0")
+String sparkVersion = System.getProperty("spark.version", "2.4.3")
 String breezeVersion = System.getProperty("breeze.version")
 String py4jVersion = System.getProperty("py4j.version")
 
 if (!(sparkVersion ==~ /^2\.[2-4].*/))
-    ant.fail('Hail does not support Spark version ' + sparkVersion + '. Hail team recommends version 2.4.0.')
+    ant.fail('Hail does not support Spark version ' + sparkVersion + '. Hail team recommends version 2.4.3.')
 
-String scalaVersion = '2.11.8'
-String scalaMajorVersion = '2.11'
+String scalaVersion = '2.12.9'
+String scalaMajorVersion = '2.12'
 
 if (py4jVersion == null) {
   if (sparkVersion == '2.2.0')
@@ -102,7 +102,7 @@ compileScala {
     scalaCompileOptions.additionalParameters = [
         "-feature",
         "-Xno-patmat-analysis",
-        "-Xfatal-warnings",
+        //"-Xfatal-warnings",
         "-Xlint:_",
         "-deprecation",
         "-unchecked",
@@ -153,7 +153,7 @@ dependencies {
 
     bundled group: 'org.slf4j', name: 'slf4j-api', version: '1.7.25'
 
-    bundled 'org.elasticsearch:elasticsearch-spark-20_2.11:6.2.4'
+    bundled 'org.elasticsearch:elasticsearch-spark-20_2.11:7.0.1'
 
     bundled 'org.apache.httpcomponents:httpcore:4.4.3'
     bundled('org.apache.httpcomponents:httpclient:4.5.1') {
@@ -170,7 +170,7 @@ dependencies {
     }
 
     hailTest 'org.testng:testng:6.8.21'
-    hailTest 'org.scalatest:scalatest_' + scalaMajorVersion + ':2.2.4'
+    hailTest 'org.scalatest:scalatest_' + scalaMajorVersion + ':3.2.0-SNAP10'
 
     unbundled group: 'org.apache.commons', name: 'commons-math3', version: '3.6.1'
     bundled group: 'commons-codec', name: 'commons-codec', version: '1.11'

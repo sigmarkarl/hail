@@ -257,7 +257,7 @@ object HailContext {
     tmpDir: String = "/tmp",
     optimizerIterations: Int = 3): HailContext = contextLock.synchronized {
     require(theContext == null)
-    checkJavaVersion()
+    //checkJavaVersion()
 
     {
       import breeze.linalg._
@@ -302,7 +302,7 @@ object HailContext {
     tmpDir: String = "/tmp",
     optimizerIterations: Int = 3): HailContext = contextLock.synchronized {
     require(theContext == null)
-    checkJavaVersion()
+    //checkJavaVersion()
     val hConf = new hadoop.conf.Configuration()
 
     configureLogging(logFile, quiet, append)
