@@ -6,7 +6,7 @@ buildscript {
 }
 
 plugins {
-  id "com.gradle.build-scan" version "2.3"
+  id "com.gradle.build-scan" version "2.4.1"
   id 'java'
   id 'scala'
   id 'idea'
@@ -26,29 +26,7 @@ repositories {
     maven { url "http://repo.hortonworks.com/content/repositories/releases/" }
     maven { url "http://repo.spring.io/plugins-release/" }
 }
-
-<<<<<<< HEAD
-buildScan {
-    termsOfServiceUrl = 'https://gradle.com/terms-of-service'
-    termsOfServiceAgree = 'yes'
-}
-
-// Hail has three notions of version:
-//  - hail short version: MAJOR.MINOR
-//  - hail pip version: MAJOR.MINOR.PATCH
-//  - hail version: MAJOR.MINOR.PATCH-GIT_SHA, calculated by generateBuildInfo
-String MAJOR = 0
-String MINOR = 2
-String PATCH = 20
-String hailShortVersion = MAJOR.toString() + "." + MINOR.toString()
-// By default pip hides versions ending in ".devN". Use these for testing.
-String hailPipVersion = hailShortVersion + "." + PATCH + System.getProperty("hail.pip-version-suffix", "")
-String[] deployedSparkVersions = new File("deployed-spark-versions.txt").readLines()
-
 String sparkVersion = System.getProperty("spark.version", "2.4.3")
-=======
-String sparkVersion = System.getProperty("spark.version", "2.4.0")
->>>>>>> aa5d906be9d4182b22b73ce6dd5bae5967acf9ce
 String breezeVersion = System.getProperty("breeze.version")
 String py4jVersion = System.getProperty("py4j.version")
 
@@ -115,25 +93,8 @@ tasks.withType(JavaCompile) {
     options.fork = true // necessary to make -XDenableSunApiLintControl work
 }
 
-<<<<<<< HEAD
-tasks.withType(ScalaCompile) {
-    scalaCompileOptions.additionalParameters = ["-nowarn"]
-}
-
-
-task generateBuildInfo(type: Exec) {
-    commandLine 'bash', 'generate-build-info.sh', sparkVersion, hailPipVersion
-    outputs.upToDateWhen { false }
-}
-
-
-shadowJar.mustRunAfter nativeLibPrebuilt
-nativeLibResetPrebuilt.mustRunAfter shadowJar
-task releaseJar(type: Wrapper, dependsOn: ['nativeLibPrebuilt', 'shadowJar', 'nativeLibResetPrebuilt']) {
-=======
 task releaseJar(type: Exec) {
     commandLine 'sh', '-c', 'echo "use HAIL_COMPILE_NATIVES=1 make shadowJar; gradle is being phased out"; exit 1'
->>>>>>> aa5d906be9d4182b22b73ce6dd5bae5967acf9ce
 }
 
 compileScala {
