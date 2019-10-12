@@ -1,6 +1,7 @@
 package is.hail.annotations.aggregators
 
 import is.hail.annotations.{Annotation, Region, RegionValueBuilder, SafeRow}
+import is.hail.expr.types.encoded.EType
 import is.hail.expr.types.physical.PType
 import is.hail.expr.types.virtual.Type
 import is.hail.io._
@@ -11,18 +12,21 @@ class RegionValuePrevNonnullAnnotationAggregator2(
   makeDecoder: (MemoryBuffer) => Decoder
 ) extends RegionValueAggregator {
   def this(t: PType) = this(t, {
-    val f = EmitPackEncoder(t, t)
-    (mb: MemoryBuffer) => new CompiledPackEncoder(new MemoryOutputBuffer(mb), f)
+    val et = EType.defaultFromPType(t)
+    val f = EType.buildEncoder(et, t)
+    (mb: MemoryBuffer) => new CompiledEncoder(new MemoryOutputBuffer(mb), f)
   }, {
-    val f = EmitPackDecoder(t, t)
-    (mb: MemoryBuffer) => new CompiledPackDecoder(new MemoryInputBuffer(mb), f)
+    val et = EType.defaultFromPType(t)
+    val (pt, f) = EType.buildDecoder(et, t.virtualType)
+    assert(pt == t)
+    (mb: MemoryBuffer) => new CompiledDecoder(new MemoryInputBuffer(mb), f)
   })
   def this(t: Type) = this(t.physicalType)
 
   val mb = new MemoryBuffer
   @transient lazy val encoder: Encoder = makeEncoder(mb)
   @transient lazy val decoder: Decoder = makeDecoder(mb)
-  
+
   var present: Boolean = false
 
   override def isCommutative: Boolean = false

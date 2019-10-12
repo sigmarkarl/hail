@@ -727,7 +727,7 @@ class MatrixTable(ExprContainer):
         --------
         Get all column field names:
 
-        >>> list(dataset.col)  # doctest: +NOTEST
+        >>> list(dataset.col)  # doctest: +SKIP_OUTPUT_CHECK
         ['s', 'sample_qc', 'is_case', 'pheno', 'cov', 'cov1', 'cov2', 'cohorts', 'pop']
 
         Returns
@@ -745,7 +745,7 @@ class MatrixTable(ExprContainer):
         --------
         Get all non-key column field names:
 
-        >>> list(dataset.col_value)  # doctest: +NOTEST
+        >>> list(dataset.col_value)  # doctest: +SKIP_OUTPUT_CHECK
         ['sample_qc', 'is_case', 'pheno', 'cov', 'cov1', 'cov2', 'cohorts', 'pop']
 
         Returns
@@ -2281,7 +2281,7 @@ class MatrixTable(ExprContainer):
         ...     .explode_cols('foo'))
         >>> mt = mt.annotate_entries(bar = mt.row_idx * mt.foo)
 
-        >>> mt.cols().show() # doctest: +NOTEST
+        >>> mt.cols().show() # doctest: +SKIP_OUTPUT_CHECK
         +---------+-------+
         | col_idx |   foo |
         +---------+-------+
@@ -2295,7 +2295,7 @@ class MatrixTable(ExprContainer):
         |       2 |     6 |
         +---------+-------+
 
-        >>> mt.entries().show() # doctest: +NOTEST
+        >>> mt.entries().show() # doctest: +SKIP_OUTPUT_CHECK
         +---------+---------+-------+-------+
         | row_idx | col_idx |   foo |   bar |
         +---------+---------+-------+-------+
@@ -2326,7 +2326,7 @@ class MatrixTable(ExprContainer):
         |       2 | [4,5,6]      |
         +---------+--------------+
 
-        >>> mt.entries().show() # doctest: +NOTEST
+        >>> mt.entries().show() # doctest: +SKIP_OUTPUT_CHECK
         +---------+---------+--------------+--------------+
         | row_idx | col_idx | foo          | bar          |
         +---------+---------+--------------+--------------+
@@ -3102,8 +3102,24 @@ class MatrixTable(ExprContainer):
     def _process_joins(self, *exprs) -> 'MatrixTable':
         return process_joins(self, exprs)
 
-    def describe(self, handler=print):
-        """Print information about the fields in the matrix."""
+    def describe(self, handler=print, *, widget=False):
+        """Print information about the fields in the matrix table.
+
+        Note
+        ----
+        The `widget` argument is **experimental**.
+
+        Parameters
+        ----------
+        handler : Callable[[str], None]
+            Handler function for returned string.
+        widget : bool
+            Create an interactive IPython widget.
+        """
+        if widget:
+            from hail.experimental.interact import interact
+            return interact(self)
+
 
         def format_type(typ):
             return typ.pretty(indent=4).lstrip()
@@ -3693,7 +3709,7 @@ class MatrixTable(ExprContainer):
 
         >>> table = hl.import_table('data/variant-lof.tsv')
         >>> table = table.transmute(**hl.parse_variant(table['v'])).key_by('locus', 'alleles')
-        >>> sites_vds = hl.MatrixTable.from_rows_table(table)
+        >>> sites_mt = hl.MatrixTable.from_rows_table(table)
 
         Notes
         -----
@@ -4016,7 +4032,6 @@ class MatrixTable(ExprContainer):
                 for k, v in fields.items():
                     print(f'    {k.rjust(max_k_len)} : {v(results)}')
                 print()
-
 
     def _write_block_matrix(self, path, overwrite, entry_field, block_size):
         mt = self

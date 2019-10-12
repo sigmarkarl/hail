@@ -6,17 +6,17 @@ import is.hail.expr.ir
 import is.hail.expr.ir._
 import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
-import is.hail.io.CodecSpec
+import is.hail.io.BufferSpec
 import is.hail.rvd.{RVDContext, RVDType}
 import is.hail.utils._
 
+import scala.collection.mutable
 import scala.language.{existentials, postfixOps}
 
 object TableMapIRNew {
 
   def apply(tv: TableValue, newRow: IR): TableValue = {
     val typ = tv.typ
-    val gType = tv.globals.t
 
     val scanRef = genUID()
     val extracted = Extract.apply(CompileWithAggregators.liftScan(newRow), scanRef)
@@ -35,7 +35,7 @@ object TableMapIRNew {
       else
         null
 
-    val spec = CodecSpec.defaultUncompressed
+    val spec = BufferSpec.defaultUncompressed
 
     // Order of operations:
     // 1. init op on all aggs and serialize to byte array.
@@ -45,12 +45,12 @@ object TableMapIRNew {
 
     val (_, initF) = ir.CompileWithAggregators2[Long, Unit](
       extracted.aggs,
-      "global", gType,
+      "global", tv.globals.t,
       Begin(FastIndexedSeq(extracted.init, extracted.serializeSet(0, 0, spec))))
 
     val (_, eltSeqF) = ir.CompileWithAggregators2[Long, Long, Unit](
       extracted.aggs,
-      "global", gType,
+      "global", Option(globalsBc).map(_.value.t).getOrElse(PStruct()),
       "row", typ.rowType.physicalType,
       extracted.eltOp())
 
@@ -60,7 +60,7 @@ object TableMapIRNew {
 
     val (rTyp, f) = ir.CompileWithAggregators2[Long, Long, Long](
       extracted.aggs,
-      "global", gType,
+      "global", Option(globalsBc).map(_.value.t).getOrElse(PStruct()),
       "row", typ.rowType.physicalType,
       Let(scanRef, extracted.results, extracted.postAggIR))
     assert(rTyp.virtualType == newRow.typ)
@@ -162,22 +162,29 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature
   val nAggs: Int = aggs.length
 
   def isCommutative: Boolean = {
-    def aggCommutes(agg: AggSignature2): Boolean = agg.nested.forall(_.forall(aggCommutes)) && (agg.op match {
-      case Take() | Collect() | PrevNonnull() | TakeBy() => false
-      case _ => true
-    })
+    def aggCommutes(agg: AggSignature2): Boolean = agg.nested.forall(_.forall(aggCommutes)) && AggIsCommutative(agg.op)
     aggs.forall(aggCommutes)
   }
 
-  def deserializeSet(i: Int, i2: Int, spec: CodecSpec): IR =
+  def shouldTreeAggregate: Boolean = {
+    def containsBigAggregator(agg: AggSignature2): Boolean = agg.nested.exists(_.exists(containsBigAggregator)) || (agg.op match {
+      case AggElements() => true
+      case AggElementsLengthCheck() => true
+      case Downsample() => true
+      case _ => false
+    })
+    aggs.exists(containsBigAggregator)
+  }
+
+  def deserializeSet(i: Int, i2: Int, spec: BufferSpec): IR =
     DeserializeAggs(i * nAggs, i2, spec, aggs)
 
-  def serializeSet(i: Int, i2: Int, spec: CodecSpec): IR =
+  def serializeSet(i: Int, i2: Int, spec: BufferSpec): IR =
     SerializeAggs(i * nAggs, i2, spec, aggs)
 
   def eltOp(optimize: Boolean = true): IR = if (optimize) Optimize(seqPerElt) else seqPerElt
 
-  def deserialize(spec: CodecSpec): ((Region, Array[Byte]) => Long) = {
+  def deserialize(spec: BufferSpec): ((Region, Array[Byte]) => Long) = {
     val (_, f) = ir.CompileWithAggregators2[Unit](
       aggs, ir.DeserializeAggs(0, 0, spec, aggs))
 
@@ -190,7 +197,7 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature
     }
   }
 
-  def serialize(spec: CodecSpec): (Region, Long) => Array[Byte] = {
+  def serialize(spec: BufferSpec): (Region, Long) => Array[Byte] = {
     val (_, f) = ir.CompileWithAggregators2[Unit](
       aggs, ir.SerializeAggs(0, 0, spec, aggs))
 
@@ -202,7 +209,7 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature
     }
   }
 
-  def combOpF(spec: CodecSpec): (Array[Byte], Array[Byte]) => Array[Byte] = {
+  def combOpF(spec: BufferSpec): (Array[Byte], Array[Byte]) => Array[Byte] = {
     val (_, f) = ir.CompileWithAggregators2[Unit](
       aggs ++ aggs,
       Begin(
@@ -227,6 +234,23 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature
 }
 
 object Extract {
+  def partitionDependentLets(lets: Array[AggLet], name: String): (Array[AggLet], Array[AggLet]) = {
+    val depBindings = mutable.HashSet.empty[String]
+    depBindings += name
+
+    val dep = new ArrayBuilder[AggLet]
+    val indep = new ArrayBuilder[AggLet]
+
+    lets.foreach { l =>
+      val fv = FreeVariables(l.value, supportsAgg = false, supportsScan = false)
+      if (fv.eval.m.keysIterator.exists(k => depBindings.contains(k))) {
+        dep += l
+        depBindings += l.name
+      } else
+        indep += l
+    }
+    (dep.result(), indep.result())
+  }
 
   def addLets(ir: IR, lets: Array[AggLet]): IR = {
     assert(lets.areDistinct())
@@ -254,6 +278,8 @@ object Extract {
     case AggSignature2(Count(), _, _, _) =>
       CountAggregator
     case AggSignature2(Take(), _, Seq(t), _) => new TakeAggregator(t.physicalType)
+    case AggSignature2(CallStats(), _, Seq(tCall: TCall), _) => new CallStatsAggregator(tCall.physicalType)
+    case AggSignature2(TakeBy(), _, Seq(value, key), _) => new TakeByAggregator(value.physicalType, key.physicalType)
     case AggSignature2(AggElementsLengthCheck(), initOpArgs, _, Some(nestedAggs)) =>
       val knownLength = initOpArgs.length == 2
       new ArrayElementLengthCheckAggregator(nestedAggs.map(getAgg).toArray, knownLength)
@@ -263,6 +289,10 @@ object Extract {
       new PrevNonNullAggregator(t.physicalType)
     case AggSignature2(Group(), _, Seq(kt, TVoid), Some(nestedAggs)) =>
       new GroupedAggregator(PType.canonical(kt), nestedAggs.map(getAgg).toArray)
+    case AggSignature2(CollectAsSet(), _, Seq(t), _) =>
+      new CollectAsSetAggregator(PType.canonical(t))
+    case AggSignature2(Collect(), _, Seq(t), _) =>
+      new CollectAggregator(t.physicalType)
     case _ => throw new UnsupportedExtraction(aggSig.toString)
   }
 
@@ -317,7 +347,7 @@ object Extract {
         val newLet = new ArrayBuilder[AggLet]()
         val transformed = this.extract(aggBody, ab, newSeq, newLet, result)
 
-        val (dependent, independent) = newLet.result().partition(l => Mentions(l.value, name))
+        val (dependent, independent) = partitionDependentLets(newLet.result(), name)
         letBuilder ++= independent
         seqBuilder += ArrayFor(array, name, addLets(Begin(newSeq.result()), dependent))
         transformed
@@ -349,7 +379,7 @@ object Extract {
         val newRef = Ref(genUID(), null)
         val transformed = this.extract(aggBody, newAggs, newSeq, newLet, newRef)
 
-        val (dependent, independent) = newLet.result().partition(l => Mentions(l.value, elementName))
+        val (dependent, independent) = partitionDependentLets(newLet.result(), elementName)
         letBuilder ++= independent
 
         val i = ab.length

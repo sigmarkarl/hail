@@ -1,19 +1,17 @@
 package is.hail.expr.types.physical
 
 import is.hail.annotations._
-import is.hail.asm4s.Code
-import is.hail.check._
+import is.hail.asm4s.{Code, coerce}
+import is.hail.backend.BroadcastValue
 import is.hail.expr.ir.EmitMethodBuilder
 import is.hail.expr.types.virtual.TLocus
 import is.hail.utils._
 import is.hail.variant._
 
-import scala.reflect.{ClassTag, classTag}
-
 object PLocus {
-  def apply(rg: RGBase): PLocus = PLocus(rg.broadcastRGBase)
+  def apply(rg: ReferenceGenome): PLocus = PLocus(rg.broadcastRG)
 
-  def apply(rg: RGBase, required: Boolean): PLocus = PLocus(rg.broadcastRGBase, required)
+  def apply(rg: ReferenceGenome, required: Boolean): PLocus = PLocus(rg.broadcastRG, required)
 
   def representation(required: Boolean = false): PStruct = PStruct(
       required,
@@ -26,11 +24,12 @@ object PLocus {
   }
 }
 
-case class PLocus(rgBc: BroadcastRGBase, override val required: Boolean = false) extends ComplexPType {
-  def rg: RGBase = rgBc.value
+case class PLocus(rgBc: BroadcastRG, override val required: Boolean = false) extends ComplexPType {
+  def rg: ReferenceGenome = rgBc.value
 
   lazy val virtualType: TLocus = TLocus(rgBc, required)
 
+  def _asIdent = "locus"
   def _toPretty = s"Locus($rg)"
 
   override def pyString(sb: StringBuilder): Unit = {
@@ -44,22 +43,22 @@ case class PLocus(rgBc: BroadcastRGBase, override val required: Boolean = false)
     val repr = representation.fundamentalType
 
     val localRGBc = rgBc
+    val binaryOrd = repr.fieldType("contig").asInstanceOf[PBinary].unsafeOrdering()
 
     new UnsafeOrdering {
       def compare(r1: Region, o1: Long, r2: Region, o2: Long): Int = {
         val cOff1 = repr.loadField(r1, o1, 0)
         val cOff2 = repr.loadField(r2, o2, 0)
 
-        val contig1 = PString.loadString(r1, cOff1)
-        val contig2 = PString.loadString(r2, cOff2)
-
-        val c = localRGBc.value.compare(contig1, contig2)
-        if (c != 0)
-          return c
-
-        val posOff1 = repr.loadField(r1, o1, 1)
-        val posOff2 = repr.loadField(r2, o2, 1)
-        java.lang.Integer.compare(r1.loadInt(posOff1), r2.loadInt(posOff2))
+        if (binaryOrd.compare(r1, cOff1, r2, cOff2) == 0) {
+          val posOff1 = repr.loadField(r1, o1, 1)
+          val posOff2 = repr.loadField(r2, o2, 1)
+          java.lang.Integer.compare(Region.loadInt(posOff1), Region.loadInt(posOff2))
+        } else {
+          val contig1 = PString.loadString(r1, cOff1)
+          val contig2 = PString.loadString(r2, cOff2)
+          localRGBc.value.compare(contig1, contig2)
+        }
       }
     }
   }
@@ -68,12 +67,12 @@ case class PLocus(rgBc: BroadcastRGBase, override val required: Boolean = false)
     assert(other isOfType this)
     new CodeOrdering {
       type T = Long
+      val contigBin = representation.fundamentalType.fieldType("contig").asInstanceOf[PBinary]
+      val bincmp = contigBin.codeOrdering(mb)
 
       override def compareNonnull(x: Code[Long], y: Code[Long]): Code[Int] = {
-        val cmp = mb.newLocal[Int]
-
-        val c1 = representation.loadField(x, 0)
-        val c2 = representation.loadField(y, 0)
+        val c1 = mb.newLocal[Long]("c1")
+        val c2 = mb.newLocal[Long]("c2")
 
         val s1 = PString.loadString(c1)
         val s2 = PString.loadString(c2)
@@ -81,13 +80,15 @@ case class PLocus(rgBc: BroadcastRGBase, override val required: Boolean = false)
         val p1 = Region.loadInt(representation.fieldOffset(x, 1))
         val p2 = Region.loadInt(representation.fieldOffset(y, 1))
 
+        val cmp = bincmp.compareNonnull(coerce[bincmp.T](c1), coerce[bincmp.T](c2))
         val codeRG = mb.getReferenceGenome(rg.asInstanceOf[ReferenceGenome])
 
         Code(
-          cmp := codeRG.invoke[String, String, Int]("compare", s1, s2),
+          c1 := representation.loadField(x, 0),
+          c2 := representation.loadField(y, 0),
           cmp.ceq(0).mux(
             Code.invokeStatic[java.lang.Integer, Int, Int, Int]("compare", p1, p2),
-            cmp))
+            codeRG.invoke[String, String, Int]("compare", s1, s2)))
       }
     }
   }
@@ -95,6 +96,6 @@ case class PLocus(rgBc: BroadcastRGBase, override val required: Boolean = false)
   val representation: PStruct = PLocus.representation(required)
 
   def contig(region: Code[Region], off: Code[Long]): Code[Long] = representation.loadField(region, off, 0)
-  
-  def position(region: Code[Region], off: Code[Long]): Code[Int] = region.loadInt(representation.loadField(region, off, 1))
+
+  def position(region: Code[Region], off: Code[Long]): Code[Int] = Region.loadInt(representation.loadField(region, off, 1))
 }

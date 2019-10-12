@@ -5,7 +5,7 @@ import is.hail.check.Gen
 import is.hail.expr.ir
 import is.hail.expr.ir._
 import is.hail.expr.types._
-import is.hail.expr.types.physical.PStruct
+import is.hail.expr.types.physical.{PArray, PStruct}
 import is.hail.expr.types.virtual._
 import is.hail.rvd._
 import is.hail.sparkextras.ContextRDD
@@ -35,7 +35,7 @@ object RelationalSpec {
     new TableTypeSerializer +
     new MatrixTypeSerializer
 
-  def read(hc: HailContext, path: String): RelationalSpec = {
+  def readMetadata(hc: HailContext, path: String): JValue = {
     if (!hc.sFS.isDir(path))
       fatal(s"MatrixTable and Table files are directories; path '$path' is not a directory")
     val metadataFile = path + "/metadata.json.gz"
@@ -52,14 +52,30 @@ object RelationalSpec {
 
     if (!FileFormat.version.supports(fileVersion))
       fatal(s"incompatible file format when reading: $path\n  supported version: ${ FileFormat.version }, found $fileVersion")
+    jv
+  }
 
+  def read(hc: HailContext, path: String): RelationalSpec = {
+    val jv = readMetadata(hc, path)
+    val references = readReferences(hc, path, jv)
+
+    references.foreach { rg =>
+      if (!ReferenceGenome.hasReference(rg.name))
+        ReferenceGenome.addReference(rg)
+    }
+
+    jv.extract[RelationalSpec]
+  }
+
+  def readReferences(hc: HailContext, path: String): Array[ReferenceGenome] =
+    readReferences(hc, path, readMetadata(hc, path))
+
+  def readReferences(hc: HailContext, path: String, jv: JValue): Array[ReferenceGenome] = {
     // FIXME this violates the abstraction of the serialization boundary
     val referencesRelPath = (jv \ "references_rel_path": @unchecked) match {
       case JString(p) => p
     }
-    ReferenceGenome.importReferences(hc.sFS, path + "/" + referencesRelPath)
-
-    jv.extract[RelationalSpec]
+    ReferenceGenome.readReferences(hc.sFS, path + "/" + referencesRelPath)
   }
 }
 
@@ -82,8 +98,6 @@ abstract class RelationalSpec {
     }
   }
 
-  def rvdType(path: String): RVDType
-
   def indexed(path: String): Boolean
 
   def version: SemanticVersion = SemanticVersion(file_version)
@@ -100,19 +114,20 @@ case class RVDComponentSpec(rel_path: String) extends ComponentSpec {
   def read(
     hc: HailContext,
     path: String,
-    requestedType: PStruct,
+    requestedType: TStruct,
+    ctx: ExecuteContext,
     newPartitioner: Option[RVDPartitioner] = None,
     filterIntervals: Boolean = false
   ): RVD = {
     val rvdPath = path + "/" + rel_path
     rvdSpec(hc.sFS, path)
-      .read(hc, rvdPath, requestedType, newPartitioner, filterIntervals)
+      .read(hc, rvdPath, requestedType, ctx, newPartitioner, filterIntervals)
   }
 
-  def readLocal(hc: HailContext, path: String, requestedType: PStruct, forEachElement: RegionValue => Unit): Unit = {
+  def readLocalSingleRow(hc: HailContext, path: String, requestedType: TStruct, r: Region): (PStruct, Long) = {
     val rvdPath = path + "/" + rel_path
     rvdSpec(hc.sFS, path)
-      .readLocal(hc, rvdPath, requestedType, forEachElement)
+      .readLocalSingleRow(hc, rvdPath, requestedType, r)
   }
 }
 
@@ -128,12 +143,6 @@ abstract class AbstractMatrixTableSpec extends RelationalSpec {
   def rowsComponent: RVDComponentSpec = getComponent[RVDComponentSpec]("rows")
 
   def entriesComponent: RVDComponentSpec = getComponent[RVDComponentSpec]("entries")
-
-  def rvdType(path: String): RVDType = {
-    val rows = AbstractRVDSpec.read(HailContext.get, path + "/" + rowsComponent.rel_path)
-    val entries = AbstractRVDSpec.read(HailContext.get, path + "/" + entriesComponent.rel_path)
-    RVDType(rows.encodedType.appendKey(MatrixType.entriesIdentifier, entries.encodedType), rows.key)
-  }
 
   def indexed(path: String): Boolean = rowsComponent.indexed(HailContext.get, path)
 
@@ -157,18 +166,21 @@ case class MatrixTableSpec(
 }
 
 object FileFormat {
-  val version: SemanticVersion = SemanticVersion(1, 1, 0)
+  val version: SemanticVersion = SemanticVersion(1, 2, 0)
 }
 
 object MatrixTable {
   def read(hc: HailContext, path: String, dropCols: Boolean = false, dropRows: Boolean = false): MatrixTable =
     new MatrixTable(hc, MatrixIR.read(hc, path, dropCols, dropRows, None))
 
-  def fromLegacy[T](hc: HailContext,
+  def fromLegacy[T](
+    hc: HailContext,
     matrixType: MatrixType,
     globals: Annotation,
     colValues: IndexedSeq[Annotation],
-    rdd: RDD[(Annotation, Iterable[T])]): MatrixTable = {
+    rdd: RDD[(Annotation, Iterable[T])],
+    ctx: ExecuteContext
+  ): MatrixTable = {
 
     val localGType = matrixType.entryType
     val tt = matrixType.canonicalTableType
@@ -180,7 +192,8 @@ object MatrixTable {
     val ds = new MatrixTable(hc, matrixType,
       globals.asInstanceOf[Row],
       colValues.asInstanceOf[IndexedSeq[Row]],
-      RVD.coerce(localRVDType,
+      RVD.coerce(
+        localRVDType,
         ContextRDD.weaken[RVDContext](rdd).cmapPartitions { (ctx, it) =>
           val region = ctx.region
           val rvb = new RegionValueBuilder(region)
@@ -206,7 +219,8 @@ object MatrixTable {
 
             rv
           }
-        }))
+        },
+        ctx))
     ds
   }
 
@@ -216,8 +230,8 @@ object MatrixTable {
     } else
       new MatrixTable(hc, MatrixIR.range(hc, nRows, nCols, nPartitions))
 
-  def gen(hc: HailContext, gen: VSMSubgen): Gen[MatrixTable] =
-    gen.gen(hc)
+  def gen(hc: HailContext, gen: VSMSubgen, ctx: ExecuteContext): Gen[MatrixTable] =
+    gen.gen(hc, ctx)
 
   def fromRowsTable(kt: Table): MatrixTable = {
     val matrixType = MatrixType(
@@ -269,7 +283,7 @@ case class VSMSubgen(
   vGen: (Type) => Gen[Annotation],
   tGen: (TStruct, Annotation) => Gen[Annotation]) {
 
-  def gen(hc: HailContext): Gen[MatrixTable] =
+  def gen(hc: HailContext, ctx: ExecuteContext): Gen[MatrixTable] =
     for {
       size <- Gen.size
       (l, w) <- Gen.squareOfAreaAtMostSize.resize((size / 3 / 10) * 8)
@@ -308,13 +322,15 @@ case class VSMSubgen(
             (finalVASig, vaIns, Array("v"), Array("v"))
         }
 
-      MatrixTable.fromLegacy(hc,
+      MatrixTable.fromLegacy(
+        hc,
         MatrixType(globalSig, Array("s"), finalSASig, rowKey, finalVASig, tSig),
         global,
         sampleIds.zip(saValues).map { case (id, sa) => sIns(sa, id) },
         hc.sc.parallelize(rows.map { case (v, (va, gs)) =>
           (vaIns(va, v), gs)
-        }, nPartitions))
+        }, nPartitions),
+        ctx)
         .distinctByRow()
     }
 }
@@ -466,7 +482,12 @@ class MatrixTable(val hc: HailContext, val ast: MatrixIR) {
 
   def sparkContext: SparkContext = hc.sc
 
-  def same(that: MatrixTable, tolerance: Double = utils.defaultTolerance, absolute: Boolean = false): Boolean = {
+  def same(
+    that: MatrixTable,
+    ctx: ExecuteContext,
+    tolerance: Double = utils.defaultTolerance,
+    absolute: Boolean = false
+  ): Boolean = {
     var metadataSame = true
     if (rowType.deepOptional() != that.rowType.deepOptional()) {
       metadataSame = false
@@ -530,7 +551,7 @@ class MatrixTable(val hc: HailContext, val ast: MatrixIR) {
     val localRKF = rowKeysF
     val localColKeys = colKeys
 
-    val (_, jcrdd) = this.rvd.orderedZipJoin(that.rvd)
+    val (_, jcrdd) = this.rvd.orderedZipJoin(that.rvd, ctx)
 
     metadataSame &&
       jcrdd.mapPartitions { it =>

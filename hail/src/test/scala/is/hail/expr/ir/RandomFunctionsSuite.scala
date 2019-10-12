@@ -54,8 +54,8 @@ class RandomFunctionsSuite extends HailSuite {
 
   implicit val execStrats = ExecStrategy.javaOnly
 
-  val counter = ApplySeeded("counter_seeded", FastSeq(), 0L)
-  val partitionIdx = ApplySeeded("pi_seeded", FastSeq(), 0L)
+  val counter = ApplySeeded("counter_seeded", FastSeq(), 0L, TInt32())
+  val partitionIdx = ApplySeeded("pi_seeded", FastSeq(), 0L, TInt32())
 
   def mapped2(n: Int, npart: Int) = TableMapRows(
     TableRange(n, npart),
@@ -93,11 +93,13 @@ class RandomFunctionsSuite extends HailSuite {
       Interval(Row(10), Row(14), false, true))
     val newPartitioner = mapped.partitioner.copy(rangeBounds=newRangeBounds)
 
-    val repartitioned = mapped.repartition(newPartitioner)
-    val cachedAndRepartitioned = mapped.cache().repartition(newPartitioner)
+    ExecuteContext.scoped { ctx =>
+      val repartitioned = mapped.repartition(newPartitioner, ctx)
+      val cachedAndRepartitioned = mapped.cache().repartition(newPartitioner, ctx)
 
-    assert(mapped.toRows.collect() sameElements repartitioned.toRows.collect())
-    assert(mapped.toRows.collect() sameElements cachedAndRepartitioned.toRows.collect())
+      assert(mapped.toRows.collect() sameElements repartitioned.toRows.collect())
+      assert(mapped.toRows.collect() sameElements cachedAndRepartitioned.toRows.collect())
+    }
   }
 
   @Test def testInterpretIncrementsCorrectly() {

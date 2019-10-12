@@ -19,14 +19,14 @@ class PodThrottler:
 
         async def manager(workers):
             while True:
-                failed, pending = await asyncio.wait(workers, return_when=asyncio.FIRST_COMPLETED)
+                failed, pending = await asyncio.wait(workers, return_when=asyncio.FIRST_EXCEPTION)
                 for fut in failed:
                     err = fut.exception()
                     assert err is not None
                     err_msg = '\n'.join(
                         traceback.format_exception(type(err), err, err.__traceback__))
                     log.error(f'restarting failed worker: {err} {err_msg}')
-                    pending.append(asyncio.ensure_future(self._create_pod()))
+                    pending.add(asyncio.ensure_future(self._create_pod()))
                 workers = pending
 
         asyncio.ensure_future(manager(workers))
@@ -44,7 +44,7 @@ class PodThrottler:
                     return
 
                 await job._create_pod()
-            except:
+            except Exception:  # pylint: disable=broad-except
                 self.semaphore.release()
                 raise
 

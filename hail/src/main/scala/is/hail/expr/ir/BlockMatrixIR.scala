@@ -64,6 +64,8 @@ abstract sealed class BlockMatrixIR extends BaseIR {
     fatal("tried to execute unexecutable IR:\n" + Pretty(this))
 
   def copy(newChildren: IndexedSeq[BaseIR]): BlockMatrixIR
+
+  def blockCostIsLinear: Boolean
 }
 
 case class BlockMatrixRead(reader: BlockMatrixReader) extends BlockMatrixIR {
@@ -79,6 +81,8 @@ case class BlockMatrixRead(reader: BlockMatrixReader) extends BlockMatrixIR {
   override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = {
     reader(HailContext.get)
   }
+
+  val blockCostIsLinear: Boolean = true
 }
 
 object BlockMatrixReader {
@@ -135,6 +139,8 @@ class BlockMatrixLiteral(value: BlockMatrix) extends BlockMatrixIR {
   }
 
   override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = value
+
+  val blockCostIsLinear: Boolean = true // not guaranteed
 }
 
 case class BlockMatrixMap(child: BlockMatrixIR, f: IR) extends BlockMatrixIR {
@@ -153,14 +159,16 @@ case class BlockMatrixMap(child: BlockMatrixIR, f: IR) extends BlockMatrixIR {
     val prev = child.execute(ctx)
     f match {
       case ApplyUnaryPrimOp(Negate(), _) => prev.unary_-()
-      case Apply("abs", _) => prev.abs()
-      case Apply("log", _) => prev.log()
-      case Apply("sqrt", _) => prev.sqrt()
-      case Apply("ceil", _) => prev.ceil()
-      case Apply("floor", _) => prev.floor()
+      case Apply("abs", _, _) => prev.abs()
+      case Apply("log", _, _) => prev.log()
+      case Apply("sqrt", _, _) => prev.sqrt()
+      case Apply("ceil", _, _) => prev.ceil()
+      case Apply("floor", _, _) => prev.floor()
       case _ => fatal(s"Unsupported operation on BlockMatrices: ${Pretty(f)}")
     }
   }
+
+  val blockCostIsLinear: Boolean = child.blockCostIsLinear
 }
 
 case class BlockMatrixMap2(left: BlockMatrixIR, right: BlockMatrixIR, f: IR) extends BlockMatrixIR {
@@ -169,6 +177,8 @@ case class BlockMatrixMap2(left: BlockMatrixIR, right: BlockMatrixIR, f: IR) ext
   override def typ: BlockMatrixType = left.typ
 
   lazy val children: IndexedSeq[BaseIR] = Array(left, right, f)
+
+  val blockCostIsLinear: Boolean = left.blockCostIsLinear && right.blockCostIsLinear
 
   def copy(newChildren: IndexedSeq[BaseIR]): BlockMatrixMap2 = {
     assert(newChildren.length == 3)
@@ -272,7 +282,7 @@ case class BlockMatrixMap2(left: BlockMatrixIR, right: BlockMatrixIR, f: IR) ext
         if (reverse) left.reverseScalarSub(right) else left.scalarSub(right)
       case ApplyBinaryPrimOp(FloatingPointDivide(), _, _) =>
         if (reverse) left.reverseScalarDiv(right) else left.scalarDiv(right)
-      case Apply("**", _) => left.pow(right)
+      case Apply("**", _, _) => left.pow(right)
     }
   }
 
@@ -304,7 +314,7 @@ case class BlockMatrixMap2(left: BlockMatrixIR, right: BlockMatrixIR, f: IR) ext
       case ApplyBinaryPrimOp(Multiply(), _, _) => left.mul(right)
       case ApplyBinaryPrimOp(Subtract(), _, _) => left.sub(right)
       case ApplyBinaryPrimOp(FloatingPointDivide(), _, _) => left.div(right)
-      case Apply("**", _) =>
+      case Apply("**", _, _) =>
         assert(right.nRows == 1 && right.nCols == 1)
         // BlockMatrix does not currently support elem-wise pow and this case would
         // only get hit when left and right are both 1x1
@@ -331,8 +341,27 @@ case class BlockMatrixDot(left: BlockMatrixIR, right: BlockMatrixIR) extends Blo
     BlockMatrixDot(newChildren(0).asInstanceOf[BlockMatrixIR], newChildren(1).asInstanceOf[BlockMatrixIR])
   }
 
+  val blockCostIsLinear: Boolean = false
+
   override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = {
-    left.execute(ctx).dot(right.execute(ctx))
+    var leftBM = left.execute(ctx)
+    var rightBM = right.execute(ctx)
+    val hc = HailContext.get
+    if (!left.blockCostIsLinear) {
+      val path = hc.getTemporaryFile(suffix = Some("bm"))
+      info(s"BlockMatrix multiply: writing left input with ${ leftBM.nRows } rows and ${ leftBM.nCols } cols " +
+        s"(${ leftBM.gp.nBlocks } blocks of size ${ leftBM.blockSize }) to temporary file $path")
+      leftBM.write(hc.sFS, path)
+      leftBM = BlockMatrixNativeReader(path).apply(hc)
+    }
+    if (!right.blockCostIsLinear) {
+      val path = hc.getTemporaryFile(suffix = Some("bm"))
+      info(s"BlockMatrix multiply: writing right input with ${ rightBM.nRows } rows and ${ rightBM.nCols } cols " +
+        s"(${ rightBM.gp.nBlocks } blocks of size ${ rightBM.blockSize }) to temporary file $path")
+      rightBM.write(hc.sFS, path)
+      rightBM = BlockMatrixNativeReader(path).apply(hc)
+    }
+    leftBM.dot(rightBM)
   }
 }
 
@@ -341,6 +370,8 @@ case class BlockMatrixBroadcast(
   inIndexExpr: IndexedSeq[Int],
   shape: IndexedSeq[Long],
   blockSize: Int) extends BlockMatrixIR {
+
+  val blockCostIsLinear: Boolean = child.blockCostIsLinear
 
   assert(shape.length == 2)
   assert(inIndexExpr.length <= 2 && inIndexExpr.forall(x => x == 0 || x == 1))
@@ -406,6 +437,8 @@ case class BlockMatrixAgg(
   child: BlockMatrixIR,
   outIndexExpr: IndexedSeq[Int]) extends BlockMatrixIR {
 
+  val blockCostIsLinear: Boolean = child.blockCostIsLinear
+
   assert(outIndexExpr.length < 2)
 
   override def typ: BlockMatrixType = {
@@ -438,6 +471,8 @@ case class BlockMatrixFilter(
   indices: Array[Array[Long]]) extends BlockMatrixIR {
 
   assert(indices.length == 2)
+
+  val blockCostIsLinear: Boolean = child.blockCostIsLinear
 
   override def typ: BlockMatrixType = {
     val matrixShape = indices.zipWithIndex.map({ case (dim, i) =>
@@ -472,6 +507,8 @@ case class BlockMatrixFilter(
 case class BlockMatrixSlice(child: BlockMatrixIR, slices: IndexedSeq[IndexedSeq[Long]]) extends BlockMatrixIR {
   assert(slices.length == 2)
   assert(slices.forall(_.length == 3))
+
+  val blockCostIsLinear: Boolean = child.blockCostIsLinear
 
   override def typ: BlockMatrixType = {
     val matrixShape: IndexedSeq[Long] = slices.map { s =>
@@ -519,6 +556,8 @@ case class ValueToBlockMatrix(
 
   assert(shape.length == 2)
 
+  val blockCostIsLinear: Boolean = true
+
   override def typ: BlockMatrixType = {
     val (tensorShape, isRowVector) = BlockMatrixIR.matrixShapeToTensorShape(shape(0), shape(1))
     BlockMatrixType(elementType(child.typ), tensorShape, isRowVector, blockSize)
@@ -553,12 +592,14 @@ case class ValueToBlockMatrix(
 }
 
 case class BlockMatrixRandom(
-  seed: Int,
+  seed: Long,
   gaussian: Boolean,
   shape: IndexedSeq[Long],
   blockSize: Int) extends BlockMatrixIR {
 
   assert(shape.length == 2)
+
+  val blockCostIsLinear: Boolean = true
 
   override def typ: BlockMatrixType = {
     val (tensorShape, isRowVector) = BlockMatrixIR.matrixShapeToTensorShape(shape(0), shape(1))
@@ -581,6 +622,8 @@ case class RelationalLetBlockMatrix(name: String, value: IR, body: BlockMatrixIR
   def typ: BlockMatrixType = body.typ
 
   def children: IndexedSeq[BaseIR] = Array(value, body)
+
+  val blockCostIsLinear: Boolean = body.blockCostIsLinear
 
   def copy(newChildren: IndexedSeq[BaseIR]): BlockMatrixIR = {
     val IndexedSeq(newValue: IR, newBody: BlockMatrixIR) = newChildren

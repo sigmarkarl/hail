@@ -4,7 +4,6 @@ import is.hail.HailSuite
 import is.hail.TestUtils._
 import is.hail.expr.ir.TestUtils._
 import is.hail.expr.types.virtual._
-import is.hail.io.CodecSpec
 import is.hail.table.Table
 import is.hail.utils._
 import is.hail.variant.MatrixTable
@@ -230,7 +229,7 @@ class MatrixIRSuite extends HailSuite {
 
   @Test def testMatrixFiltersWorkWithRandomness() {
     val range = MatrixTable.range(hc, 20, 20, Some(4)).ast
-    val rand = ApplySeeded("rand_bool", FastIndexedSeq(0.5), seed=0)
+    val rand = ApplySeeded("rand_bool", FastIndexedSeq(0.5), seed=0, TBoolean())
 
     val cols = Interpret(MatrixFilterCols(range, rand), ctx, optimize = true).toMatrixValue(range.typ.colKey).nCols
     val rows = Interpret(MatrixFilterRows(range, rand), ctx, optimize = true).rvd.count()
@@ -255,7 +254,7 @@ class MatrixIRSuite extends HailSuite {
     params.foreach { case (n, strat) =>
       val rvd = Interpret(MatrixRepartition(range, n, strat), ctx, optimize = false).rvd
       assert(rvd.getNumPartitions == n, n -> strat)
-      val values = rvd.collect(CodecSpec.default).map(r => r.getAs[Int](0))
+      val values = rvd.collect().map(r => r.getAs[Int](0))
       assert(values.isSorted && values.length == 11, n -> strat)
     }
   }
@@ -265,7 +264,9 @@ class MatrixIRSuite extends HailSuite {
     val path = tmpDir.createLocalTempFile(extension = "mt")
     Interpret[Unit](ctx, MatrixWrite(range.ast, MatrixNativeWriter(path)))
     val read = MatrixTable.read(hc, path)
-    assert(read.same(range))
+    ExecuteContext.scoped { ctx =>
+      assert(read.same(range, ctx))
+    }
   }
 
   @Test def testMatrixVCFWrite() {
@@ -281,13 +282,17 @@ class MatrixIRSuite extends HailSuite {
     Interpret[Unit](ctx, MatrixMultiWrite(ranges.map(_.ast), MatrixNativeMultiWriter(path)))
     val read0 = MatrixTable.read(hc, path + "0.mt")
     val read1 = MatrixTable.read(hc, path + "1.mt")
-    assert(ranges(0).same(read0))
-    assert(ranges(1).same(read1))
+    ExecuteContext.scoped { ctx =>
+      assert(ranges(0).same(read0, ctx))
+      assert(ranges(1).same(read1, ctx))
+    }
 
     val pathRef = tmpDir.createLocalTempFile(extension = "mt")
     Interpret[Unit](ctx, MatrixWrite(ranges(1).ast, MatrixNativeWriter(path)))
     val readRef = MatrixTable.read(hc, path)
-    assert(readRef.same(read1))
+    ExecuteContext.scoped { ctx =>
+      assert(readRef.same(read1, ctx))
+    }
   }
 
   @Test def testMatrixMultiWriteDifferentTypesFails() {

@@ -121,7 +121,6 @@ class ReferenceGenome(object):
         self._sequence_files = None
         self._liftovers = dict()
 
-
     def __str__(self):
         return self._config['name']
 
@@ -290,7 +289,7 @@ class ReferenceGenome(object):
         --------
 
         >>> my_rg = hl.ReferenceGenome("new_reference", ["x", "y", "z"], {"x": 500, "y": 300, "z": 200})
-        >>> my_rg.write("output/new_reference.json")
+        >>> my_rg.write(f"output/new_reference.json")
 
         Notes
         -----
@@ -495,7 +494,6 @@ class ReferenceGenome(object):
         if dest_reference_genome.name in self._liftovers:
             raise KeyError(f"Liftover already exists from {self.name} to {dest_reference_genome.name}.")
         self._liftovers[dest_reference_genome.name] = chain_file
-        hl.ir.register_liftover_functions(self.name, dest_reference_genome.name)
 
 
 rg_type.set(ReferenceGenome)

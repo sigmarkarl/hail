@@ -11,12 +11,15 @@ BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
 URL := $(shell git config --get remote.origin.url)
 SPARK_VERSION := 2.4.0
 HAIL_MAJOR_MINOR_VERSION := 0.2
-HAIL_PIP_VERSION := $(HAIL_MAJOR_MINOR_VERSION).20
+HAIL_PATCH_VERSION := 24
+HAIL_PIP_VERSION := $(HAIL_MAJOR_MINOR_VERSION).$(HAIL_PATCH_VERSION)
 
 $(eval $(call ENV_VAR,REVISION))
 $(eval $(call ENV_VAR,SHORT_REVISION))
 $(eval $(call ENV_VAR,BRANCH))
 $(eval $(call ENV_VAR,URL))
+$(eval $(call ENV_VAR,SPARK_VERSION))
+$(eval $(call ENV_VAR,HAIL_PIP_VERSION))
 
 HAIL_PYTHON3 ?= python3
 PIP ?= $(HAIL_PYTHON3) -m pip
@@ -38,19 +41,31 @@ WHEEL := build/deploy/dist/hail-$(HAIL_PIP_VERSION)-py3-none-any.whl
 .PHONY: shadowJar
 shadowJar: $(SHADOW_JAR)
 
-$(SHADOW_JAR): $(SCALA_BUILD_INFO) $(JAR_SOURCES) native-lib
-	./gradlew shadowJar
+GRADLE_ARGS += -Dspark.version=$(SPARK_VERSION) -Dpy4j.version$(PY4J_VERSION)
 
-$(SHADOW_TEST_JAR): $(SCALA_BUILD_INFO) $(JAR_SOURCES) $(JAR_TEST_SOURCES) native-lib
-	./gradlew shadowTestJar
+ifdef HAIL_COMPILE_NATIVES
+$(SHADOW_JAR): native-lib-prebuilt
+endif
+$(SHADOW_JAR): $(SCALA_BUILD_INFO) $(JAR_SOURCES)
+	./gradlew shadowJar $(GRADLE_ARGS)
+
+ifdef HAIL_COMPILE_NATIVES
+$(SHADOW_TEST_JAR): native-lib-prebuilt
+endif
+$(SHADOW_TEST_JAR): $(SCALA_BUILD_INFO) $(JAR_SOURCES) $(JAR_TEST_SOURCES)
+	./gradlew shadowTestJar $(GRADLE_ARGS)
 
 jars: $(SHADOW_JAR) $(SHADOW_TEST_JAR)
 
 .PHONY: jvm-test
-jvm-test: $(SCALA_BUILD_INFO) $(JAR_SOURCES) $(JAR_TEST_SOURCES) native-lib
-	+./pgradle test $(GRADLE_TEST_ARGS)
+ifdef HAIL_COMPILE_NATIVES
+jvm-test: native-lib-prebuilt
+endif
+jvm-test: $(SCALA_BUILD_INFO) $(JAR_SOURCES) $(JAR_TEST_SOURCES)
+	+./pgradle test $(GRADLE_ARGS) $(GRADLE_TEST_ARGS)
 
 src/main/resources/build-info.properties: env/REVISION env/SHORT_REVISION env/BRANCH env/URL
+src/main/resources/build-info.properties: env/SPARK_VERSION env/HAIL_PIP_VERSION
 src/main/resources/build-info.properties: Makefile
 	echo '[Build Metadata]' > $@
 	echo 'user=$(USER)' >> $@
@@ -64,10 +79,10 @@ src/main/resources/build-info.properties: Makefile
 .PHONY: python-version-info
 python-version-info: $(PYTHON_VERSION_INFO)
 
-python/hail/hail_version: Makefile env/SHORT_REVISION
+python/hail/hail_version: env/SHORT_REVISION env/HAIL_PIP_VERSION
 	echo $(HAIL_PIP_VERSION)-$(SHORT_REVISION) > $@
 
-python/hail/hail_pip_version: Makefile
+python/hail/hail_pip_version: env/HAIL_PIP_VERSION
 	echo $(HAIL_PIP_VERSION) > $@
 
 python/hailtop/hailctl/hail_version: python/hail/hail_version
@@ -83,25 +98,25 @@ python/hail/hail-all-spark.jar: $(SHADOW_JAR)
 pytest: $(PYTHON_VERSION_INFO) $(SHADOW_JAR) $(INIT_SCRIPTS)
 pytest: python/README.md python/hail/hail-all-spark.jar
 	cd python && $(HAIL_PYTHON3) setup.py pytest \
-     --addopts '-v \
+     --addopts "-v \
      --color=no \
      --instafail \
      -r A \
      --self-contained-html \
-     --html=build/reports/pytest.html \
+     --html=../build/reports/pytest.html \
      --noconftest \
-     $(PYTEST_ARGS)'
+     $(PYTEST_ARGS)"
 
 .PHONY: doctest
 doctest: $(PYTHON_VERSION_INFO) $(SHADOW_JAR) $(INIT_SCRIPTS)
 doctest: python/README.md python/hail/hail-all-spark.jar
 	cd python && $(HAIL_PYTHON3) setup.py pytest \
-	  --addopts '-v \
+	  --addopts "-v \
     --color=no \
     --instafail \
     -r A \
     --self-contained-html \
-    --html=build/reports/pytest-doctest.html \
+    --html=../build/reports/pytest-doctest.html \
     --doctest-modules \
     --doctest-glob='*.rst' \
     --ignore=setup.py \
@@ -113,7 +128,7 @@ doctest: python/README.md python/hail/hail-all-spark.jar
     --ignore=hail/docs/doctest_write_data.py \
     --ignore=hail/docs/getting_started_developing.rst \
     --ignore=hail/docs/getting_started.rst \
-    $(PYTEST_ARGS)'
+    $(PYTEST_ARGS)"
 
 .PHONY: wheel
 wheel: $(WHEEL)
@@ -125,7 +140,9 @@ $(WHEEL): $(PYTHON_VERSION_INFO) $(SHADOW_JAR) $(INIT_SCRIPTS) $(PY_FILES)
 	cp ../README.md build/deploy/
 	rsync -rv \
 	    --exclude '__pycache__/' \
+	    --exclude 'benchmark_hail/' \
 	    --exclude 'docs/' \
+	    --exclude 'dist/' \
 	    --exclude 'test/' \
 	    --exclude '*.log' \
 	    python/ build/deploy/
@@ -176,6 +193,12 @@ install: $(WHEEL)
 	-$(PIP) uninstall -y hail
 	$(PIP) install $(WHEEL)
 
+.PHONY: install-on-cluster
+install-on-cluster: $(WHEEL)
+	sed '/^pyspark/d' python/requirements.txt | xargs $(PIP) install -U
+	-$(PIP) uninstall -y hail
+	$(PIP) install $(WHEEL) --no-deps
+
 .PHONY: install-hailctl
 install-hailctl: install upload-artifacts
 
@@ -213,10 +236,13 @@ TAG_EXISTS = $(shell git ls-remote --exit-code --tags origin $(HAIL_PIP_VERSION)
 check-tag:
 	if [ -z "$(TAG_EXISTS)" ]; then echo "tag $(HAIL_PIP_VERSION) already exists"; exit 1; fi
 
+GITHUB_RELEASE_URL = https://github.com/hail-is/hail/releases/new
 .PHONY: tag
 tag: check-tag pypi-deploy
 	git tag $(HAIL_PIP_VERSION) -m "Hail version $(HAIL_PIP_VERSION)"
 	git push https://github.com/hail-is/hail.git $(HAIL_PIP_VERSION)
+	@echo Please make a release: $(GITHUB_RELEASE_URL)
+	if [ `uname` == "Darwin" ]; then open $(GITHUB_RELEASE_URL); fi
 
 docs_location := gs://hail-common/builds/0.2/docs/hail-0.2-docs-$(REVISION).tar.gz
 local_sha_location := build/deploy/latest-hash-spark-$(SPARK_VERSION).txt
@@ -236,29 +262,47 @@ deploy: tag
 install-deps:
 	$(PIP) install -U -r python/requirements.txt -r python/dev-requirements.txt
 
-clean: clean-env clean-docs
-	./gradlew clean
-	rm -rf build/
-	rm -rf python/hail/hail-all-spark.jar
-	rm -rf python/README.md
+.PHONY: benchmark
+benchmark: install
+	HAIL_WHEEL=../hail/$(WHEEL) HAIL_VERSION=$(HAIL_PIP_VERSION) $(MAKE) -C ../benchmark benchmark
+
+.PHONY: install-benchmark
+install-benchmark:
+	HAIL_WHEEL=DUMMY HAIL_VERSION=$(HAIL_PIP_VERSION) $(MAKE) -C ../benchmark install
 
 .PHONY: clean-docs
 clean-docs:
 	$(MAKE) -C www clean
 
+HAIL_CACHE_VERSION = $(shell cat python/hail/hail_version)
+
 .PHONY: docs
-docs: www install $(PYTHON_VERSION_INFO)
+docs: install $(PYTHON_VERSION_INFO)
 	mkdir -p build
-	cp www build/www
+	rm -rf build/www
+	cp -R www build/www
+	rm -rf build/docs
 	mkdir -p build/docs
-	cp -R python/hail/docs build/docs
+	cp -R python/hail/docs build/
+	cp python/hail/hail_version build/
 	sed -E "s/\(hail\#([0-9]+)\)/(\[#\1](https:\/\/github.com\/hail-is\/hail\/pull\/\1))/g" \
     < build/docs/change_log.md \
     | pandoc -o build/docs/change_log.rst
-	$(MAKE) -C www
+	$(MAKE) -C build/www
+	rm build/www/*.md
 	$(MAKE) SPHINXOPTS='-tchecktutorial' -C build/docs BUILDDIR=_build clean html
 	mkdir -p build/www/docs
-	mv build/docs/_build/html build/www/docs/0.2
+	rm -rf build/www/docs/$(HAIL_MAJOR_MINOR_VERSION)
+	mv build/docs/_build/html build/www/docs/$(HAIL_MAJOR_MINOR_VERSION)
+	find ./build/www -iname *.html -type f -exec sed -i '' -e "s/\.css/\.css\?v\=$(HAIL_CACHE_VERSION)/" {} +;
+	@echo Built docs: build/www/docs/$(HAIL_MAJOR_MINOR_VERSION)/index.html
+
+.PHONY: upload-docs
+upload-docs: docs
+	cd build && tar czf www.tar.gz www
+	gsutil -m cp build/www.tar.gz $(docs_location)
+	gsutil -m retention temp set $(docs_location)
+	gsutil -m acl set public-read $(docs_location)
 
 .PHONY: test
 test: pytest jvm-test doctest tutorial-test
@@ -266,24 +310,27 @@ test: pytest jvm-test doctest tutorial-test
 .PHONY: tutorial-test
 docs-no-test: install $(PYTHON_VERSION_INFO)
 	mkdir -p build
-	cp www build/www
+	rm -rf build/www
+	cp -R www build/www
+	rm -rf build/docs
 	mkdir -p build/docs
-	cp -R python/hail/docs build/docs
+	cp -R python/hail/docs build/
+	cp python/hail/hail_version build/
 	sed -E "s/\(hail\#([0-9]+)\)/(\[#\1](https:\/\/github.com\/hail-is\/hail\/pull\/\1))/g" \
     < build/docs/change_log.md \
     | pandoc -o build/docs/change_log.rst
-	$(MAKE) -C www
+	$(MAKE) -C build/www
+	rm build/www/*.md
 	$(MAKE) -C build/docs BUILDDIR=_build clean html
 	mkdir -p build/www/docs
+	rm -rf build/www/docs/$(HAIL_MAJOR_MINOR_VERSION)
 	mv build/docs/_build/html build/www/docs/$(HAIL_MAJOR_MINOR_VERSION)
+	find ./build/www -iname *.html -type f -exec sed -i '' -e "s/\.css/\.css\?v\=$(HAIL_CACHE_VERSION)/" {} +;
+	@echo Built docs: build/www/docs/$(HAIL_MAJOR_MINOR_VERSION)/index.html
 
 .PHONY: native-lib native-lib-test native-lib-clean native-lib-prebuilt native-lib-reset-prebuilt
 native-lib:
-ifdef HAIL_COMPILE_NATIVES
-	$(MAKE) -C src/main/c prebuilt
-else
 	$(MAKE) -C src/main/c
-endif
 native-lib-test:
 	$(MAKE) -C src/main/c test
 native-lib-clean:
@@ -292,3 +339,11 @@ native-lib-prebuilt:
 	$(MAKE) -C src/main/c prebuilt
 native-lib-reset-prebuilt:
 	$(MAKE) -C src/main/c reset-prebuilt
+
+clean: clean-env clean-docs native-lib-clean
+	./gradlew clean $(GRADLE_ARGS)
+	rm -rf build/
+	rm -rf python/hail/hail-all-spark.jar
+	rm -rf python/README.md
+	rm -rf $(SCALA_BUILD_INFO)
+	rm -rf $(PYTHON_VERSION_INFO)

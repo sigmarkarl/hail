@@ -2,7 +2,9 @@ package is.hail.io
 
 import is.hail.HailSuite
 import is.hail.annotations.Annotation
+import is.hail.expr.types.physical.{PInt32, PString, PStruct, PType}
 import is.hail.expr.types.virtual._
+import is.hail.io.fs.FS
 import is.hail.io.index._
 import is.hail.utils._
 import org.apache.spark.sql.Row
@@ -33,18 +35,39 @@ class IndexSuite extends HailSuite {
   def writeIndex(file: String,
     data: Array[Any],
     annotations: Array[Annotation],
-    keyType: Type,
-    annotationType: Type,
+    keyType: PType,
+    annotationType: PType,
     branchingFactor: Int,
     attributes: Map[String, Any]) {
-    val codecSpec = CodecSpec.default
-    val makeLeafEncoder = codecSpec.buildEncoder(LeafNodeBuilder.typ(keyType, annotationType).physicalType)
-    val makeInternalEncoder = codecSpec.buildEncoder(InternalNodeBuilder.typ(keyType, annotationType).physicalType)
-    val iw = new IndexWriter(hc.sFS, file, keyType, annotationType, makeLeafEncoder, makeInternalEncoder, branchingFactor, attributes)
+    val bufferSpec = BufferSpec.default
+
+    val leafType = LeafNodeBuilder.typ(keyType, annotationType)
+    val leafCodec = TypedCodecSpec(leafType, bufferSpec)
+    val leafEnc = leafCodec.buildEncoder(leafType)
+
+    val intType = InternalNodeBuilder.typ(keyType, annotationType)
+    val intCodec = TypedCodecSpec(intType, bufferSpec)
+    val intEnc = intCodec.buildEncoder(intType)
+
+    val iw = new IndexWriter(hc.sFS, file, keyType, annotationType, leafEnc, intEnc, branchingFactor, attributes)
     data.zip(annotations).zipWithIndex.foreach { case ((s, a), offset) =>
       iw += (s, offset, a)
     }
     iw.close()
+  }
+
+  def indexReader(fs: FS, file: String, annotationType: Type, keyPType: PType = PString()): IndexReader = {
+    val annotationPType = PType.canonical(annotationType)
+    val leafPType = LeafNodeBuilder.typ(keyPType, annotationPType)
+    val intPType = InternalNodeBuilder.typ(keyPType, annotationPType)
+    val leafSpec = TypedCodecSpec(leafPType, BufferSpec.default)
+    val intSpec = TypedCodecSpec(intPType, BufferSpec.default)
+
+    val (lrt, leafDec) = leafSpec.buildDecoder(leafPType.virtualType)
+    assert(lrt == leafPType)
+    val (irt, intDec) = intSpec.buildDecoder(intPType.virtualType)
+    assert(irt == intPType)
+    IndexReaderBuilder.withDecoders(leafDec, intDec, keyPType.virtualType, annotationType, leafPType, intPType).apply(fs, file, 8)
   }
 
   def writeIndex(file: String,
@@ -53,7 +76,7 @@ class IndexSuite extends HailSuite {
     annotationType: Type,
     branchingFactor: Int = 2,
     attributes: Map[String, Any] = Map.empty[String, Any]): Unit =
-    writeIndex(file, data.map(_.asInstanceOf[Any]), annotations, TString(), annotationType, branchingFactor, attributes)
+    writeIndex(file, data.map(_.asInstanceOf[Any]), annotations, PString(), PType.canonical(annotationType), branchingFactor, attributes)
 
   @Test(dataProvider = "elements")
   def writeReadGivesSameAsInput(data: Array[String]) {
@@ -71,7 +94,7 @@ class IndexSuite extends HailSuite {
         attributes)
       assert(hc.sFS.getFileSize(file) != 0)
 
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct("a" -> TBoolean()))
 
       assert(index.attributes == attributes)
 
@@ -90,7 +113,7 @@ class IndexSuite extends HailSuite {
     val file = tmpDir.createTempFile("empty", "idx")
     writeIndex(file, Array.empty[String], Array.empty[Annotation], TStruct("a" -> TBoolean()), 2)
     assert(hc.sFS.getFileSize(file) != 0)
-    val index = IndexReader(hc.sFS, file)
+    val index = indexReader(hc.sFS, file, TStruct("a" -> TBoolean()))
     intercept[IllegalArgumentException](index.queryByIndex(0L))
     assert(index.queryByKey("moo").isEmpty)
     assert(index.queryByInterval("bear", "cat", includesStart = true, includesEnd = true).isEmpty)
@@ -101,7 +124,7 @@ class IndexSuite extends HailSuite {
     for (branchingFactor <- 2 to 5) {
       val file = tmpDir.createTempFile("lowerBound", "idx")
       writeIndex(file, stringsWithDups, stringsWithDups.indices.map(i => Row()).toArray, TStruct(required = true), branchingFactor)
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct(required = true))
 
       val n = stringsWithDups.length
       val f = { i: Int => stringsWithDups(i) }
@@ -123,7 +146,7 @@ class IndexSuite extends HailSuite {
     for (branchingFactor <- 2 to 5) {
       val file = tmpDir.createTempFile("upperBound", "idx")
       writeIndex(file, stringsWithDups, stringsWithDups.indices.map(i => Row()).toArray, TStruct(required = true), branchingFactor = 2)
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct(required = true))
 
       val n = stringsWithDups.length
       val f = { i: Int => stringsWithDups(i) }
@@ -147,7 +170,7 @@ class IndexSuite extends HailSuite {
       val file = tmpDir.createTempFile("range", "idx")
       val a = { (i: Int) => Row() }
       writeIndex(file, stringsWithDups, stringsWithDups.indices.map(a).toArray, TStruct(required = true), branchingFactor)
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct(required = true))
 
       val bounds = stringsWithDups.indices.toArray.combinations(2).toArray
       bounds.foreach(b => index.iterator(b(0), b(1)).toArray sameElements leafsWithDups.slice(b(0), b(1)))
@@ -160,7 +183,7 @@ class IndexSuite extends HailSuite {
     for (branchingFactor <- 2 to 5) {
       val file = tmpDir.createTempFile("key", "idx")
       writeIndex(file, stringsWithDups, stringsWithDups.indices.map(i => Row()).toArray, TStruct(required = true), branchingFactor)
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct(required = true))
 
       val stringsNotInList = Array("aardvark", "crow", "elk", "otter", "zoo")
       assert(stringsNotInList.forall(s => index.queryByKey(s).isEmpty))
@@ -174,7 +197,7 @@ class IndexSuite extends HailSuite {
     for (branchingFactor <- 2 to 5) {
       val file = tmpDir.createTempFile("interval", "idx")
       writeIndex(file, stringsWithDups, stringsWithDups.indices.map(i => Row()).toArray, TStruct(required = true), branchingFactor)
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct(required = true))
 
       // intervals with endpoint in list
       assert(index.queryByInterval("bear", "bear", includesStart = true, includesEnd = true).toFastIndexedSeq == index.iterator(0, 2).toFastIndexedSeq)
@@ -238,19 +261,19 @@ class IndexSuite extends HailSuite {
 
   @Test def testIntervalIteratorWorksWithGeneralEndpoints() {
     for (branchingFactor <- 2 to 5) {
-      val keyType = TStruct("a" -> TString(), "b" -> TInt32())
+      val keyType = PStruct("a" -> PString(), "b" -> PInt32())
       val file = tmpDir.createTempFile("from", "idx")
       writeIndex(file,
         stringsWithDups.zipWithIndex.map { case (s, i) => Row(s, i) },
         stringsWithDups.indices.map(i => Row()).toArray,
         keyType,
-        TStruct(required = true),
+        +PStruct(),
         branchingFactor,
         Map.empty)
 
       val leafChildren = stringsWithDups.zipWithIndex.map { case (s, i) => LeafChild(Row(s, i), i, Row()) }.toFastIndexedSeq
 
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct(required = true), keyPType = PStruct("a" -> PString(), "b" -> PInt32()))
       assert(index.queryByInterval(Row("cat", 3), Row("cat", 5), includesStart = true, includesEnd = false).toFastIndexedSeq ==
         leafChildren.slice(3, 5))
       assert(index.queryByInterval(Row("cat"), Row("cat", 5), includesStart = true, includesEnd = false).toFastIndexedSeq ==
@@ -268,7 +291,7 @@ class IndexSuite extends HailSuite {
     for (branchingFactor <- 2 to 5) {
       val file = tmpDir.createTempFile("from", "idx")
       writeIndex(file, stringsWithDups, stringsWithDups.indices.map(i => Row()).toArray, TStruct(required = true), branchingFactor)
-      val index = IndexReader(hc.sFS, file)
+      val index = indexReader(hc.sFS, file, TStruct(required = true))
 
       val uniqueStrings = stringsWithDups.distinct ++ Array("aardvark", "crow", "elk", "otter", "zoo")
       uniqueStrings.foreach { s =>

@@ -813,8 +813,8 @@ def linear_mixed_model(y,
     Initialize a model using three fixed effects (including intercept) and
     genetic marker random effects:
 
-    >>> marker_ds = dataset.filter_rows(dataset.use_as_marker)
-    >>> model, _ = hl.linear_mixed_model(
+    >>> marker_ds = dataset.filter_rows(dataset.use_as_marker) # doctest: +SKIP
+    >>> model, _ = hl.linear_mixed_model( # doctest: +SKIP
     ...     y=marker_ds.pheno.height,
     ...     x=[1, marker_ds.pheno.age, marker_ds.pheno.is_female],
     ...     z_t=marker_ds.GT.n_alt_alleles(),
@@ -822,8 +822,8 @@ def linear_mixed_model(y,
 
     Fit the model and examine :math:`h^2`:
 
-    >>> model.fit()
-    >>> model.h_sq
+    >>> model.fit()  # doctest: +SKIP
+    >>> model.h_sq  # doctest: +SKIP
 
     Sanity-check the normalized likelihood of :math:`h^2` over the percentile
     grid:
@@ -833,7 +833,7 @@ def linear_mixed_model(y,
 
     For this value of :math:`h^2`, test each variant for association:
 
-    >>> result_table = hl.linear_mixed_regression_rows(dataset.GT.n_alt_alleles(), model)
+    >>> result_table = hl.linear_mixed_regression_rows(dataset.GT.n_alt_alleles(), model)  # doctest: +SKIP
 
     Alternatively, one can define a full-rank model using a pre-computed kinship
     matrix :math:`K` in ndarray form. When :math:`K` is the realized
@@ -841,8 +841,8 @@ def linear_mixed_model(y,
     as above with :math:`P` written as a block matrix but returned as an
     ndarray:
 
-    >>> rrm = hl.realized_relationship_matrix(marker_ds.GT).to_numpy()
-    >>> model, p = hl.linear_mixed_model(
+    >>> rrm = hl.realized_relationship_matrix(marker_ds.GT).to_numpy()  # doctest: +SKIP
+    >>> model, p = hl.linear_mixed_model(  # doctest: +SKIP
     ...     y=dataset.pheno.height,
     ...     x=[1, dataset.pheno.age, dataset.pheno.is_female],
     ...     k=rrm,
@@ -1150,7 +1150,6 @@ def skat(key_expr, weight_expr, y, x, covariates, logistic=False,
     Test each gene for association using the linear sequence kernel association
     test:
 
-    >>> burden_ds = hl.read_matrix_table('data/example_burden.vds')
     >>> skat_table = hl.skat(key_expr=burden_ds.gene,
     ...                      weight_expr=burden_ds.weight,
     ...                      y=burden_ds.burden.pheno,
@@ -1878,8 +1877,9 @@ def pc_relate(call_expr, min_individual_maf, *, k=None, scores_expr=None,
 
 @typecheck(ds=oneof(Table, MatrixTable),
            keep_star=bool,
-           left_aligned=bool)
-def split_multi(ds, keep_star=False, left_aligned=False):
+           left_aligned=bool,
+           permit_shuffle=bool)
+def split_multi(ds, keep_star=False, left_aligned=False, *, permit_shuffle=False):
     """Split multiallelic variants.
 
     The resulting dataset will be keyed by the split locus and alleles.
@@ -1944,6 +1944,10 @@ def split_multi(ds, keep_star=False, left_aligned=False):
         If ``True``, variants are assumed to be left aligned and have unique
         loci. This avoids a shuffle. If the assumption is violated, an error
         is generated.
+    permit_shuffle : :obj:`bool`
+        If ``True``, permit a data shuffle to sort out-of-order split results.
+        This will only be required if input data has duplicate loci, one of
+        which contains more than one alternate allele.
 
     Returns
     -------
@@ -2014,7 +2018,7 @@ def split_multi(ds, keep_star=False, left_aligned=False):
                         .or_error("Found non-left-aligned variant in split_multi"))
             return hl.bind(error_on_moved,
                            hl.min_rep(old_row.locus, [old_row.alleles[0], old_row.alleles[i]]))
-        return split_rows(hl.sorted(kept_alleles.map(make_struct)), False)
+        return split_rows(hl.sorted(kept_alleles.map(make_struct)), permit_shuffle)
     else:
         def make_struct(i, cond):
             def struct_or_empty(v):
@@ -2027,7 +2031,7 @@ def split_multi(ds, keep_star=False, left_aligned=False):
         def make_array(cond):
             return hl.sorted(kept_alleles.flatmap(lambda i: make_struct(i, cond)))
 
-        left = split_rows(make_array(lambda locus: locus == ds['locus']), False)
+        left = split_rows(make_array(lambda locus: locus == ds['locus']), permit_shuffle)
         moved = split_rows(make_array(lambda locus: locus != ds['locus']), True)
     return left.union(moved) if is_table else left.union_rows(moved, _check_cols=False)
 
@@ -2035,8 +2039,9 @@ def split_multi(ds, keep_star=False, left_aligned=False):
 @typecheck(ds=oneof(Table, MatrixTable),
            keep_star=bool,
            left_aligned=bool,
-           vep_root=str)
-def split_multi_hts(ds, keep_star=False, left_aligned=False, vep_root='vep'):
+           vep_root=str,
+           permit_shuffle=bool)
+def split_multi_hts(ds, keep_star=False, left_aligned=False, vep_root='vep', *, permit_shuffle=False):
     """Split multiallelic variants for datasets that contain one or more fields
     from a standard high-throughput sequencing entry schema.
 
@@ -2140,7 +2145,7 @@ def split_multi_hts(ds, keep_star=False, left_aligned=False, vep_root='vep'):
     values. Here is an example:
 
     >>> split_ds = hl.split_multi_hts(dataset)
-    >>> split_ds = split_ds.annotate_rows(info = Struct(AC=split_ds.info.AC[split_ds.a_index - 1],
+    >>> split_ds = split_ds.annotate_rows(info = hl.struct(AC=split_ds.info.AC[split_ds.a_index - 1],
     ...                                   **split_ds.info)) # doctest: +SKIP
     >>> hl.export_vcf(split_ds, 'output/export.vcf') # doctest: +SKIP
 
@@ -2178,6 +2183,10 @@ def split_multi_hts(ds, keep_star=False, left_aligned=False, vep_root='vep'):
         (intergenic_consequences, motif_feature_consequences,
         regulatory_feature_consequences, and transcript_consequences)
         will be split properly (i.e. a_index corresponding to the VEP allele_num).
+    permit_shuffle : :obj:`bool`
+        If ``True``, permit a data shuffle to sort out-of-order split results.
+        This will only be required if input data has duplicate loci, one of
+        which contains more than one alternate allele.
 
     Returns
     -------
@@ -2186,7 +2195,7 @@ def split_multi_hts(ds, keep_star=False, left_aligned=False, vep_root='vep'):
 
     """
 
-    split = split_multi(ds, keep_star=keep_star, left_aligned=left_aligned)
+    split = split_multi(ds, keep_star=keep_star, left_aligned=left_aligned, permit_shuffle=permit_shuffle)
 
     row_fields = set(ds.row)
     update_rows_expression = {}
@@ -2235,11 +2244,14 @@ def split_multi_hts(ds, keep_star=False, left_aligned=False, vep_root='vep'):
             (hl.range(0, 3).map(lambda i:
                                 hl.min((hl.range(0, hl.triangle(split.old_alleles.length()))
                                         .filter(lambda j: hl.downcode(hl.unphased_diploid_gt_index_call(j),
-                                                                      split.a_index) == hl.unphased_diploid_gt_index_call(i)
+                                                                      split.a_index).unphased_diploid_gt_index() == i
                                                 ).map(lambda j: split.PL[j]))))))
-        update_entries_expression['PL'] = pl
         if 'GQ' in entry_fields:
-            update_entries_expression['GQ'] = hl.or_else(hl.gq_from_pl(pl), split.GQ)
+            pl_gq_struct = hl.rbind(pl, lambda pl: hl.struct(PL=pl, GQ=hl.gq_from_pl(pl)))
+            update_entries_expression['PL'] = pl_gq_struct['PL']
+            update_entries_expression['GQ'] = pl_gq_struct['GQ']
+        else:
+            update_entries_expression['PL'] = pl
     else:
         if 'GQ' in entry_fields:
             update_entries_expression['GQ'] = split.GQ

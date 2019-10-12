@@ -69,8 +69,8 @@ object InferType {
       case a: ApplyIR => a.explicitNode.typ
       case a: AbstractApplyNode[_] =>
         val argTypes = a.args.map(_.typ)
-        a.implementation.unify(argTypes)
-        a.implementation.returnType.subst()
+        a.implementation.unify(argTypes :+ a.returnType)
+        a.returnType
       case _: Uniroot => TFloat64()
       case ArrayRef(a, i) =>
         assert(i.typ.isOfType(TInt32()))
@@ -103,6 +103,7 @@ object InferType {
       case ArrayFold(a, zero, accumName, valueName, body) =>
         assert(body.typ == zero.typ)
         zero.typ
+      case ArrayFold2(_, _, _, _, result) => result.typ
       case ArrayScan(a, zero, accumName, valueName, body) =>
         assert(body.typ == zero.typ)
         coerce[TStreamable](a.typ).copyStreamable(zero.typ)
@@ -114,13 +115,14 @@ object InferType {
         coerce[TStreamable](left.typ).copyStreamable(join.typ)
         TArray(join.typ)
       case NDArrayShape(nd) =>
-        TTuple(nd.typ.required, List.tabulate(nd.typ.asInstanceOf[TNDArray].nDims)(_ => TInt64()):_*)
+        val ndType = nd.typ.asInstanceOf[TNDArray]
+        ndType.representation.fieldType("shape").asInstanceOf[TTuple].setRequired(ndType.required)
       case NDArrayReshape(nd, shape) =>
         TNDArray(coerce[TNDArray](nd.typ).elementType, Nat(shape.typ.asInstanceOf[TTuple].size), nd.typ.required)
       case NDArrayMap(nd, _, body) =>
         TNDArray(body.typ.setRequired(true), coerce[TNDArray](nd.typ).nDimsBase, nd.typ.required)
       case NDArrayMap2(l, _, _, _, body) =>
-        TNDArray(body.typ, coerce[TNDArray](l.typ).nDimsBase, l.typ.required)
+        TNDArray(body.typ.setRequired(true), coerce[TNDArray](l.typ).nDimsBase, l.typ.required)
       case NDArrayReindex(nd, indexExpr) =>
         TNDArray(coerce[TNDArray](nd.typ).elementType, Nat(indexExpr.length), nd.typ.required)
       case NDArrayAgg(nd, axes) =>
@@ -192,7 +194,7 @@ object InferType {
       case MatrixToValueApply(child, function) => function.typ(child.typ)
       case BlockMatrixToValueApply(child, function) => function.typ(child.typ)
       case CollectDistributedArray(_, _, _, _, body) => TArray(body.typ)
-      case ReadPartition(_, _, _, rowType) => TStream(rowType)
+      case ReadPartition(_, _, rowType) => TStream(rowType)
     }
   }
 }

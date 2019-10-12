@@ -2,14 +2,15 @@ import math
 import random
 import asyncio
 import aiohttp
+from asyncinit import asyncinit
 
-import hailtop.gear.auth as hj
+from hailtop.config import get_deploy_config
+from hailtop.auth import async_get_userinfo, service_auth_headers
+from hailtop.utils import AsyncWorkerPool, request_retry_transient_errors
 
 from .globals import complete_states
 
-
-job_array_size = 50
-max_job_submit_attempts = 3
+job_array_size = 1000
 
 
 def filter_params(complete, success, attributes):
@@ -55,17 +56,14 @@ class Job:
             return None
 
         durations = job_status['duration']
-        durations = [durations[task] for task in ['setup', 'main', 'cleanup'] if task in durations]
 
-        i = 0
-        duration = 0
-        while i < len(durations):
-            d = durations[i]
-            if d is None:
-                return None
-            duration += d
-            i += 1
-        return duration
+        setup_duration = durations.get('setup', 0)
+        main_duration = durations.get('main', 0)
+        cleanup_duration = durations.get('cleanup', 0)
+        if setup_duration is None or main_duration is None or cleanup_duration is None:
+            return None
+
+        return setup_duration + max(main_duration, cleanup_duration)
 
     @staticmethod
     def unsubmitted_job(batch_builder, job_id, attributes=None, parent_ids=None):
@@ -194,7 +192,8 @@ class SubmittedJob:
         return state in complete_states
 
     async def status(self):
-        self._status = await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}')
+        resp = await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}')
+        self._status = await resp.json()
         return self._status
 
     async def wait(self):
@@ -209,10 +208,12 @@ class SubmittedJob:
                 i = i + 1
 
     async def log(self):
-        return await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}/log')
+        resp = await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}/log')
+        return await resp.json()
 
     async def pod_status(self):
-        return await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}/pod_status')
+        resp = await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}/pod_status')
+        return await resp.json()
 
 
 class Batch:
@@ -234,7 +235,8 @@ class Batch:
             if limit is None:
                 raise ValueError("cannot define 'offset' without a 'limit'")
             params['offset'] = str(offset)
-        return await self._client._get(f'/api/v1alpha/batches/{self.id}', params=params)
+        resp = await self._client._get(f'/api/v1alpha/batches/{self.id}', params=params)
+        return await resp.json()
 
     async def wait(self):
         i = 0
@@ -261,6 +263,7 @@ class BatchBuilder:
         self._submitted = False
         self.attributes = attributes
         self.callback = callback
+        self.pool = AsyncWorkerPool(2)
 
     def create_job(self, image, command=None, args=None, env=None, ports=None,
                    resources=None, tolerations=None, volumes=None, security_context=None,
@@ -370,52 +373,40 @@ class BatchBuilder:
         self._jobs.append(j)
         return j
 
-    async def _submit_job_with_retry(self, batch_id, docs):
-        n_attempts = 0
-        saved_err = None
-        while n_attempts < max_job_submit_attempts:
-            try:
-                return await self._client._post(f'/api/v1alpha/batches/{batch_id}/jobs/create', json={'jobs': docs})
-            except Exception as err:  # pylint: disable=W0703
-                saved_err = err
-                n_attempts += 1
-                await asyncio.sleep(1)
-        raise saved_err
+    async def _submit_job(self, batch_id, docs):
+        await self._client._post(f'/api/v1alpha/batches/{batch_id}/jobs/create', json={'jobs': docs})
 
     async def submit(self):
         if self._submitted:
             raise ValueError("cannot submit an already submitted batch")
         self._submitted = True
 
-        batch_doc = {}
+        batch_doc = {'n_jobs': len(self._job_docs)}
         if self.attributes:
             batch_doc['attributes'] = self.attributes
         if self.callback:
             batch_doc['callback'] = self.callback
 
-        batch = None
-        try:
-            b = await self._client._post('/api/v1alpha/batches/create', json=batch_doc)
-            batch = Batch(self._client, b['id'], b.get('attributes'))
+        b_resp = await self._client._post('/api/v1alpha/batches/create', json=batch_doc)
+        b = await b_resp.json()
+        batch = Batch(self._client, b['id'], b.get('attributes'))
 
-            docs = []
-            n = 0
-            for jdoc in self._job_docs:
-                n += 1
-                docs.append(jdoc)
-                if n == job_array_size:
-                    await self._submit_job_with_retry(batch.id, docs)
-                    n = 0
-                    docs = []
+        docs = []
+        n = 0
+        for jdoc in self._job_docs:
+            n += 1
+            docs.append(jdoc)
+            if n == job_array_size:
+                await self.pool.call(self._submit_job, batch.id, docs)
+                n = 0
+                docs = []
 
-            if docs:
-                await self._submit_job_with_retry(batch.id, docs)
+        if docs:
+            await self.pool.call(self._submit_job, batch.id, docs)
 
-            await self._client._patch(f'/api/v1alpha/batches/{batch.id}/close')
-        except Exception as err:  # pylint: disable=W0703
-            if batch:
-                await batch.cancel()
-            raise err
+        await self.pool.wait()
+
+        await self._client._patch(f'/api/v1alpha/batches/{batch.id}/close')
 
         for j in self._jobs:
             j._job = j._job._submit(batch)
@@ -427,53 +418,57 @@ class BatchBuilder:
         return batch
 
 
+@asyncinit
 class BatchClient:
-    def __init__(self, session=None, url=None, token_file=None, token=None, headers=None):
-        if url is None:
-            url = 'http://batch.default'
-        self.url = url
+    async def __init__(self, deploy_config=None, session=None, headers=None,
+                       _token=None, _service='batch'):
+        assert _service in ('batch', 'batch2')
+        if not deploy_config:
+            deploy_config = get_deploy_config()
+
+        self.url = deploy_config.base_url(_service)
 
         if session is None:
             session = aiohttp.ClientSession(raise_for_status=True,
                                             timeout=aiohttp.ClientTimeout(total=60))
         self._session = session
 
-        if token is None:
-            token = hj.find_token(token_file)
-        userdata = hj.JWTClient.unsafe_decode(token)
-        assert "bucket_name" in userdata
-        self.bucket = userdata["bucket_name"]
-        self._cookies = None
+        userinfo = await async_get_userinfo(deploy_config)
+        self.bucket = userinfo['bucket_name']
 
-        if headers is None:
-            headers = {}
-        headers['Authorization'] = f'Bearer {token}'
-        self._headers = headers
+        h = {}
+        if headers:
+            h.update(headers)
+        if _token:
+            h['Authorization'] = f'Bearer {_token}'
+        else:
+            h.update(service_auth_headers(deploy_config, _service))
+        self._headers = h
 
     async def _get(self, path, params=None):
-        response = await self._session.get(
-            self.url + path, params=params, cookies=self._cookies, headers=self._headers)
-        return await response.json()
+        return await request_retry_transient_errors(
+            self._session.get,
+            self.url + path, params=params, headers=self._headers)
 
     async def _post(self, path, json=None):
-        response = await self._session.post(
-            self.url + path, json=json, cookies=self._cookies, headers=self._headers)
-        return await response.json()
+        return await request_retry_transient_errors(
+            self._session.post,
+            self.url + path, json=json, headers=self._headers)
 
     async def _patch(self, path):
-        await self._session.patch(
-            self.url + path, cookies=self._cookies, headers=self._headers)
+        return await request_retry_transient_errors(
+            self._session.patch,
+            self.url + path, headers=self._headers)
 
     async def _delete(self, path):
-        await self._session.delete(
-            self.url + path, cookies=self._cookies, headers=self._headers)
-
-    async def _refresh_k8s_state(self):
-        await self._post('/refresh_k8s_state')
+        return await request_retry_transient_errors(
+            self._session.delete,
+            self.url + path, headers=self._headers)
 
     async def list_batches(self, complete=None, success=None, attributes=None):
         params = filter_params(complete, success, attributes)
-        batches = await self._get('/api/v1alpha/batches', params=params)
+        batches_resp = await self._get('/api/v1alpha/batches', params=params)
+        batches = await batches_resp.json()
         return [Batch(self,
                       b['id'],
                       attributes=b.get('attributes'))
@@ -481,7 +476,8 @@ class BatchClient:
 
     async def get_job(self, batch_id, job_id):
         b = await self.get_batch(batch_id)
-        j = await self._get(f'/api/v1alpha/batches/{batch_id}/jobs/{job_id}')
+        j_resp = await self._get(f'/api/v1alpha/batches/{batch_id}/jobs/{job_id}')
+        j = await j_resp.json()
         return Job.submitted_job(
             b,
             j['job_id'],
@@ -490,7 +486,8 @@ class BatchClient:
             _status=j)
 
     async def get_batch(self, id):
-        b = await self._get(f'/api/v1alpha/batches/{id}')
+        b_resp = await self._get(f'/api/v1alpha/batches/{id}')
+        b = await b_resp.json()
         return Batch(self,
                      b['id'],
                      attributes=b.get('attributes'))

@@ -1,7 +1,6 @@
 package is.hail
 
-import java.io.{File, InputStream}
-import java.nio.charset.Charset
+import java.io.InputStream
 import java.util.Properties
 
 import is.hail.annotations._
@@ -10,26 +9,23 @@ import is.hail.backend.distributed.DistributedBackend
 import is.hail.backend.spark.SparkBackend
 import is.hail.expr.ir
 import is.hail.expr.ir.functions.IRFunctionRegistry
-import is.hail.expr.ir.{BaseIR, IRParser, MatrixIR, TextTableReader}
+import is.hail.expr.ir.{BaseIR, TextTableReader, ExecuteContext}
 import is.hail.expr.types.physical.PStruct
 import is.hail.expr.types.virtual._
 import is.hail.io.bgen.IndexBgen
+import is.hail.io.fs.{FS, HadoopFS}
 import is.hail.io.index._
 import is.hail.io.vcf._
-import is.hail.io.{CodecSpec, Decoder, LoadMatrix}
-import is.hail.rvd.{IndexSpec, RVDContext}
+import is.hail.io.{AbstractTypedCodecSpec, Decoder}
+import is.hail.rvd.{AbstractIndexSpec, RVDContext}
 import is.hail.sparkextras.ContextRDD
 import is.hail.table.Table
 import is.hail.utils.{log, _}
 import is.hail.variant.{MatrixTable, ReferenceGenome}
-import is.hail.io.fs.{FS, HadoopFS}
-
-import org.apache.commons.io.FileUtils
 import org.apache.hadoop
 import org.apache.log4j.{ConsoleAppender, LogManager, PatternLayout, PropertyConfigurator}
 import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.executor.InputMetrics
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SparkSession}
@@ -332,12 +328,12 @@ object HailContext {
 
   def readRowsPartition(
     makeDec: (InputStream) => Decoder
-  )(ctx: RVDContext,
+  )(r: Region,
     in: InputStream,
     metrics: InputMetrics = null
   ): Iterator[RegionValue] =
     new Iterator[RegionValue] {
-      private val region = ctx.region
+      private val region = r
       private val rv = RegionValue(region)
 
       private val trackedIn = new ByteTrackingInputStream(in)
@@ -397,7 +393,7 @@ object HailContext {
   ): Iterator[RegionValue] =
     if (bounds.isEmpty) {
       idxr.close()
-      HailContext.readRowsPartition(makeDec)(ctx, in, metrics)
+      HailContext.readRowsPartition(makeDec)(ctx.r, in, metrics)
     } else {
       new Iterator[RegionValue] {
         private val region = ctx.region
@@ -675,7 +671,9 @@ class HailContext private(
     rg: Option[String] = None,
     contigRecoding: Map[String, String] = Map.empty[String, String],
     skipInvalidLoci: Boolean = false) {
-    IndexBgen(this, files.toArray, indexFileMap, rg, contigRecoding, skipInvalidLoci)
+    ExecuteContext.scoped { ctx =>
+      IndexBgen(this, files.toArray, indexFileMap, rg, contigRecoding, skipInvalidLoci, ctx)
+    }
     info(s"Number of BGEN files indexed: ${ files.length }")
   }
 
@@ -752,7 +750,7 @@ class HailContext private(
 
   def readIndexedPartitions(
     path: String,
-    indexSpec: IndexSpec,
+    indexSpec: AbstractIndexSpec,
     partFiles: Array[String],
     intervalBounds: Option[Array[Interval]] = None
   ): RDD[(InputStream, IndexReader, Option[Interval], InputMetrics)] = {
@@ -764,8 +762,9 @@ class HailContext private(
       require(annotationType.asInstanceOf[TStruct].hasField(f))
       require(annotationType.asInstanceOf[TStruct].fieldType(f) == TInt64())
     }
-    val (leafDec, intDec) = IndexReader.buildDecoders(keyType, annotationType)
-    val mkIndexReader = IndexReaderBuilder.withDecoders(leafDec, intDec, keyType, annotationType)
+    val (leafPType: PStruct, leafDec) = indexSpec.leafCodec.buildDecoder(indexSpec.leafCodec.encodedVirtualType)
+    val (intPType: PStruct, intDec) = indexSpec.internalNodeCodec.buildDecoder(indexSpec.internalNodeCodec.encodedVirtualType)
+    val mkIndexReader = IndexReaderBuilder.withDecoders(leafDec, intDec, keyType, annotationType, leafPType, intPType)
 
     new RDD[(InputStream, IndexReader, Option[Interval], InputMetrics)](sc, Nil) {
       def getPartitions: Array[Partition] =
@@ -789,69 +788,64 @@ class HailContext private(
 
   def readRows(
     path: String,
-    t: PStruct,
-    codecSpec: CodecSpec,
+    enc: AbstractTypedCodecSpec,
     partFiles: Array[String],
-    requestedType: PStruct
-  ): ContextRDD[RVDContext, RegionValue] = {
-    val makeDec = codecSpec.buildDecoder(t, requestedType)
-    ContextRDD.weaken[RVDContext](readPartitions(path, partFiles, (_, is, m) => Iterator.single(is -> m)))
+    requestedType: TStruct
+  ): (PStruct, ContextRDD[RVDContext, RegionValue]) = {
+    val (pType: PStruct, makeDec) = enc.buildDecoder(requestedType)
+    (pType, ContextRDD.weaken[RVDContext](readPartitions(path, partFiles, (_, is, m) => Iterator.single(is -> m)))
       .cmapPartitions { (ctx, it) =>
         assert(it.hasNext)
         val (is, m) = it.next
         assert(!it.hasNext)
-        HailContext.readRowsPartition(makeDec)(ctx, is, m)
-      }
+        HailContext.readRowsPartition(makeDec)(ctx.r, is, m)
+      })
   }
 
   def readIndexedRows(
     path: String,
-    indexSpec: IndexSpec,
-    t: PStruct,
-    codecSpec: CodecSpec,
+    indexSpec: AbstractIndexSpec,
+    enc: AbstractTypedCodecSpec,
     partFiles: Array[String],
     bounds: Array[Interval],
-    requestedType: PStruct
-  ): ContextRDD[RVDContext, RegionValue] = {
-    val makeDec = codecSpec.buildDecoder(t, requestedType)
-    ContextRDD.weaken[RVDContext](readIndexedPartitions(path, indexSpec, partFiles, Some(bounds)))
+    requestedType: TStruct
+  ): (PStruct, ContextRDD[RVDContext, RegionValue]) = {
+    val (pType: PStruct, makeDec) = enc.buildDecoder(requestedType)
+    (pType, ContextRDD.weaken[RVDContext](readIndexedPartitions(path, indexSpec, partFiles, Some(bounds)))
       .cmapPartitions { (ctx, it) =>
         assert(it.hasNext)
         val (is, idxr, bounds, m) = it.next
         assert(!it.hasNext)
         HailContext.readRowsIndexedPartition(makeDec)(ctx, is, idxr, indexSpec.offsetField, bounds, m)
-      }
+      })
   }
 
   def readRowsSplit(
     pathRows: String,
     pathEntries: String,
-    indexSpecRows: Option[IndexSpec],
-    indexSpecEntries: Option[IndexSpec],
-    typRows: PStruct,
-    typEntries: PStruct,
-    codecSpec: CodecSpec,
+    indexSpecRows: Option[AbstractIndexSpec],
+    indexSpecEntries: Option[AbstractIndexSpec],
+    rowsEnc: AbstractTypedCodecSpec,
+    entriesEnc: AbstractTypedCodecSpec,
     partFiles: Array[String],
     bounds: Array[Interval],
-    requestedType: PStruct,
-    requestedTypeRows: PStruct,
-    requestedTypeEntries: PStruct
-  ): ContextRDD[RVDContext, RegionValue] = {
+    requestedTypeRows: TStruct,
+    requestedTypeEntries: TStruct
+  ): (PStruct, ContextRDD[RVDContext, RegionValue]) = {
     require(!(indexSpecRows.isEmpty ^ indexSpecEntries.isEmpty))
     val localFS = bcFS
-    val makeRowsDec = codecSpec.buildDecoder(typRows, requestedTypeRows)
-    val makeEntriesDec = codecSpec.buildDecoder(typEntries, requestedTypeEntries)
+    val (rowsType: PStruct, makeRowsDec) = rowsEnc.buildDecoder(requestedTypeRows)
+    val (entriesType: PStruct, makeEntriesDec) = entriesEnc.buildDecoder(requestedTypeEntries)
 
     val inserterIR = ir.InsertFields(
-      ir.Ref("left", requestedTypeRows.virtualType),
+      ir.Ref("left", requestedTypeRows),
       requestedTypeEntries.fieldNames.map(f =>
-          f -> ir.GetField(ir.Ref("right", requestedTypeEntries.virtualType), f)))
+          f -> ir.GetField(ir.Ref("right", requestedTypeEntries), f)))
 
-    val (t, makeInserter) = ir.Compile[Long, Long, Long](
-      "left", requestedTypeRows,
-      "right", requestedTypeEntries,
+    val (t: PStruct, makeInserter) = ir.Compile[Long, Long, Long](
+      "left", rowsType,
+      "right", entriesType,
       inserterIR)
-    assert(t == requestedType)
 
     val nPartitions = partFiles.length
     val mkIndexReader = indexSpecRows.map { indexSpec =>
@@ -865,8 +859,7 @@ class HailContext private(
         require(annotationType.asInstanceOf[TStruct].hasField(f))
         require(annotationType.asInstanceOf[TStruct].fieldType(f) == TInt64())
       }
-      val (leafDec, intDec) = IndexReader.buildDecoders(keyType, annotationType)
-      IndexReaderBuilder.withDecoders(leafDec, intDec, keyType, annotationType)
+      IndexReaderBuilder.fromSpec(indexSpec)
     }
 
     val rdd = new RDD[(InputStream, InputStream, Option[IndexReader], Option[Interval], InputMetrics)](sc, Nil) {
@@ -892,13 +885,13 @@ class HailContext private(
 
     val rowsOffsetField = indexSpecRows.flatMap(_.offsetField)
     val entriesOffsetField = indexSpecEntries.flatMap(_.offsetField)
-    ContextRDD.weaken[RVDContext](rdd).cmapPartitionsWithIndex { (i, ctx, it) =>
+    (t, ContextRDD.weaken[RVDContext](rdd).cmapPartitionsWithIndex { (i, ctx, it) =>
       assert(it.hasNext)
       val (isRows, isEntries, idxr, bounds, m) = it.next
       assert(!it.hasNext)
       HailContext.readSplitRowsPartition(makeRowsDec, makeEntriesDec, makeInserter)(
         ctx, isRows, isEntries, idxr, rowsOffsetField, entriesOffsetField, bounds, i, m)
-    }
+    })
   }
 
   def parseVCFMetadata(file: String): Map[String, Map[String, Map[String, String]]] = {
@@ -910,45 +903,15 @@ class HailContext private(
     implicit val formats = defaultJSONFormats
     JsonMethods.compact(Extraction.decompose(metadata))
   }
-
-  def importMatrix(files: java.util.List[String],
-    rowFields: java.util.Map[String, String],
-    keyNames: java.util.List[String],
-    cellType: String,
-    missingVal: String,
-    minPartitions: Option[Int],
-    noHeader: Boolean,
-    forceBGZ: Boolean,
-    sep: String = "\t"): MatrixIR =
-    importMatrices(files.asScala, rowFields.asScala.toMap.mapValues(IRParser.parseType), keyNames.asScala.toArray,
-      IRParser.parseType(cellType), missingVal, minPartitions, noHeader, forceBGZ, sep)
-
-  def importMatrices(files: Seq[String],
-    rowFields: Map[String, Type],
-    keyNames: Array[String],
-    cellType: Type,
-    missingVal: String = "NA",
-    nPartitions: Option[Int],
-    noHeader: Boolean,
-    forceBGZ: Boolean,
-    sep: String = "\t"): MatrixIR = {
-    assert(sep.length == 1)
-
-    val inputs = sFS.globAll(files)
-
-    HailContext.maybeGZipAsBGZip(forceBGZ) {
-      LoadMatrix(this, inputs, rowFields, keyNames, cellType = TStruct("x" -> cellType), missingVal, nPartitions, noHeader, sep(0))
-    }
-  }
 }
 
 class HailFeatureFlags {
   private[this] val flags: mutable.Map[String, String] =
     mutable.Map[String, String](
-      "cpp" -> null,
       "lower" -> null,
       "newaggs" -> "1",
-      "max_leader_scans" -> "1000"
+      "max_leader_scans" -> "1000",
+      "jvm_bytecode_dump" -> null
     )
 
   val available: java.util.ArrayList[String] =

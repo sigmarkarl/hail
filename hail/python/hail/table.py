@@ -1,5 +1,3 @@
-from collections import Counter
-
 import itertools
 import pandas
 import pyspark
@@ -1649,7 +1647,7 @@ class Table(ExprContainer):
                                 MatrixAnnotateRowsTable(left._mir, join_table._tir, uid),
                                 InsertFields(
                                     Ref('va'),
-                                    [(uid, Apply('get',
+                                    [(uid, Apply('get', join_table._row_type[uid].value_type,
                                                  GetField(GetField(Ref('va'), uid), uid),
                                                  MakeTuple([e._ir for e in exprs])))],
                                     None
@@ -1821,15 +1819,34 @@ class Table(ExprContainer):
         :obj:`list` of :class:`.Struct`
             List of rows.
         """
-        ir = GetField(TableCollect(self._tir), 'rows')
-        e = construct_expr(ir, hl.tarray(self.row.dtype))
+        if len(self.key) > 0:
+            t = self.order_by(*self.key)
+        else:
+            t = self
+        ir = GetField(TableCollect(t._tir), 'rows')
+        e = construct_expr(ir, hl.tarray(t.row.dtype))
         if _localize:
             return Env.backend().execute(e._ir)
         else:
             return e
 
-    def describe(self, handler=print):
-        """Print information about the fields in the table."""
+    def describe(self, handler=print, *, widget=False):
+        """Print information about the fields in the table.
+
+        Note
+        ----
+        The `widget` argument is **experimental**.
+
+        Parameters
+        ----------
+        handler : Callable[[str], None]
+            Handler function for returned string.
+        widget : bool
+            Create an interactive IPython widget.
+        """
+        if widget:
+            from hail.experimental.interact import interact
+            return interact(self)
 
         def format_type(typ):
             return typ.pretty(indent=4).lstrip()
@@ -1867,7 +1884,7 @@ class Table(ExprContainer):
         --------
 
         >>> table_result = table1.add_index()
-        >>> table_result.show()  # doctest: +NOTEST
+        >>> table_result.show()  # doctest: +SKIP_OUTPUT_CHECK
         +-------+-------+-----+-------+-------+-------+-------+-------+-------+
         |    ID |    HT | SEX |     X |     Z |    C1 |    C2 |    C3 |   idx |
         +-------+-------+-----+-------+-------+-------+-------+-------+-------+
@@ -2457,6 +2474,11 @@ class Table(ExprContainer):
         :class:`.Table`
             Expanded table.
         """
+
+        t = self
+        if len(t.key) > 0:
+            t = t.order_by(*t.key)
+
         def _expand(e):
             if isinstance(e, CollectionExpression) or isinstance(e, DictExpression):
                 return hl.map(lambda x: _expand(x), hl.array(e))
@@ -2479,7 +2501,6 @@ class Table(ExprContainer):
                 assert isinstance(e, (NumericExpression, BooleanExpression, StringExpression))
                 return e
 
-        t = self.key_by()
         t = t.select(**_expand(t.row))
         t = t.select_globals(**_expand(t.globals))
         return t
@@ -2652,7 +2673,7 @@ class Table(ExprContainer):
         element in the `Children` field:
 
         >>> exploded = people_table.explode('Children')
-        >>> exploded.show() # doctest: +NOTEST
+        >>> exploded.show() # doctest: +SKIP_OUTPUT_CHECK
         +---------+-------+----------+
         | Name    |   Age | Children |
         +---------+-------+----------+
@@ -2669,7 +2690,7 @@ class Table(ExprContainer):
         names:
 
         >>> exploded = people_table.explode('Children', name='Child')
-        >>> exploded.show() # doctest: +NOTEST
+        >>> exploded.show() # doctest: +SKIP_OUTPUT_CHECK
         +---------+-------+---------+
         | Name    |   Age | Child   |
         +---------+-------+---------+
@@ -3266,5 +3287,6 @@ class Table(ExprContainer):
             raise TypeError('All input tables to multi_way_zip_join must have the same global type')
         return Table(TableMultiWayZipJoin(
             [t._tir for t in tables], data_field_name, global_field_name))
+
 
 table_type.set(Table)

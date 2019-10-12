@@ -1,4 +1,4 @@
-python/**/*.pyc
+python/.eggs
 python/README.md
 python/dist
 python/hail.egg-info

@@ -112,6 +112,36 @@ def dtype(type_str):
     return type_node_visitor.visit(tree)
 
 
+class HailTypeContext(object):
+    def __init__(self, references=set()):
+        self.references = references
+
+    @property
+    def is_empty(self):
+        return len(self.references) == 0
+
+    def _to_json_context(self):
+        if self._json is None:
+            self._json = {
+                'reference_genomes':
+                    {r: hl.get_reference(r)._config for r in self.references}
+            }
+        return self._json
+
+    @classmethod
+    def union(cls, *types):
+        ctxs = [t.get_context() for t in types if not t.get_context().is_empty]
+        if len(ctxs) == 0:
+            return _empty_context
+        if len(ctxs) == 1:
+            return ctxs[0]
+        refs = ctxs[0].references.union(*[ctx.references for ctx in ctxs[1:]])
+        return HailTypeContext(refs)
+
+
+_empty_context = HailTypeContext()
+
+
 class HailType(object):
     """
     Hail type superclass.
@@ -119,6 +149,7 @@ class HailType(object):
 
     def __init__(self):
         super(HailType, self).__init__()
+        self._context = None
 
     def __repr__(self):
         s = str(self).replace("'", "\\'")
@@ -234,6 +265,14 @@ class HailType(object):
     @abc.abstractmethod
     def clear(self):
         raise NotImplementedError
+
+    def _get_context(self):
+        return _empty_context
+
+    def get_context(self):
+        if self._context is None:
+            self._context = self._get_context()
+        return self._context
 
 
 hail_type = oneof(HailType, transformed((str, dtype)))
@@ -570,11 +609,12 @@ class tndarray(HailType):
 
     def _traverse(self, obj, f):
         if f(self, obj):
-            for elt in obj:
-                self.element_type._traverse(elt, f)
+            for elt in np.nditer(obj):
+                self.element_type._traverse(elt.item(), f)
 
     def _typecheck_one_level(self, annotation):
-        raise NotImplementedError
+        if annotation is not None and not isinstance(annotation, np.ndarray):
+            raise TypeError("type 'ndarray' expected Python 'numpy.ndarray', but found type '%s'" % type(annotation))
 
     def __str__(self):
         return "ndarray<{}, {}>".format(self.element_type, self.ndim)
@@ -597,7 +637,15 @@ class tndarray(HailType):
         return np.ndarray(shape=x['shape'], buffer=np.array(x['data'], dtype=np_type), strides=x['strides'], dtype=np_type)
 
     def _convert_to_json(self, x):
-        raise NotImplementedError
+        data = x.reshape(x.size).tolist()
+        json_dict = {
+            "shape": x.shape,
+            "strides": x.strides,
+            "flags": 0,
+            "data": data,
+            "offset": 0
+        }
+        return json_dict
 
     def clear(self):
         self._element_type.clear()
@@ -610,6 +658,9 @@ class tndarray(HailType):
 
     def subst(self):
         return tndarray(self._element_type.subst(), self._ndim.subst())
+
+    def _get_context(self):
+        return self.element_type.get_context()
 
 
 class tarray(HailType):
@@ -691,6 +742,9 @@ class tarray(HailType):
     def clear(self):
         self.element_type.clear()
 
+    def _get_context(self):
+        return self.element_type.get_context()
+
 
 class tset(HailType):
     """Hail type for collections of distinct elements.
@@ -770,6 +824,9 @@ class tset(HailType):
 
     def clear(self):
         self.element_type.clear()
+
+    def _get_context(self):
+        return self.element_type.get_context()
 
 
 class tdict(HailType):
@@ -876,6 +933,9 @@ class tdict(HailType):
     def clear(self):
         self.key_type.clear()
         self.value_type.clear()
+
+    def _get_context(self):
+        return HailTypeContext.union(self.key_type, self.value_type)
 
 
 class tstruct(HailType, Mapping):
@@ -1052,6 +1112,9 @@ class tstruct(HailType, Mapping):
         for f, t in self.items():
             t.clear()
 
+    def _get_context(self):
+        return HailTypeContext.union(*self.values())
+
 class tunion(HailType, Mapping):
     @typecheck_method(case_types=hail_type)
     def __init__(self, **case_types):
@@ -1065,6 +1128,7 @@ class tunion(HailType, Mapping):
 
         """
 
+        super(tunion, self).__init__()
         self._case_types = case_types
         self._cases = tuple(case_types)
 
@@ -1138,6 +1202,9 @@ class tunion(HailType, Mapping):
     def clear(self):
         for f, t in self.items():
             t.clear()
+
+    def _get_context(self):
+        return HailTypeContext.union(*self.values())
 
 
 class ttuple(HailType):
@@ -1232,6 +1299,9 @@ class ttuple(HailType):
     def clear(self):
         for t in self.types:
             t.clear()
+
+    def _get_context(self):
+        return HailTypeContext.union(*self.types)
 
 
 class _tcall(HailType):
@@ -1343,6 +1413,9 @@ class tlocus(HailType):
     def clear(self):
         pass
 
+    def _get_context(self):
+        return HailTypeContext(references={self.reference_genome.name})
+
 
 class tinterval(HailType):
     """Hail type for intervals of ordered values.
@@ -1426,6 +1499,9 @@ class tinterval(HailType):
 
     def clear(self):
         self.point_type.clear()
+
+    def _get_context(self):
+        return self.point_type.get_context()
 
 
 class Box(object):
@@ -1579,6 +1655,20 @@ def is_compound(t) -> bool:
 def types_match(left, right) -> bool:
     return (len(left) == len(right)
             and all(map(lambda lr: lr[0].dtype == lr[1].dtype, zip(left, right))))
+
+def from_numpy(np_dtype):
+    if np_dtype == np.int32:
+        return tint32
+    elif np_dtype == np.int64:
+        return tint64
+    elif np_dtype == np.float32:
+        return tfloat32
+    elif np_dtype == np.float64:
+        return tfloat64
+    elif np_dtype == np.bool:
+        return tbool
+    else:
+        raise ValueError(f"numpy type {np_dtype} could not be converted to a hail type.")
 
 
 class tvariable(HailType):
