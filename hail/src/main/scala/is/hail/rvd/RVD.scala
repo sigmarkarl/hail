@@ -10,7 +10,7 @@ import is.hail.expr.types.physical.{PInt64, PStruct, PType}
 import is.hail.expr.types.virtual.{TArray, TInt64, TInterval, TStruct}
 import is.hail.io._
 import is.hail.io.index.IndexWriter
-import is.hail.io.{BufferSpec, AbstractTypedCodecSpec, TypedCodecSpec, RichContextRDDRegionValue}
+import is.hail.io.{AbstractTypedCodecSpec, BufferSpec, RichContextRDDRegionValue, TypedCodecSpec}
 import is.hail.sparkextras._
 import is.hail.utils._
 import is.hail.expr.ir.ExecuteContext
@@ -19,6 +19,7 @@ import org.apache.spark.TaskContext
 import org.apache.spark.rdd.{RDD, ShuffledRDD}
 import org.apache.spark.sql.Row
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.util.TaskCompletionListener
 import org.apache.spark.{Partitioner, SparkContext}
 
 import scala.language.existentials
@@ -98,9 +99,10 @@ class RVD(
     val localRowPType = rowPType
     crdd.mapPartitions { it =>
       val encoder = new ByteArrayEncoder(makeEnc)
-      TaskContext.get.addTaskCompletionListener { _ =>
+      val tc : TaskCompletionListener = _ => {
         encoder.close()
       }
+      TaskContext.get().addTaskCompletionListener(tc)
       it.map { rv =>
         val keys: Any = SafeRow.selectFields(localRowPType, rv)(kFieldIdx)
         val bytes = encoder.regionValueToBytes(rv.region, rv.offset)
@@ -1160,9 +1162,10 @@ class RVD(
     val makeEnc = codecSpec.buildEncoder(that.rowPType)
     val partitionKeyedIntervals = that.boundary.crdd.mapPartitions { it =>
       val encoder = new ByteArrayEncoder(makeEnc)
-      TaskContext.get.addTaskCompletionListener { _ =>
+      val tc : TaskCompletionListener = _ => {
         encoder.close()
       }
+      TaskContext.get().addTaskCompletionListener(tc)
       it.flatMap { rv =>
         val r = SafeRow(rightTyp.rowType, rv)
         val interval = r.getAs[Interval](rightTyp.kFieldIdx(0))
