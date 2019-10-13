@@ -3,6 +3,8 @@ from ipywidgets import widgets
 
 import hail as hl
 
+from hail.expr.types import summary_type
+
 __all__ = [
     'interact',
 ]
@@ -164,24 +166,6 @@ def interact(obj):
 
     display(box, tab)
 
-
-def format_type(t):
-    if isinstance(t, hl.tdict):
-        return f'dict<{format_type(t.key_type)}, {format_type(t.value_type)}>'
-    elif isinstance(t, hl.tset):
-        return f'set<{format_type(t.element_type)}>'
-    elif isinstance(t, hl.tarray):
-        return f'array<{format_type(t.element_type)}>'
-    elif isinstance(t, hl.tstruct):
-        return 'struct (click to expand)'
-    elif isinstance(t, hl.ttuple):
-        return 'tuple (click to expand)'
-    elif isinstance(t, hl.tinterval):
-        return f'interval<{format_type(t.point_type)}>'
-    else:
-        return str(t)
-
-
 def html_code(text):
     return f'<pre>{text}</pre>'
 
@@ -227,14 +211,14 @@ def get_type_html(t):
                f'<li>class: {html_link(" StructExpression", "https://hail.is/docs/0.2/hail.expr.StructExpression.html")}</li>' \
                f'<li>inherited class: {html_link(" Expression", "https://hail.is/docs/0.2/hail.expr.Expression.html")}</li>' \
                f'</ul>\n' \
-               f'<p>Access an element by name with dots: {html_code("x.foo")} or with square brackets: {bracket_str}</p>'
+               f'<p>Access an element by name with dots or with square brackets: {html_code(f"x.foo, {bracket_str}")}</p>'
     elif isinstance(t, hl.ttuple):
-        return f'<p>A tuple of heterogeneous values.</p>\n' \
+        return f'<p>A 0-indexed tuple of heterogeneous values.</p>\n' \
                f'Documentation:\n<ul>' \
                f'<li>class: {html_link(" TupleExpression", "https://hail.is/docs/0.2/hail.expr.TupleExpression.html")}</li>' \
                f'<li>inherited class: {html_link(" Expression", "https://hail.is/docs/0.2/hail.expr.Expression.html")}</li>' \
                f'</ul>\n' \
-               f'<p>Access an element using square brackets: {html_code("x[0]")} for the first element, {html_code("x[1]")} for the second, etc.</p>'
+               f'<p>Access an element using square brackets. For instance, get the first element: {html_code("x[0]")}</p>'
     elif isinstance(t, hl.tinterval):
         return f'<p>An object representing an interval.</p>\n' \
                f'Documentation:\n<ul>' \
@@ -324,7 +308,7 @@ def append_struct_frames(t, frames):
         frames.append(widgets.HTML('<big>Fields:</big>'))
     acc = widgets.Accordion([recursive_build(x) for x in t.values()])
     for i, (name, fd) in enumerate(t.items()):
-        acc.set_title(i, f'{repr(name)} ({format_type(fd)})')
+        acc.set_title(i, f'{repr(name)} ({summary_type(fd)})')
     acc.selected_index = None
     frames.append(acc)
 
@@ -343,23 +327,23 @@ def recursive_build(t):
             frames.append(widgets.HTML('<big>Fields:</big>'))
         acc = widgets.Accordion([recursive_build(x) for x in t.types])
         for i, fd in enumerate(t.types):
-            acc.set_title(i, f'[{i}] ({format_type(fd)})')
+            acc.set_title(i, f'[{i}] ({summary_type(fd)})')
         acc.selected_index = None
         frames.append(acc)
     elif isinstance(t, (hl.tarray, hl.tset)):
         acc = widgets.Accordion([recursive_build(t.element_type)])
-        acc.set_title(0, f'<element> ({format_type(t.element_type)})')
+        acc.set_title(0, f'<element> ({summary_type(t.element_type)})')
         acc.selected_index = None
         frames.append(acc)
     elif isinstance(t, hl.tdict):
         acc = widgets.Accordion([recursive_build(t.key_type), recursive_build(t.value_type)])
-        acc.set_title(0, f'<key> ({format_type(t.key_type)})')
-        acc.set_title(1, f'<value> ({format_type(t.element_type)})')
+        acc.set_title(0, f'<key> ({summary_type(t.key_type)})')
+        acc.set_title(1, f'<value> ({summary_type(t.element_type)})')
         acc.selected_index = None
         frames.append(acc)
     elif isinstance(t, (hl.tinterval)):
         acc = widgets.Accordion([recursive_build(t.point_type)])
-        acc.set_title(0, f'<point> ({format_type(t.point_type)})')
+        acc.set_title(0, f'<point> ({summary_type(t.point_type)})')
         acc.selected_index = None
         frames.append(acc)
 
