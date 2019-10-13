@@ -12,6 +12,7 @@ import is.hail.utils._
 import is.hail.utils.richUtils.ByteTrackingOutputStream
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
+import org.apache.spark.util.TaskCompletionListener
 import org.apache.spark.{ExposedMetrics, TaskContext}
 
 object RichContextRDDRegionValue {
@@ -83,11 +84,12 @@ object RichContextRDDRegionValue {
         val rowsPartPath = fs.getTemporaryFile("file:///tmp")
         val entriesPartPath = fs.getTemporaryFile("file:///tmp")
         val idxPath = rowsPartPath + ".idx"
-        context.addTaskCompletionListener { (context: TaskContext) =>
+        val tc : TaskCompletionListener = _ => {
           fs.delete(rowsPartPath, recursive = false)
           fs.delete(entriesPartPath, recursive = false)
           fs.delete(idxPath, recursive = true)
         }
+        context.addTaskCompletionListener(tc)
         (rowsPartPath, entriesPartPath, idxPath)
       } else
         (finalRowsPartPath, finalEntriesPartPath, finalIdxPath)
