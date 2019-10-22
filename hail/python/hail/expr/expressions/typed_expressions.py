@@ -2593,6 +2593,31 @@ class StringExpression(Expression):
         """
         return self._method('firstMatchIn', tarray(tstr), regex)
 
+    @typecheck_method(mapping=expr_dict(expr_str, expr_str))
+    def translate(self, mapping):
+        """Translates characters of the string using `mapping`.
+
+        Examples
+        --------
+        >>> string = hl.literal('ATTTGCA')
+        >>> hl.eval(string.translate({'T': 'U'}))
+        'AUUUGCA'
+
+        Parameters
+        ----------
+        mapping : :class:`.DictExpression`
+            Dictionary of character-character translations.
+
+        Returns
+        -------
+        :class:`.StringExpression`
+
+        See Also
+        --------
+        :meth:`.replace`
+        """
+        return self._method('translate', tstr, mapping)
+
     @typecheck_method(regex=str)
     def matches(self, regex):
         """Returns ``True`` if the string contains any match for the given regex.
@@ -2630,6 +2655,21 @@ class StringExpression(Expression):
             ``True`` if the string contains any match for the regex, otherwise ``False``.
         """
         return to_expr(regex, tstr)._method("~", tbool, self)
+
+    def reverse(self):
+        """Returns the reversed value.
+        Examples
+        --------
+
+        >>> string = hl.literal('ATGCC')
+        >>> hl.eval(string.reverse())
+        'CCGTA'
+
+        Returns
+        -------
+        :class:`.StringExpression`
+        """
+        return self._method('reverse', tstr)
 
     def _extra_summary_fields(self, agg_result):
         return {
@@ -3499,11 +3539,6 @@ class NDArrayExpression(Expression):
         :class:`.NDArrayExpression`.
         """
         shape = wrap_to_list(shape)
-        if len(shape) == 0:
-            if self.ndim == 0:
-                return self
-            else:
-                raise FatalError(f'Cannot reshape an NDArray of {self.ndim} dimensions to 0 dimensions.')
 
         return construct_expr(NDArrayReshape(self._ir, hl.tuple(shape)._ir),
                               tndarray(self._type.element_type, len(shape)),

@@ -12,12 +12,15 @@ from hailtop.config import get_deploy_config
 from hailtop.utils import AsyncWorkerPool
 
 from ..google_compute import GServices
-from ..utils import parse_cpu
+from ..utils import parse_cpu_in_mcpu
 from ..globals import tasks
 
 from .instance_pool import InstancePool
 
 log = logging.getLogger('driver')
+
+BATCH_JOB_DEFAULT_CPU = os.environ.get('HAIL_BATCH_JOB_DEFAULT_CPU', '1')
+BATCH_JOB_DEFAULT_MEMORY = os.environ.get('HAIL_BATCH_JOB_DEFAULT_MEMORY', '3.75G')
 
 
 class DriverException(Exception):
@@ -33,7 +36,9 @@ class DriverException(Exception):
 class Pod:
     @staticmethod
     def from_record(driver, record):
-        spec = json.loads(record['spec'])
+        batch_id = json.loads(record['batch_id'])
+        job_spec = json.loads(record['job_spec'])
+        userdata = json.loads(record['userdata'])
         status = json.loads(record['status']) if record['status'] else None
 
         inst = driver.inst_pool.token_inst.get(record['instance'])
@@ -41,12 +46,13 @@ class Pod:
         pod = Pod(
             driver=driver,
             name=record['name'],
-            spec=spec,
+            batch_id=batch_id,
+            job_spec=job_spec,
+            userdata=userdata,
             output_directory=record['output_directory'],
-            cores=record['cores'],
+            cores_mcpu=record['cores_mcpu'],
             status=status,
-            instance=inst
-        )
+            instance=inst)
 
         if inst:
             inst.schedule(pod)
@@ -54,25 +60,29 @@ class Pod:
         return pod
 
     @staticmethod
-    async def create_pod(driver, name, spec, output_directory):
-        container_cpu_requests = [container['resources']['requests']['cpu'] for container in spec['spec']['containers']]
-        container_cores = [parse_cpu(cpu) for cpu in container_cpu_requests]
-        if any([cores is None for cores in container_cores]):
-            raise Exception(f'invalid value(s) for cpu: '
-                            f'{[cpu for cpu, cores in zip(container_cpu_requests, container_cores) if cores is None]}')
-        cores = max(container_cores)
+    async def create_pod(driver, name, batch_id, job_spec, userdata, output_directory):
+        cpu = None
+        resources = job_spec.get('resources')
+        if resources:
+            cpu = resources.get('cpu')
+        if not cpu:
+            cpu = BATCH_JOB_DEFAULT_CPU
+        cores_mcpu = parse_cpu_in_mcpu(cpu)
 
-        await driver.db.pods.new_record(name=name, spec=json.dumps(spec), output_directory=output_directory,
-                                        cores=cores, instance=None)
+        await driver.db.pods.new_record(name=name, batch_id=batch_id, job_spec=json.dumps(job_spec),
+                                        userdata=json.dumps(userdata), output_directory=output_directory,
+                                        cores_mcpu=cores_mcpu, instance=None)
 
-        return Pod(driver, name, spec, output_directory, cores)
+        return Pod(driver, name, batch_id, job_spec, userdata, output_directory, cores_mcpu)
 
-    def __init__(self, driver, name, spec, output_directory, cores, instance=None, on_ready=False, status=None):
+    def __init__(self, driver, name, batch_id, job_spec, userdata, output_directory, cores_mcpu, instance=None, on_ready=False, status=None):
         self.driver = driver
         self.name = name
-        self.spec = spec
+        self.batch_id = batch_id
+        self.job_spec = job_spec
+        self.userdata = userdata
         self.output_directory = output_directory
-        self.cores = cores
+        self.cores_mcpu = cores_mcpu
         self.instance = instance
         self.on_ready = on_ready
         self._status = status
@@ -82,26 +92,53 @@ class Pod:
         self.lock = asyncio.Lock(loop=loop)
 
     async def config(self):
-        future_secrets = []
-        secret_names = []
+        job_spec = dict(self.job_spec)
 
-        for volume in self.spec['spec']['volumes']:
-            if volume['secret'] is not None:
-                name = volume['secret']['secret_name']
-                secret_names.append(name)
-                future_secrets.append(self.driver.k8s.read_secret(name))
-        results = await asyncio.gather(*future_secrets)
+        # copy secrets
+        if 'secrets' in job_spec:
+            job_spec['secrets'] = [dict(secret) for secret in job_spec['secrets']]
 
-        secrets = {}
-        for name, (secret, err) in zip(secret_names, results):
-            if err is not None:
+        # update resources with defaults
+        if 'resources' not in job_spec:
+            job_spec['resources'] = {}
+        resources = job_spec['resources']
+        if 'cpu' not in resources:
+            resources['cpu'] = BATCH_JOB_DEFAULT_CPU
+        if 'memory' not in resources:
+            resources['memory'] = BATCH_JOB_DEFAULT_MEMORY
+
+        # add user's gsa-key
+        secrets = job_spec.get('secrets', [])
+        secrets = list(secrets)
+        secrets.append({
+            'namespace': 'batch-pods',  # FIXME unused
+            'name': self.userdata['gsa_key_secret_name'],
+            'mount_path': '/gsa-key',
+            'mount_in_copy': True
+        })
+        job_spec['secrets'] = secrets
+
+        secret_futures = []
+        for secret in secrets:
+            # FIXME need access control to verify user is allowed to access secret
+            secret_futures.append(self.driver.k8s.read_secret(secret['name']))
+            k8s_secrets = await asyncio.gather(*secret_futures)
+
+        for secret, (k8s_secret, err) in zip(secrets, k8s_secrets):
+            name = secret['name']
+            if not err:
+                secret['data'] = k8s_secret.data
+            else:
                 traceback.print_tb(err.__traceback__)
                 log.info(f'could not get secret {name} due to {err}')
-            secrets[name] = secret.data if not err else None
+                secret['data'] = None
 
         return {
-            'spec': self.spec,
-            'secrets': secrets,
+            'name': self.name,
+            'batch_id': self.batch_id,
+            'job_id': self.job_spec['job_id'],
+            'user': self.userdata['username'],
+            'job_spec': job_spec,
             'output_directory': self.output_directory
         }
 
@@ -118,7 +155,8 @@ class Pod:
         if not self.instance:
             return
 
-        log.info(f'unscheduling {self.name} cores {self.cores} from {self.instance}')
+        log.info(f'unscheduling {self.name} with {self.cores_mcpu / 1000} cores from {self.instance}')
+
         self.instance.unschedule(self)
         self.instance = None
         await self.driver.db.pods.update_record(self.name, instance=None)
@@ -147,7 +185,7 @@ class Pod:
                 asyncio.ensure_future(self.put_on_ready())
                 return False
 
-            log.info(f'scheduling {self.name} cores {self.cores} on {inst}')
+            log.info(f'scheduling {self.name} with {self.cores_mcpu / 1000} cores on {inst}')
 
             inst.schedule(self)
 
@@ -173,13 +211,13 @@ class Pod:
 
         await self.driver.ready_queue.put(self)
         self.on_ready = True
-        self.driver.ready_cores += self.cores
+        self.driver.ready_cores_mcpu += self.cores_mcpu
         self.driver.changed.set()
 
     def remove_from_ready(self):
         if self.on_ready:
             self.on_ready = False
-            self.driver.ready_cores -= self.cores
+            self.driver.ready_cores_mcpu -= self.cores_mcpu
 
     async def _request(self, f):
         try:
@@ -285,7 +323,9 @@ class Pod:
     def status(self):
         if self._status is None:
             return {
-                'metadata': self.spec['metadata'],
+                'metadata': {
+                    'name': self.name
+                },
                 'status': {
                     'containerStatuses': None,
                     'phase': 'Pending'
@@ -305,8 +345,8 @@ class Driver:
         self.pods = None  # populated in run
         self.complete_queue = asyncio.Queue()
         self.ready_queue = asyncio.Queue(maxsize=1000)
-        self.ready = sortedcontainers.SortedSet(key=lambda pod: pod.cores)
-        self.ready_cores = 0
+        self.ready = sortedcontainers.SortedSet(key=lambda pod: pod.cores_mcpu)
+        self.ready_cores_mcpu = 0
         self.changed = asyncio.Event()
 
         self.pool = None  # created in run
@@ -373,14 +413,12 @@ class Driver:
         await self.complete_queue.put(status)
         return web.Response()
 
-    async def create_pod(self, spec, output_directory):
-        name = spec['metadata']['name']
-
+    async def create_pod(self, name, batch_id, job_spec, userdata, output_directory):
         if name in self.pods:
             return DriverException(409, f'pod {name} already exists')
 
         try:
-            pod = await Pod.create_pod(self, name, spec, output_directory)
+            pod = await Pod.create_pod(self, name, batch_id, job_spec, userdata, output_directory)
         except Exception as err:  # pylint: disable=broad-except
             return DriverException(400, f'unknown error creating pod: {err}')  # FIXME: what error code should this be?
 
@@ -433,10 +471,10 @@ class Driver:
             should_wait = True
             if self.inst_pool.instances_by_free_cores and self.ready:
                 inst = self.inst_pool.instances_by_free_cores[-1]
-                i = self.ready.bisect_key_right(inst.free_cores)
+                i = self.ready.bisect_key_right(inst.free_cores_mcpu)
                 if i > 0:
                     pod = self.ready[i - 1]
-                    assert pod.cores <= inst.free_cores
+                    assert pod.cores_mcpu <= inst.free_cores_mcpu
                     self.ready.remove(pod)
                     should_wait = False
                     scheduled = await pod.schedule(inst)  # This cannot go in the pool!

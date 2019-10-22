@@ -1,36 +1,13 @@
 import json
 import logging
-import os
-import threading
-import uuid
 import traceback
-from shlex import quote as shq
 import asyncio
-import requests
-import kubernetes as kube
+import aiohttp
 
 from .globals import states, complete_states, valid_state_transitions, tasks
-from .batch_configuration import INSTANCE_ID
 from .log_store import LogStore
 
 log = logging.getLogger('batch')
-
-
-def copy(files):
-    if files is None:
-        return 'true'
-
-    authenticate = 'set -ex; gcloud -q auth activate-service-account --key-file=/gsa-key/privateKeyData'
-
-    def copy_command(src, dst):
-        if not dst.startswith('gs://'):
-            mkdirs = f'mkdir -p {shq(os.path.dirname(dst))};'
-        else:
-            mkdirs = ""
-        return f'{mkdirs} gsutil -m cp -R {shq(src)} {shq(dst)}'
-
-    copies = ' && '.join([copy_command(src, dst) for (src, dst) in files])
-    return f'{authenticate} && {copies}'
 
 
 class JobStateWriteFailure(Exception):
@@ -38,76 +15,17 @@ class JobStateWriteFailure(Exception):
 
 
 class Job:
-    @staticmethod
-    def _copy_container(name, files):
-        sh_expression = copy(files)
-        return kube.client.V1Container(
-            image='google/cloud-sdk:237.0.0-alpine',
-            name=name,
-            command=['/bin/sh', '-c', sh_expression],
-            resources=kube.client.V1ResourceRequirements(
-                requests={'cpu': '500m' if files else '100m'}),
-            volume_mounts=[kube.client.V1VolumeMount(
-                mount_path='/batch-gsa-key',
-                name='batch-gsa-key')])
-
     async def _create_pod(self):
         assert self.userdata is not None
         assert self._state in states
         assert self._state == 'Running'
 
-        input_container = Job._copy_container('setup', self.input_files)
-        output_container = Job._copy_container('cleanup', self.output_files)
-
-        volumes = [
-            kube.client.V1Volume(
-                secret=kube.client.V1SecretVolumeSource(
-                    secret_name=self.userdata['gsa_key_secret_name']),
-                name='gsa-key'),
-            kube.client.V1Volume(
-                secret=kube.client.V1SecretVolumeSource(
-                    secret_name='batch-gsa-key'),
-                name='batch-gsa-key')]
-
-        volume_mounts = [
-            kube.client.V1VolumeMount(
-                mount_path='/gsa-key',
-                name='gsa-key')]  # FIXME: this shouldn't be mounted to every container
-
-        if self._pvc_name is not None:
-            volumes.append(kube.client.V1Volume(
-                empty_dir=kube.client.V1EmptyDirVolumeSource(
-                    size_limit=self._pvc_size),
-                name=self._pvc_name))
-            volume_mounts.append(kube.client.V1VolumeMount(
-                mount_path='/io',
-                name=self._pvc_name))
-
-        pod_spec = self.app['k8s_client'].api_client._ApiClient__deserialize(self._pod_spec, kube.client.V1PodSpec)
-        pod_spec.containers = [input_container, pod_spec.containers[0], output_container]
-
-        if pod_spec.volumes is None:
-            pod_spec.volumes = []
-        pod_spec.volumes.extend(volumes)
-
-        for container in pod_spec.containers:
-            if container.volume_mounts is None:
-                container.volume_mounts = []
-            container.volume_mounts.extend(volume_mounts)
-
-        pod_template = kube.client.V1Pod(
-            metadata=kube.client.V1ObjectMeta(
-                name=self._pod_name,
-                labels={'app': 'batch-job',
-                        'hail.is/batch-instance': INSTANCE_ID,
-                        'batch_id': str(self.batch_id),
-                        'job_id': str(self.job_id),
-                        'user': self.user
-                        }),
-            spec=pod_spec)
-
-        err = await self.app['driver'].create_pod(spec=pod_template.to_dict(),
-                                                  output_directory=self.directory)
+        err = await self.app['driver'].create_pod(
+            name=self._pod_name,
+            batch_id=self.batch_id,
+            job_spec=self._spec,
+            userdata=self.userdata,
+            output_directory=self.directory)
         if err is not None:
             if err.status == 409:
                 log.info(f'pod already exists for job {self.id}')
@@ -186,25 +104,21 @@ class Job:
 
     @staticmethod
     def from_record(app, record):
-        if record is not None:
-            attributes = json.loads(record['attributes'])
-            userdata = json.loads(record['userdata'])
-            pod_spec = json.loads(record['pod_spec'])
-            input_files = json.loads(record['input_files'])
-            output_files = json.loads(record['output_files'])
-            exit_codes = json.loads(record['exit_codes'])
-            durations = json.loads(record['durations'])
-            messages = json.loads(record['messages'])
+        if not record:
+            return None
 
-            return Job(app, batch_id=record['batch_id'], job_id=record['job_id'], attributes=attributes,
-                       callback=record['callback'], userdata=userdata, user=record['user'],
-                       always_run=record['always_run'], exit_codes=exit_codes, messages=messages,
-                       durations=durations, state=record['state'], pvc_size=record['pvc_size'],
-                       cancelled=record['cancelled'], directory=record['directory'],
-                       token=record['token'], pod_spec=pod_spec, input_files=input_files,
-                       output_files=output_files)
+        userdata = json.loads(record['userdata'])
+        spec = json.loads(record['spec'])
+        exit_codes = json.loads(record['exit_codes'])
+        durations = json.loads(record['durations'])
+        messages = json.loads(record['messages'])
 
-        return None
+        return Job(app, batch_id=record['batch_id'], job_id=record['job_id'],
+                   userdata=userdata, user=record['user'],
+                   exit_codes=exit_codes, messages=messages,
+                   durations=durations, state=record['state'],
+                   cancelled=record['cancelled'], directory=record['directory'],
+                   spec=spec)
 
     @staticmethod
     async def from_pod(app, pod):
@@ -230,79 +144,46 @@ class Job:
         jobs = [Job.from_record(app, record) for record in records]
         return jobs
 
-    @staticmethod
-    def create_job(app, jobs_builder, pod_spec, batch_id, job_id, attributes, callback,
-                   parent_ids, input_files, output_files, userdata, always_run,
-                   pvc_size, state):
-        cancelled = False
-        user = userdata['username']
-        token = uuid.uuid4().hex[:6]
-
-        exit_codes = [None for _ in tasks]
-        durations = [None for _ in tasks]
-        messages = [None for _ in tasks]
-        directory = app['log_store'].gs_job_output_directory(batch_id, job_id, token)
-        pod_spec = app['k8s_client'].api_client.sanitize_for_serialization(pod_spec)
-
-        jobs_builder.create_job(
-            batch_id=batch_id,
-            job_id=job_id,
-            state=state,
-            pvc_size=pvc_size,
-            callback=callback,
-            attributes=json.dumps(attributes),
-            always_run=always_run,
-            token=token,
-            pod_spec=json.dumps(pod_spec),
-            input_files=json.dumps(input_files),
-            output_files=json.dumps(output_files),
-            directory=directory,
-            exit_codes=json.dumps(exit_codes),
-            durations=json.dumps(durations),
-            messages=json.dumps(messages))
-
-        for parent in parent_ids:
-            jobs_builder.create_job_parent(
-                batch_id=batch_id,
-                job_id=job_id,
-                parent_id=parent)
-
-        job = Job(app, batch_id=batch_id, job_id=job_id, attributes=attributes, callback=callback,
-                  userdata=userdata, user=user, always_run=always_run, exit_codes=exit_codes,
-                  messages=messages, durations=durations, state=state, pvc_size=pvc_size,
-                  cancelled=cancelled, directory=directory, token=token,
-                  pod_spec=pod_spec, input_files=input_files, output_files=output_files)
-
-        return job
-
-    def __init__(self, app, batch_id, job_id, attributes, callback, userdata, user, always_run,
-                 exit_codes, messages, durations, state, pvc_size, cancelled, directory,
-                 token, pod_spec, input_files, output_files):
+    def __init__(self, app, batch_id, job_id, userdata, user,
+                 exit_codes, messages, durations, state, cancelled, directory,
+                 spec):
         self.app = app
         self.batch_id = batch_id
         self.job_id = job_id
         self.id = (batch_id, job_id)
 
-        self.attributes = attributes
-        self.callback = callback
-        self.always_run = always_run
         self.userdata = userdata
         self.user = user
         self.exit_codes = exit_codes
         self.messages = messages
         self.directory = directory
         self.durations = durations
-        self.token = token
-        self.input_files = input_files
-        self.output_files = output_files
 
-        name = f'batch-{batch_id}-job-{job_id}-{token}'
+        name = f'batch-{batch_id}-job-{job_id}'
         self._pod_name = name
-        self._pvc_name = name if pvc_size else None
-        self._pvc_size = pvc_size
         self._state = state
         self._cancelled = cancelled
-        self._pod_spec = pod_spec
+        self._spec = spec
+
+    @property
+    def attributes(self):
+        return self._spec.get('attributes')
+
+    @property
+    def input_files(self):
+        return self._spec.get('input_files')
+
+    @property
+    def output_files(self):
+        return self._spec.get('output_files')
+
+    @property
+    def always_run(self):
+        return self._spec.get('always_run', False)
+
+    @property
+    def pvc_size(self):
+        return self._spec.get('pvc_size')
 
     async def refresh_parents_and_maybe_create(self):
         for record in await self.app['db'].jobs.get_parents(*self.id):
@@ -436,21 +317,10 @@ class Job:
 
         log.info('job {} complete with state {}, exit_codes {}'.format(self.id, self._state, self.exit_codes))
 
-        if self.callback:
-            def handler(id, callback, json):
-                try:
-                    requests.post(callback, json=json, timeout=120)
-                except requests.exceptions.RequestException as exc:
-                    log.warning(
-                        f'callback for job {id} failed due to an error, I will not retry. '
-                        f'Error: {exc}')
-
-            threading.Thread(target=handler, args=(self.id, self.callback, self.to_dict())).start()
-
         if self.batch_id:
             batch = await Batch.from_db(self.app, self.batch_id, self.user)
             if batch is not None:
-                await batch.mark_job_complete(self)
+                await batch.mark_job_complete()
 
     def to_dict(self):
         result = {
@@ -598,20 +468,16 @@ class Batch:
         await self.app['db'].batch.delete_record(self.id)
         log.info(f'batch {self.id} deleted')
 
-    async def mark_job_complete(self, job):
-        if self.callback:
-            def handler(id, job_id, callback, json):
-                try:
-                    requests.post(callback, json=json, timeout=120)
-                except requests.exceptions.RequestException as exc:
-                    log.warning(
-                        f'callback for batch {id}, job {job_id} failed due to an error, I will not retry. '
-                        f'Error: {exc}')
-
-            threading.Thread(
-                target=handler,
-                args=(self.id, job.id, self.callback, job.to_dict())
-            ).start()
+    async def mark_job_complete(self):
+        if self.complete and self.callback:
+            log.info(f'making callback for batch {self.id}: {self.callback}')
+            try:
+                async with aiohttp.ClientSession(
+                        raise_for_status=True, timeout=aiohttp.ClientTimeout(total=60)) as session:
+                    await session.post(self.callback, json=await self.to_dict(include_jobs=False))
+                    log.info(f'callback for batch {self.id} successful')
+            except Exception:  # pylint: disable=broad-except
+                log.exception(f'callback for batch {self.id} failed, will not retry.')
 
     def is_complete(self):
         return self.complete

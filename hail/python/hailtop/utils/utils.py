@@ -3,6 +3,7 @@ import random
 import logging
 import asyncio
 import aiohttp
+from aiohttp import web
 
 log = logging.getLogger('hailtop.utils')
 
@@ -55,28 +56,68 @@ class AsyncWorkerPool:
         await self._done.wait()
 
 
-async def request_retry_transient_errors(f, *args, **kwargs):
+def is_transient_error(e):
+    # observed exceptions:
+    # aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host <host> ssl:None [Connect call failed ('<ip>', 80)]
+    #
+    # concurrent.futures._base.TimeoutError
+    #   from aiohttp/helpers.py:585:TimerContext: raise asyncio.TimeoutError from None
+    #
+    # Connected call failed caused by:
+    # OSError: [Errno 113] Connect call failed ('<ip>', 80)
+    # 113 is EHOSTUNREACH: No route to host
+    #
+    # Fatal read error on socket transport
+    # protocol: <asyncio.sslproto.SSLProtocol object at 0x12b47d320>
+    # transport: <_SelectorSocketTransport fd=13 read=polling write=<idle, bufsize=0>>
+    # Traceback (most recent call last):
+    #   File "/anaconda3/lib/python3.7/asyncio/selector_events.py", line 812, in _read_ready__data_received
+    #     data = self._sock.recv(self.max_size)
+    # TimeoutError: [Errno 60] Operation timed out
+    #
+    if isinstance(e, aiohttp.ClientResponseError):
+        # nginx returns 502 if it cannot connect to the upstream server
+        # 408 request timeout, 502 bad gateway, 503 service unavailable, 504 gateway timeout
+        if e.status == 408 or e.status == 502 or e.status == 503 or e.status == 504:
+            return True
+    elif isinstance(e, aiohttp.ClientOSError):
+        if (e.errno == errno.ETIMEDOUT or
+                e.errno == errno.ECONNREFUSED or
+                e.errno == errno.EHOSTUNREACH):
+            return True
+    elif isinstance(e, aiohttp.ServerTimeoutError):
+        return True
+    elif isinstance(e, asyncio.TimeoutError):
+        return True
+    elif isinstance(e, OSError):
+        if (e.errno == errno.ETIMEDOUT or
+                e.errno == errno.ECONNREFUSED or
+                e.errno == errno.EHOSTUNREACH):
+            return True
+    return False
+
+
+async def request_retry_transient_errors(session, method, url, **kwargs):
     delay = 0.1
     while True:
         try:
-            return await f(*args, **kwargs)
-        # observed exceptions:
-        # aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host <host> ssl:None [Connect call failed ('<ip>', 80)]
-        except aiohttp.ClientResponseError as e:
-            # 408 request timeout, 503 service unavailable, 504 gateway timeout
-            if e.status == 408 or e.status == 503 or e.status == 504:
+            return await session.request(method, url, **kwargs)
+        except Exception as e:  # pylint: disable=broad-except
+            if is_transient_error(e):
                 pass
             else:
                 raise
-        except aiohttp.ClientOSError as e:
-            if e.errno == errno.ETIMEDOUT:
-                pass
-            else:
-                log.exception('request failed ClientOSError errno {e.errno} {os.strerror(e.errno)}')
-                raise
-        except aiohttp.ServerTimeoutError:
-            pass
         # exponentially back off, up to (expected) max of 30s
         delay = min(delay * 2, 60.0)
         t = delay * random.random()
         await asyncio.sleep(t)
+
+
+async def request_raise_transient_errors(session, method, url, **kwargs):
+    try:
+        return await session.request(method, url, **kwargs)
+    except Exception as e:  # pylint: disable=broad-except
+        if is_transient_error(e):
+            log.exception('request failed with transient exception: {method} {url}')
+            raise web.HTTPServiceUnavailable()
+        raise

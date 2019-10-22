@@ -1,7 +1,6 @@
 import asyncio
 import concurrent
 import logging
-import os
 import traceback
 
 from aiohttp import web
@@ -18,7 +17,7 @@ from hailtop.config import get_deploy_config
 from ..batch import Batch, Job
 from ..log_store import LogStore
 from ..batch_configuration import KUBERNETES_TIMEOUT_IN_SECONDS, REFRESH_INTERVAL_IN_SECONDS, \
-    POD_VOLUME_SIZE, INSTANCE_ID, BATCH_NAMESPACE
+    INSTANCE_ID, BATCH_NAMESPACE
 from ..database import BatchDatabase
 
 from .driver import Driver
@@ -32,7 +31,6 @@ POD_EVICTIONS = pc.Counter('batch_pod_evictions', 'Count of batch pod evictions'
 
 log.info(f'KUBERNETES_TIMEOUT_IN_SECONDS {KUBERNETES_TIMEOUT_IN_SECONDS}')
 log.info(f'REFRESH_INTERVAL_IN_SECONDS {REFRESH_INTERVAL_IN_SECONDS}')
-log.info(f'POD_VOLUME_SIZE {POD_VOLUME_SIZE}')
 log.info(f'INSTANCE_ID = {INSTANCE_ID}')
 
 routes = web.RouteTableDef()
@@ -214,14 +212,11 @@ async def on_startup(app):
     pool = concurrent.futures.ThreadPoolExecutor()
     app['blocking_pool'] = pool
 
-    if 'BATCH_USE_KUBE_CONFIG' in os.environ:
-        kube.config.load_kube_config()
-    else:
-        kube.config.load_incluster_config()
-    v1 = kube.client.CoreV1Api()
-    app['k8s_client'] = v1
+    kube.config.load_incluster_config()
+    k8s_client = kube.client.CoreV1Api()
+    app['k8s_client'] = k8s_client
 
-    k8s = K8s(pool, KUBERNETES_TIMEOUT_IN_SECONDS, BATCH_NAMESPACE, v1)
+    k8s = K8s(pool, KUBERNETES_TIMEOUT_IN_SECONDS, BATCH_NAMESPACE, k8s_client)
 
     userinfo = await async_get_userinfo()
     log.info(f'running as {userinfo["username"]}')
