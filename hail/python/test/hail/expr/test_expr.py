@@ -1351,6 +1351,19 @@ class Tests(unittest.TestCase):
         self.assertFalse(hl.eval(s_whitespace.startswith('a')))
         self.assertFalse(hl.eval(s_whitespace.endswith('a')))
 
+    def test_str_parsing(self):
+        for x in ('nan', 'Nan', 'naN', 'NaN'):
+            for f in (hl.float, hl.float32, hl.float64):
+                self.assertTrue(hl.eval(hl.is_nan(f(x))))
+                self.assertTrue(hl.eval(hl.is_nan(f('+' + x))))
+                self.assertTrue(hl.eval(hl.is_nan(f('-' + x))))
+        for x in ('inf', 'Inf', 'iNf', 'InF', 'infinity', 'InfiNitY', 'INFINITY'):
+            for f in (hl.float, hl.float32, hl.float64):
+                self.assertTrue(hl.eval(hl.is_infinite(f(x))))
+                self.assertTrue(hl.eval(hl.is_infinite(f('+' + x))))
+                self.assertTrue(hl.eval(hl.is_infinite(f('-' + x))))
+                self.assertTrue(hl.eval(f('-' + x) < 0.0))
+
     def test_str_missingness(self):
         self.assertEqual(hl.eval(hl.str(1)), '1')
         self.assertEqual(hl.eval(hl.str(hl.null('int32'))), None)
@@ -3190,3 +3203,13 @@ class Tests(unittest.TestCase):
         t = hl.utils.range_table(3)
         t = t.key_by(-t.idx)
         assert t.idx.collect() == [2, 1, 0]
+
+    def test_struct_slice(self):
+        assert hl.eval(hl.struct(x=3, y=4, z=5, a=10)[1:]) == hl.Struct(y=4, z=5, a=10)
+        assert hl.eval(hl.struct(x=3, y=4, z=5, a=10)[0:4:2]) == hl.Struct(x=3, z=5)
+        assert hl.eval(hl.struct(x=3, y=4, z=5, a=10)[-2:]) == hl.Struct(z=5, a=10)
+
+    def test_tuple_slice(self):
+        assert hl.eval(hl.tuple((3, 4, 5, 10))[1:]) == (4, 5, 10)
+        assert hl.eval(hl.tuple((3, 4, 5, 10))[0:4:2]) == (3, 5)
+        assert hl.eval(hl.tuple((3, 4, 5, 10))[-2:]) == (5, 10)

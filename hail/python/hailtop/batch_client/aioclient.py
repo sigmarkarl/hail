@@ -1,13 +1,14 @@
 import math
 import random
 import logging
+import functools
 import asyncio
 import aiohttp
 from asyncinit import asyncinit
 
 from hailtop.config import get_deploy_config
 from hailtop.auth import async_get_userinfo, service_auth_headers
-from hailtop.utils import AsyncWorkerPool, request_retry_transient_errors
+from hailtop.utils import bounded_gather, grouped, request_retry_transient_errors
 
 from .globals import complete_states
 
@@ -228,23 +229,18 @@ class Batch:
     async def cancel(self):
         await self._client._patch(f'/api/v1alpha/batches/{self.id}/cancel')
 
-    async def status(self, limit=None, offset=None):
-        params = None
-        if limit is not None:
-            if not params:
-                params = {}
-            params['limit'] = str(limit)
-        if offset is not None:
-            if limit is None:
-                raise ValueError("cannot define 'offset' without a 'limit'")
-            params['offset'] = str(offset)
+    async def status(self, include_jobs=True):
+        if include_jobs:
+            params = {'include_jobs': '1'}
+        else:
+            params = None
         resp = await self._client._get(f'/api/v1alpha/batches/{self.id}', params=params)
         return await resp.json()
 
     async def wait(self):
         i = 0
         while True:
-            status = await self.status(limit=0)
+            status = await self.status(include_jobs=False)
             if status['complete']:
                 return await self.status()
             j = random.randrange(math.floor(1.1 ** i))
@@ -266,7 +262,6 @@ class BatchBuilder:
         self._submitted = False
         self.attributes = attributes
         self.callback = callback
-        self.pool = AsyncWorkerPool(2)
 
     def create_job(self, image, command, env=None, mount_docker_socket=False,
                    resources=None, secrets=None,
@@ -355,22 +350,11 @@ class BatchBuilder:
         b_resp = await self._client._post('/api/v1alpha/batches/create', json=batch_spec)
         b = await b_resp.json()
         log.info(f'created batch {b["id"]}')
-        batch = Batch(self._client, b['id'], b.get('attributes'))
+        batch = Batch(self._client, b['id'], self.attributes)
 
-        specs = []
-        n = 0
-        for job_spec in self._job_specs:
-            n += 1
-            specs.append(job_spec)
-            if n == job_array_size:
-                await self.pool.call(self._submit_job, batch.id, specs)
-                n = 0
-                specs = []
-
-        if specs:
-            await self.pool.call(self._submit_job, batch.id, specs)
-
-        await self.pool.wait()
+        await bounded_gather(*[functools.partial(self._submit_job, batch.id, specs)
+                               for specs in grouped(job_array_size, self._job_specs)],
+                             parallelism=2)
 
         await self._client._patch(f'/api/v1alpha/batches/{batch.id}/close')
         log.info(f'closed batch {b["id"]}')

@@ -173,8 +173,12 @@ def test_ndarray_reshape():
         (a.reshape((-1, 2)), np_a.reshape((-1, 2))),
         (cube_to_rect, np_cube_to_rect),
         (cube_t_to_rect, np_cube_t_to_rect),
-        (hypercube.reshape((5, 7, 9, 3)).reshape((7, 9, 3, 5)), np_hypercube.reshape((7, 9, 3, 5)))
+        (hypercube.reshape((5, 7, 9, 3)).reshape((7, 9, 3, 5)), np_hypercube.reshape((7, 9, 3, 5))),
+        (hypercube.reshape(hl.tuple([5, 7, 9, 3])), np_hypercube.reshape((5, 7, 9, 3)))
     )
+
+    assert hl.eval(hl.null(hl.tndarray(hl.tfloat, 2)).reshape((4, 5))) is None
+    assert hl.eval(hl._ndarray(hl.range(20)).reshape(hl.null(hl.ttuple(hl.tint64, hl.tint64)))) is None
 
     with pytest.raises(FatalError) as exc:
         hl.eval(hl.literal(np_cube).reshape((-1, -1)))
@@ -212,8 +216,10 @@ def test_ndarray_map():
         (c, [[True, True, True],
              [True, True, True]]))
 
+    assert hl.eval(hl.null(hl.tndarray(hl.tfloat, 1)).map(lambda x: x * 2)) is None
+
 @skip_unless_spark_backend()
-def test_ndarray_ops():
+def test_ndarray_map2():
 
     a = 2.0
     b = 3.0
@@ -310,6 +316,14 @@ def test_ndarray_ops():
         (ncube1 / nrow_vec, cube1 / row_vec),
         (nrow_vec / ncube1, row_vec / cube1))
 
+    # Missingness tests
+    missing = hl.null(hl.tndarray(hl.tfloat64, 2))
+    present = hl._ndarray(np.arange(10).reshape(5, 2))
+
+    assert hl.eval(missing + missing) is None
+    assert hl.eval(missing + present) is None
+    assert hl.eval(present + missing) is None
+
 @skip_unless_spark_backend()
 @run_with_cxx_compile()
 def test_ndarray_to_numpy():
@@ -366,6 +380,8 @@ def test_ndarray_transpose():
         (cube.transpose((0, 2, 1)), np_cube.transpose((0, 2, 1))),
         (cube.T, np_cube.T))
 
+    assert hl.eval(hl.null(hl.tndarray(hl.tfloat, 1)).T) is None
+
     with pytest.raises(ValueError) as exc:
         v.transpose((1,))
     assert "Invalid axis: 1" in str(exc.value)
@@ -379,32 +395,30 @@ def test_ndarray_transpose():
     assert "Axes cannot contain duplicates" in str(exc.value)
 
 @skip_unless_spark_backend()
-@run_with_cxx_compile()
 def test_ndarray_matmul():
     np_v = np.array([1, 2])
     np_m = np.array([[1, 2], [3, 4]])
-    np_cube = np.array([[[1, 2],
-                         [3, 4]],
-                        [[5, 6],
-                         [7, 8]]])
-    np_rect_prism = np.array([[[1, 2],
-                               [3, 4]],
-                              [[5, 6],
-                               [7, 8]],
-                              [[9, 10],
-                               [11, 12]]])
+    np_r = np.array([[1, 2, 3], [4, 5, 6]])
+    np_cube = np.arange(8).reshape((2, 2, 2))
+    np_rect_prism = np.arange(12).reshape((3, 2, 2))
+    np_broadcasted_mat = np.arange(4).reshape((1, 2, 2))
+    np_six_dim_tensor = np.arange(3 * 7 * 1 * 9 * 4 * 5).reshape((3, 7, 1, 9, 4, 5))
+    np_five_dim_tensor = np.arange(7 * 5 * 1 * 5 * 3).reshape((7, 5, 1, 5, 3))
+
     v = hl._ndarray(np_v)
     m = hl._ndarray(np_m)
+    r = hl._ndarray(np_r)
     cube = hl._ndarray(np_cube)
     rect_prism = hl._ndarray(np_rect_prism)
-    np_broadcasted_mat = np.array([[[1, 2],
-                                    [3, 4]]])
-
-    assert(hl.eval(v @ v) == np_v @ np_v)
+    broadcasted_mat = hl._ndarray(np_broadcasted_mat)
+    six_dim_tensor = hl._ndarray(np_six_dim_tensor)
+    five_dim_tensor = hl._ndarray(np_five_dim_tensor)
 
     assert_ndarrays_eq(
+        (v @ v, np_v @ np_v),
         (m @ m, np_m @ np_m),
         (m @ m.T, np_m @ np_m.T),
+        (r @ r.T, np_r @ np_r.T),
         (v @ m, np_v @ np_m),
         (m @ v, np_m @ np_v),
         (cube @ cube, np_cube @ np_cube),
@@ -415,7 +429,13 @@ def test_ndarray_matmul():
         (rect_prism @ m, np_rect_prism @ np_m),
         (m @ rect_prism, np_m @ np_rect_prism),
         (m @ rect_prism.T, np_m @ np_rect_prism.T),
-        (hl._ndarray(np_broadcasted_mat) @ rect_prism, np_broadcasted_mat @ np_rect_prism))
+        (broadcasted_mat @ rect_prism, np_broadcasted_mat @ np_rect_prism),
+        (six_dim_tensor @ five_dim_tensor, np_six_dim_tensor @ np_five_dim_tensor)
+    )
+
+    assert hl.eval(hl.null(hl.tndarray(hl.tfloat64, 2)) @ hl.null(hl.tndarray(hl.tfloat64, 2))) is None
+    assert hl.eval(hl.null(hl.tndarray(hl.tint64, 2)) @ hl._ndarray(np.arange(10).reshape(5, 2))) is None
+    assert hl.eval(hl._ndarray(np.arange(10).reshape(5, 2)) @ hl.null(hl.tndarray(hl.tint64, 2))) is None
 
     with pytest.raises(ValueError):
         m @ 5
@@ -425,3 +445,34 @@ def test_ndarray_matmul():
 
     with pytest.raises(ValueError):
         cube @ hl._ndarray(5)
+
+    with pytest.raises(FatalError) as exc:
+        hl.eval(r @ r)
+    assert "Matrix dimensions incompatible: 3 2" in str(exc)
+
+    with pytest.raises(FatalError) as exc:
+        hl.eval(hl._ndarray([1, 2]) @ hl._ndarray([1, 2, 3]))
+    assert "Matrix dimensions incompatible" in str(exc)
+
+@skip_unless_spark_backend()
+def test_ndarray_big():
+    assert hl.eval(hl._ndarray(hl.range(100_000))).size == 100_000
+
+@skip_unless_spark_backend()
+def test_ndarray_full():
+    assert_ndarrays_eq(
+        (hl._nd.zeros(4), np.zeros(4)),
+        (hl._nd.zeros((3, 4, 5)), np.zeros((3, 4, 5))),
+        (hl._nd.ones(6), np.ones(6)),
+        (hl._nd.ones((6, 6, 6)), np.ones((6, 6, 6))),
+        (hl._nd.full(7, 9), np.full(7, 9)),
+        (hl._nd.full((3, 4, 5), 9), np.full((3, 4, 5), 9))
+    )
+
+@skip_unless_spark_backend()
+def test_ndarray_mixed():
+    assert hl.eval(hl.null(hl.tndarray(hl.tint64, 2)).map(lambda x: x * x).reshape((4, 5)).T) is None
+    assert hl.eval(
+        (hl._nd.zeros((5, 10)).map(lambda x: x - 2) +
+         hl._nd.ones((5, 10)).map(lambda x: x + 5)).reshape(hl.null(hl.ttuple(hl.tint64, hl.tint64))).T.reshape((10, 5))) is None
+    assert hl.eval(hl.or_missing(False, hl._ndarray(np.arange(10)).reshape((5,2)).map(lambda x: x * 2)).map(lambda y: y * 2)) is None
