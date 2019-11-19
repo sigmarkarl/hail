@@ -6,7 +6,6 @@ buildscript {
 }
 
 plugins {
-  id "com.gradle.enterprise" version "3.0"
   id 'java'
   id 'scala'
   id 'idea'
