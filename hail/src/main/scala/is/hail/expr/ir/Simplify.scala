@@ -442,7 +442,7 @@ object Simplify {
             uid3,
             GetField(Ref(uid3, sorted.typ.asInstanceOf[TArray].elementType), "value"))),
           ("global", GetField(Ref(uid, x.typ), "global")))))
-    case ArrayLen(GetField(TableCollect(child), "rows")) => TableCount(child)
+    case ArrayLen(GetField(TableCollect(child), "rows")) => Cast(TableCount(child), TInt32())
     case GetField(TableCollect(child), "global") => TableGetGlobals(child)
 
     case TableAggregate(child, query) if child.typ.key.nonEmpty && !ContainsNonCommutativeAgg(query) =>
@@ -738,16 +738,48 @@ object Simplify {
         Interval.union(i1.toArray[Interval] ++ i2.toArray[Interval], ord)
       TableFilterIntervals(child, intervals.toFastIndexedSeq, keep1)
 
-    case TableFilterIntervals(k@TableKeyBy(child, keys, isSorted), intervals, keep) if !child.typ.key.startsWith(keys) =>
-      val ord = k.typ.keyType.ordering.intervalEndpointOrdering
-      val maybeFlip: IR => IR = if (keep) identity else !_
-      val pred = maybeFlip(invoke("sortedNonOverlappingIntervalsContain",
-        TBoolean(),
-        Literal(TArray(TInterval(k.typ.keyType)), Interval.union(intervals.toArray, ord).toFastIndexedSeq),
-        MakeStruct(k.typ.keyType.fieldNames.map { keyField =>
-          (keyField, GetField(Ref("row", child.typ.rowType), keyField))
-        })))
-      TableKeyBy(TableFilter(child, pred), keys, isSorted)
+      // FIXME: Can try to serialize intervals shorter than the key
+      // case TableFilterIntervals(k@TableKeyBy(child, keys, isSorted), intervals, keep) if !child.typ.key.startsWith(keys) =>
+      //   val ord = k.typ.keyType.ordering.intervalEndpointOrdering
+      //   val maybeFlip: IR => IR = if (keep) identity else !_
+      //   val pred = maybeFlip(invoke("sortedNonOverlappingIntervalsContain",
+      //     TBoolean(),
+      //     Literal(TArray(TInterval(k.typ.keyType)), Interval.union(intervals.toArray, ord).toFastIndexedSeq),
+      //     MakeStruct(k.typ.keyType.fieldNames.map { keyField =>
+      //       (keyField, GetField(Ref("row", child.typ.rowType), keyField))
+      //     })))
+      //   TableKeyBy(TableFilter(child, pred), keys, isSorted)
+
+    case TableFilterIntervals(TableRead(t, false, tr: TableNativeReader), intervals, true) if canRepartition
+      && tr.spec.indexed(tr.path)
+      && tr.options.forall(_.filterIntervals) =>
+      val newOpts = tr.options match {
+        case None =>
+          val pt = t.keyType
+          NativeReaderOptions(Interval.union(intervals.toArray, pt.ordering.intervalEndpointOrdering), pt, true)
+        case Some(NativeReaderOptions(preIntervals, intervalPointType, _)) =>
+          val iord = intervalPointType.ordering.intervalEndpointOrdering
+          NativeReaderOptions(
+            Interval.intersection(Interval.union(preIntervals.toArray, iord), Interval.union(intervals.toArray, iord), iord),
+            intervalPointType, true)
+      }
+      TableRead(t, false, TableNativeReader(tr.path, Some(newOpts), tr.spec))
+
+    case TableFilterIntervals(TableRead(t, false, tr: TableNativeZippedReader), intervals, true) if canRepartition
+      && tr.specLeft.indexed(tr.pathLeft)
+      && tr.options.forall(_.filterIntervals) =>
+      val newOpts = tr.options match {
+        case None =>
+          val pt = t.keyType
+          NativeReaderOptions(Interval.union(intervals.toArray, pt.ordering.intervalEndpointOrdering), pt, true)
+        case Some(NativeReaderOptions(preIntervals, intervalPointType, _)) =>
+          val iord = intervalPointType.ordering.intervalEndpointOrdering
+          NativeReaderOptions(
+            Interval.intersection(Interval.union(preIntervals.toArray, iord), Interval.union(intervals.toArray, iord), iord),
+            intervalPointType, true)
+      }
+      TableRead(t, false, TableNativeZippedReader(tr.pathLeft, tr.pathRight, Some(newOpts), tr.specLeft, tr.specRight))
+
   }
 
   private[this] def matrixRules(canRepartition: Boolean): PartialFunction[MatrixIR, MatrixIR] = {
