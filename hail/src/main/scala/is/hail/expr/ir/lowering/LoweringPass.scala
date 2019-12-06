@@ -1,6 +1,6 @@
 package is.hail.expr.ir.lowering
 
-import is.hail.expr.ir.{BaseIR, ExecuteContext, IR, InterpretNonCompilable, LowerMatrixIR, MatrixIR, TableIR}
+import is.hail.expr.ir.{BaseIR, BlockMatrixIR, ExecuteContext, IR, InterpretNonCompilable, LowerMatrixIR, MatrixIR, TableIR}
 
 trait LoweringPass {
   val before: IRState
@@ -28,6 +28,7 @@ case object LowerMatrixToTablePass extends LoweringPass {
     case x: IR => LowerMatrixIR(x)
     case x: TableIR => LowerMatrixIR(x)
     case x: MatrixIR => LowerMatrixIR(x)
+    case x: BlockMatrixIR => LowerMatrixIR(x)
   }
 }
 
@@ -45,4 +46,12 @@ case object InterpretNonCompilablePass extends LoweringPass {
   val context: String = "InterpretNonCompilable"
 
   def transform(ctx: ExecuteContext, ir: BaseIR): BaseIR = InterpretNonCompilable(ctx, ir)
+}
+
+case object LowerTableToDistributedArrayPass extends LoweringPass {
+  val before: IRState = MatrixLoweredToTable
+  val after: IRState = CompilableIR
+  val context: String = "LowerTableToDistributedArray"
+
+  def transform(ctx: ExecuteContext, ir: BaseIR): BaseIR = LowerTableIR.lower(ir.asInstanceOf[IR])
 }

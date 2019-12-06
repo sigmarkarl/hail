@@ -289,9 +289,9 @@ class BlockMatrixIRTests(unittest.TestCase):
         vector_ir = ir.MakeArray([ir.F64(3), ir.F64(2)], hl.tarray(hl.tfloat64))
 
         read = ir.BlockMatrixRead(ir.BlockMatrixNativeReader(resource('blockmatrix_example/0')))
-        add_two_bms = ir.BlockMatrixMap2(read, read, ir.ApplyBinaryPrimOp('+', ir.Ref('l'), ir.Ref('r')))
-        negate_bm = ir.BlockMatrixMap(read, ir.ApplyUnaryPrimOp('-', ir.Ref('element')))
-        sqrt_bm = ir.BlockMatrixMap(read, hl.sqrt(construct_expr(ir.Ref('element'), hl.tfloat64))._ir)
+        add_two_bms = ir.BlockMatrixMap2(read, read, 'l', 'r', ir.ApplyBinaryPrimOp('+', ir.Ref('l'), ir.Ref('r')))
+        negate_bm = ir.BlockMatrixMap(read, 'element', ir.ApplyUnaryPrimOp('-', ir.Ref('element')))
+        sqrt_bm = ir.BlockMatrixMap(read, 'element', hl.sqrt(construct_expr(ir.Ref('element'), hl.tfloat64))._ir)
 
         scalar_to_bm = ir.ValueToBlockMatrix(scalar_ir, [1, 1], 1)
         col_vector_to_bm = ir.ValueToBlockMatrix(vector_ir, [2, 1], 1)
@@ -303,7 +303,7 @@ class BlockMatrixIRTests(unittest.TestCase):
         matmul = ir.BlockMatrixDot(broadcast_scalar, transpose)
 
         pow_ir = (construct_expr(ir.Ref('l'), hl.tfloat64) ** construct_expr(ir.Ref('r'), hl.tfloat64))._ir
-        squared_bm = ir.BlockMatrixMap2(scalar_to_bm, scalar_to_bm, pow_ir)
+        squared_bm = ir.BlockMatrixMap2(scalar_to_bm, scalar_to_bm, 'l', 'r', pow_ir)
         slice_bm = ir.BlockMatrixSlice(matmul, [slice(0, 2, 1), slice(0, 1, 1)])
 
         return [
@@ -464,3 +464,16 @@ class CSETests(unittest.TestCase):
             ' (ApplyBinaryPrimOp `+` (Ref __cse_1) (Ref __cse_1))))'
         )
         assert expected == CSERenderer()(agglet)
+
+    def test_refs(self):
+        ref = ir.Ref('row')
+        x = ir.TableMapRows(ir.TableRange(10, 1),
+                            ir.MakeStruct([('foo', ir.GetField(ref, 'idx')),
+                                           ('bar', ir.GetField(ref, 'idx'))]))
+        expected = (
+            '(TableMapRows (TableRange 10 1)'
+                ' (MakeStruct'
+                    ' (foo (GetField idx (Ref row)))'
+                    ' (bar (GetField idx (Ref row)))))'
+        )
+        assert expected == CSERenderer()(x)

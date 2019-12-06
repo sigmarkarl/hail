@@ -9,7 +9,7 @@ import is.hail.backend.distributed.DistributedBackend
 import is.hail.backend.spark.SparkBackend
 import is.hail.expr.ir
 import is.hail.expr.ir.functions.IRFunctionRegistry
-import is.hail.expr.ir.{BaseIR, TextTableReader, ExecuteContext}
+import is.hail.expr.ir.{BaseIR, ExecuteContext}
 import is.hail.expr.types.physical.PStruct
 import is.hail.expr.types.virtual._
 import is.hail.io.bgen.IndexBgen
@@ -19,9 +19,8 @@ import is.hail.io.vcf._
 import is.hail.io.{AbstractTypedCodecSpec, Decoder}
 import is.hail.rvd.{AbstractIndexSpec, RVDContext}
 import is.hail.sparkextras.{ContextRDD, IndexReadRDD}
-import is.hail.table.Table
 import is.hail.utils.{log, _}
-import is.hail.variant.{MatrixTable, ReferenceGenome}
+import is.hail.variant.ReferenceGenome
 import org.apache.hadoop
 import org.apache.log4j.{ConsoleAppender, LogManager, PatternLayout, PropertyConfigurator}
 import org.apache.spark._
@@ -36,8 +35,6 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
-
-import is.hail.sparkextras.IndexedFilePartition
 
 case class FilePartition(index: Int, file: String) extends Partition
 
@@ -640,21 +637,31 @@ class HailContext private(
 
   def version: String = is.hail.HAIL_PRETTY_VERSION
 
-  def grep(regex: String, files: Seq[String], maxLines: Int = 100) {
+  private[this] def fileAndLineCounts(
+    regex: String,
+    files: Seq[String],
+    maxLines: Int
+  ): Map[String, Array[WithContext[String]]] = {
     val regexp = regex.r
     sc.textFilesLines(sFS.globAll(files))
       .filter(line => regexp.findFirstIn(line.value).isDefined)
       .take(maxLines)
       .groupBy(_.source.asInstanceOf[Context].file)
-      .foreach { case (file, lines) =>
-        info(s"$file: ${ lines.length } ${ plural(lines.length, "match", "matches") }:")
-        lines.map(_.value).foreach { line =>
-          val (screen, logged) = line.truncatable().strings
-          log.info("\t" + logged)
-          println(s"\t$screen")
-        }
-      }
   }
+
+  def grepPrint(regex: String, files: Seq[String], maxLines: Int) {
+    fileAndLineCounts(regex, files, maxLines).foreach { case (file, lines) =>
+      info(s"$file: ${ lines.length } ${ plural(lines.length, "match", "matches") }:")
+      lines.map(_.value).foreach { line =>
+        val (screen, logged) = line.truncatable().strings
+        log.info("\t" + logged)
+        println(s"\t$screen")
+      }
+    }
+  }
+
+  def grepReturn(regex: String, files: Seq[String], maxLines: Int): Array[(String, Array[String])] =
+    fileAndLineCounts(regex, files, maxLines).mapValues(_.map(_.value)).toArray
 
   def getTemporaryFile(nChar: Int = 10, prefix: Option[String] = None, suffix: Option[String] = None): String =
     sFS.getTemporaryFile(tmpDir, nChar, prefix, suffix)
@@ -677,53 +684,6 @@ class HailContext private(
     }
     info(s"Number of BGEN files indexed: ${ files.length }")
   }
-
-  def importTable(input: String,
-    keyNames: Option[IndexedSeq[String]] = None,
-    nPartitions: Option[Int] = None,
-    types: Map[String, Type] = Map.empty[String, Type],
-    comment: Array[String] = Array.empty[String],
-    separator: String = "\t",
-    missing: String = "NA",
-    noHeader: Boolean = false,
-    impute: Boolean = false,
-    quote: java.lang.Character = null,
-    skipBlankLines: Boolean = false,
-    forceBGZ: Boolean = false
-  ): Table = importTables(List(input), keyNames, nPartitions, types, comment,
-    separator, missing, noHeader, impute, quote, skipBlankLines, forceBGZ)
-
-  def importTables(inputs: Seq[String],
-    keyNames: Option[IndexedSeq[String]] = None,
-    nPartitions: Option[Int] = None,
-    types: Map[String, Type] = Map.empty[String, Type],
-    comment: Array[String] = Array.empty[String],
-    separator: String = "\t",
-    missing: String = "NA",
-    noHeader: Boolean = false,
-    impute: Boolean = false,
-    quote: java.lang.Character = null,
-    skipBlankLines: Boolean = false,
-    forceBGZ: Boolean = false): Table = {
-    require(nPartitions.forall(_ > 0), "nPartitions argument must be positive")
-
-    val files = sFS.globAll(inputs)
-    if (files.isEmpty)
-      fatal(s"Arguments referred to no files: '${ inputs.mkString(",") }'")
-
-    HailContext.maybeGZipAsBGZip(forceBGZ) {
-      TextTableReader.read(this)(files, types, comment, separator, missing,
-        noHeader, impute, nPartitions.getOrElse(sc.defaultMinPartitions), quote,
-        skipBlankLines).keyBy(keyNames)
-    }
-  }
-
-  def read(file: String, dropCols: Boolean = false, dropRows: Boolean = false): MatrixTable = {
-    MatrixTable.read(this, file, dropCols = dropCols, dropRows = dropRows)
-  }
-
-  def readVDS(file: String, dropSamples: Boolean = false, dropVariants: Boolean = false): MatrixTable =
-    read(file, dropSamples, dropVariants)
 
   def readPartitions[T: ClassTag](
     path: String,
@@ -812,6 +772,7 @@ class HailContext private(
   }
 
   def readRowsSplit(
+    ctx: ExecuteContext,
     pathRows: String,
     pathEntries: String,
     indexSpecRows: Option[AbstractIndexSpec],
@@ -833,7 +794,7 @@ class HailContext private(
       requestedTypeEntries.fieldNames.map(f =>
           f -> ir.GetField(ir.Ref("right", requestedTypeEntries), f)))
 
-    val (t: PStruct, makeInserter) = ir.Compile[Long, Long, Long](
+    val (t: PStruct, makeInserter) = ir.Compile[Long, Long, Long](ctx,
       "left", rowsType,
       "right", entriesType,
       inserterIR)
@@ -890,7 +851,6 @@ class HailFeatureFlags {
   private[this] val flags: mutable.Map[String, String] =
     mutable.Map[String, String](
       "lower" -> null,
-      "newaggs" -> "1",
       "max_leader_scans" -> "1000",
       "jvm_bytecode_dump" -> null
     )

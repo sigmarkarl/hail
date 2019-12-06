@@ -4,16 +4,9 @@ import is.hail.HailContext
 import is.hail.utils._
 
 object Optimize {
-  def optimize(ir0: BaseIR, noisy: Boolean, context: String, ctx: Option[ExecuteContext] = None): BaseIR = {
+  def apply[T <: BaseIR](ir0: T, noisy: Boolean, context: String, ctx: ExecuteContext): T = {
     if (noisy)
       log.info(s"optimize $context: before: IR size ${ IRSize(ir0) }: \n" + Pretty(ir0, elideLiterals = true))
-
-    def maybeTime[T](x: => T): T = {
-      ctx match {
-        case Some(ctx) => ctx.timer.time("Optimize")(x)
-        case None => x
-      }
-    }
 
     var ir = ir0
     var last: BaseIR = null
@@ -21,15 +14,10 @@ object Optimize {
     val maxIter = HailContext.get.optimizerIterations
 
     def runOpt(f: BaseIR => BaseIR, iter: Int, optContext: String): Unit = {
-      ctx match {
-        case None =>
-          ir = f(ir)
-        case Some(ctx) =>
-          ir = ctx.timer.time(optContext)(f(ir))
-      }
+      ir = ctx.timer.time(optContext)(f(ir).asInstanceOf[T])
     }
 
-    maybeTime({
+    ctx.timer.time("Optimize") {
       while (iter < maxIter && ir != last) {
         last = ir
         runOpt(FoldConstants(_), iter, "FoldConstants")
@@ -41,7 +29,7 @@ object Optimize {
 
         iter += 1
       }
-    })
+    }
 
     if (ir.typ != ir0.typ)
       throw new RuntimeException(s"optimization changed type!" +
@@ -55,19 +43,4 @@ object Optimize {
 
     ir
   }
-
-  def apply(ir: TableIR, noisy: Boolean): TableIR =
-    optimize(ir, noisy, "").asInstanceOf[TableIR]
-
-  def apply(ir: TableIR): TableIR = apply(ir, true)
-
-  def apply(ir: MatrixIR, noisy: Boolean): MatrixIR =
-    optimize(ir, noisy, "").asInstanceOf[MatrixIR]
-
-  def apply(ir: MatrixIR): MatrixIR = apply(ir, true)
-
-  def apply(ir: IR, noisy: Boolean, context: String): IR =
-    optimize(ir, noisy, context).asInstanceOf[IR]
-
-  def apply(ir: IR): IR = apply(ir, true, "")
 }

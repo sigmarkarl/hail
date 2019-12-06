@@ -1,6 +1,7 @@
 import math
 import random
 import logging
+import json
 import functools
 import asyncio
 import aiohttp
@@ -8,31 +9,11 @@ from asyncinit import asyncinit
 
 from hailtop.config import get_deploy_config
 from hailtop.auth import async_get_userinfo, service_auth_headers
-from hailtop.utils import bounded_gather, grouped, request_retry_transient_errors
+from hailtop.utils import bounded_gather, request_retry_transient_errors
 
 from .globals import tasks, complete_states
 
 log = logging.getLogger('batch_client.aioclient')
-
-job_array_size = 1000
-
-
-def filter_params(complete, success, attributes):
-    params = None
-    if complete is not None:
-        if not params:
-            params = {}
-        params['complete'] = '1' if complete else '0'
-    if success is not None:
-        if not params:
-            params = {}
-        params['success'] = '1' if success else '0'
-    if attributes is not None:
-        if not params:
-            params = {}
-        for n, v in attributes.items():
-            params[f'a:{n}'] = v
-    return params
 
 
 class Job:
@@ -63,12 +44,32 @@ class Job:
         return docker_container_status.get('error')
 
     @staticmethod
-    def _get_container_status_exit_code(container_status):
-        dcontainer_status = container_status.get('container_status')
-        if not dcontainer_status:
+    def _get_out_of_memory(job_status, task):
+        status = job_status.get('status')
+        if not status:
             return None
 
-        return dcontainer_status.get('exit_code')
+        container_statuses = status.get('container_statuses')
+        if not container_statuses:
+            return None
+
+        container_status = container_statuses.get(task)
+        if not container_status:
+            return None
+
+        docker_container_status = container_status.get('container_status')
+        if not docker_container_status:
+            return None
+
+        return docker_container_status['out_of_memory']
+
+    @staticmethod
+    def _get_container_status_exit_code(container_status):
+        docker_container_status = container_status.get('container_status')
+        if not docker_container_status:
+            return None
+
+        return docker_container_status.get('exit_code')
 
     @staticmethod
     def _get_exit_code(job_status, task):
@@ -124,7 +125,7 @@ class Job:
         return 0
 
     @staticmethod
-    def total_duration(job_status):
+    def total_duration_msecs(job_status):
         status = job_status.get('status')
         if not status:
             return None
@@ -309,10 +310,22 @@ class Batch:
     async def status(self, include_jobs=True):
         resp = await self._client._get(f'/api/v1alpha/batches/{self.id}')
         batch = await resp.json()
+
         if include_jobs:
-            resp = await self._client._get(f'/api/v1alpha/batches/{self.id}/jobs')
-            jobs = await resp.json()
+            jobs = []
+            last_job_id = None
+            while True:
+                params = {}
+                if last_job_id is not None:
+                    params['last_job_id'] = last_job_id
+                resp = await self._client._get(f'/api/v1alpha/batches/{self.id}/jobs', params=params)
+                body = await resp.json()
+                jobs.extend(body['jobs'])
+                last_job_id = body.get('last_job_id')
+                if last_job_id is None:
+                    break
             batch['jobs'] = jobs
+
         return batch
 
     async def wait(self):
@@ -411,15 +424,33 @@ class BatchBuilder:
         self._jobs.append(j)
         return j
 
-    async def _submit_job(self, batch_id, job_specs):
-        await self._client._post(f'/api/v1alpha/batches/{batch_id}/jobs/create', json=job_specs)
+    async def _submit_jobs(self, batch_id, byte_job_specs):
+        assert len(byte_job_specs) > 0
+
+        b = bytearray()
+        b.append(ord('['))
+
+        i = 0
+        while i < len(byte_job_specs):
+            spec = byte_job_specs[i]
+            if i > 0:
+                b.append(ord(','))
+            b.extend(spec)
+            i += 1
+
+        b.append(ord(']'))
+
+        await self._client._post(
+            f'/api/v1alpha/batches/{batch_id}/jobs/create',
+            data=aiohttp.BytesPayload(
+                b, content_type='application/json', encoding='utf-8'))
 
     async def submit(self):
         if self._submitted:
             raise ValueError("cannot submit an already submitted batch")
         self._submitted = True
 
-        batch_spec = {'n_jobs': len(self._job_specs)}
+        batch_spec = {'billing_project': self._client.billing_project, 'n_jobs': len(self._job_specs)}
         if self.attributes:
             batch_spec['attributes'] = self.attributes
         if self.callback:
@@ -430,8 +461,25 @@ class BatchBuilder:
         log.info(f'created batch {b["id"]}')
         batch = Batch(self._client, b['id'], self.attributes)
 
-        await bounded_gather(*[functools.partial(self._submit_job, batch.id, specs)
-                               for specs in grouped(job_array_size, self._job_specs)],
+        byte_job_specs = [json.dumps(job_spec).encode('utf-8') for job_spec in self._job_specs]
+
+        groups = []
+        group = []
+        group_size = 0
+        for spec in byte_job_specs:
+            n = len(spec)
+            if group_size + n < 1000000 and len(group) < 1000:
+                group.append(spec)
+                group_size += n
+            else:
+                groups.append(group)
+                group = [spec]
+                group_size = n
+        if group:
+            groups.append(group)
+
+        await bounded_gather(*[functools.partial(self._submit_jobs, batch.id, group)
+                               for group in groups],
                              parallelism=2)
 
         await self._client._patch(f'/api/v1alpha/batches/{batch.id}/close')
@@ -449,8 +497,10 @@ class BatchBuilder:
 
 @asyncinit
 class BatchClient:
-    async def __init__(self, deploy_config=None, session=None, headers=None,
-                       _token=None):
+    async def __init__(self, billing_project, deploy_config=None, session=None,
+                       headers=None, _token=None):
+        self.billing_project = billing_project
+
         if not deploy_config:
             deploy_config = get_deploy_config()
 
@@ -478,10 +528,10 @@ class BatchClient:
             self._session, 'GET',
             self.url + path, params=params, headers=self._headers)
 
-    async def _post(self, path, json=None):
+    async def _post(self, path, data=None, json=None):
         return await request_retry_transient_errors(
             self._session, 'POST',
-            self.url + path, json=json, headers=self._headers)
+            self.url + path, data=data, json=json, headers=self._headers)
 
     async def _patch(self, path):
         return await request_retry_transient_errors(
@@ -493,14 +543,23 @@ class BatchClient:
             self._session, 'DELETE',
             self.url + path, headers=self._headers)
 
-    async def list_batches(self, complete=None, success=None, attributes=None):
-        params = filter_params(complete, success, attributes)
-        batches_resp = await self._get('/api/v1alpha/batches', params=params)
-        batches = await batches_resp.json()
-        return [Batch(self,
-                      b['id'],
-                      attributes=b.get('attributes'))
-                for b in batches]
+    async def list_batches(self, q=None):
+        last_batch_id = None
+        while True:
+            params = {}
+            if q is not None:
+                params['q'] = q
+            if last_batch_id is not None:
+                params['last_batch_id'] = last_batch_id
+
+            resp = await self._get('/api/v1alpha/batches', params=params)
+            body = await resp.json()
+
+            for batch in body['batches']:
+                yield Batch(self, batch['id'], attributes=batch.get('attributes'))
+            last_batch_id = body.get('last_batch_id')
+            if last_batch_id is None:
+                break
 
     async def get_job(self, batch_id, job_id):
         b = await self.get_batch(batch_id)

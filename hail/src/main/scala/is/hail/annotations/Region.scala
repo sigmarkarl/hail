@@ -156,6 +156,52 @@ object Region {
   def setMemory(offset: Code[Long], size: Code[Long], b: Code[Byte]): Code[Unit] =
     Code.invokeScalaObject[Long, Long, Byte, Unit](Region.getClass, "setMemory", offset, size, b)
 
+  def containsNonZeroBits(address: Code[Long], nBits: Code[Long]): Code[Boolean] =
+    Code.invokeScalaObject[Long, Long, Boolean](Region.getClass, "containsNonZeroBits", address, nBits)
+
+  def containsNonZeroBits(address: Long, nBits: Long): Boolean = {
+    assert((address & 0x3) == 0)
+
+    var bitsRead: Long = 0
+
+    if ((address & 0x7) != 0 && nBits >= 32) {
+      if (loadInt(address) != 0)
+        return true
+
+      bitsRead += 32
+    }
+
+    while (nBits - bitsRead >= 64) {
+      if (loadLong(address + bitsRead/8) != 0)
+        return true
+
+      bitsRead += 64
+    }
+
+    while (nBits - bitsRead >= 32) {
+      if (loadInt(address + bitsRead/8) != 0)
+        return true
+
+      bitsRead += 32
+    }
+
+    while (nBits - bitsRead >= 8) {
+      if (loadByte(address + bitsRead/8) != 0)
+        return true
+
+      bitsRead += 8
+    }
+
+    while (bitsRead < nBits) {
+      if (loadBit(address, bitsRead))
+        return true
+
+      bitsRead += 1
+    }
+
+    false
+  }
+
   def loadPrimitive(typ: PType): Code[Long] => Code[_] = typ.fundamentalType match {
     case _: PBoolean => loadBoolean
     case _: PInt32 => loadInt
@@ -209,6 +255,74 @@ object Region {
   def apply(blockSize: Region.Size = Region.REGULAR, pool: RegionPool = null): Region = {
     (if (pool == null) RegionPool.get else pool)
       .getRegion(blockSize)
+  }
+
+  def pretty(t: PType, off: Long): String = {
+    val v = new PrettyVisitor()
+    visit(t, off, v)
+    v.result()
+  }
+
+  def visit(t: PType, off: Long, v: ValueVisitor) {
+    t match {
+      case _: PBoolean => v.visitBoolean(Region.loadBoolean(off))
+      case _: PInt32 => v.visitInt32(Region.loadInt(off))
+      case _: PInt64 => v.visitInt64(Region.loadLong(off))
+      case _: PFloat32 => v.visitFloat32(Region.loadFloat(off))
+      case _: PFloat64 => v.visitFloat64(Region.loadDouble(off))
+      case _: PString =>
+        val boff = off
+        v.visitString(PString.loadString(boff))
+      case _: PBinary =>
+        val boff = off
+        val length = PBinary.loadLength(boff)
+        val b = Region.loadBytes(PBinary.bytesOffset(boff), length)
+        v.visitBinary(b)
+      case t: PContainer =>
+        val aoff = off
+        val pt = t
+        val length = pt.loadLength(aoff)
+        v.enterArray(t, length)
+        var i = 0
+        while (i < length) {
+          v.enterElement(i)
+          if (pt.isElementDefined(aoff, i))
+            visit(t.elementType, pt.loadElement(aoff, length, i), v)
+          else
+            v.visitMissing(t.elementType)
+          i += 1
+        }
+        v.leaveArray()
+      case t: PStruct =>
+        v.enterStruct(t)
+        var i = 0
+        while (i < t.size) {
+          val f = t.fields(i)
+          v.enterField(f)
+          if (t.isFieldDefined(off, i))
+            visit(f.typ, t.loadField(off, i), v)
+          else
+            v.visitMissing(f.typ)
+          v.leaveField()
+          i += 1
+        }
+        v.leaveStruct()
+      case t: PTuple =>
+        v.enterTuple(t)
+        var i = 0
+        while (i < t.size) {
+          v.enterElement(i)
+          if (t.isFieldDefined(off, i))
+            visit(t.types(i), t.loadField(off, i), v)
+          else
+            v.visitMissing(t.types(i))
+          v.leaveElement()
+          i += 1
+        }
+        v.leaveTuple()
+      case t: ComplexPType =>
+        visit(t.representation, off, v)
+    }
   }
 }
 
@@ -283,73 +397,9 @@ final class Region protected[annotations](var blockSize: Region.Size, var pool: 
     memory.releaseReferenceAtIndex(idx)
   }
 
-  def visit(t: PType, off: Long, v: ValueVisitor) {
-    t match {
-      case _: PBoolean => v.visitBoolean(Region.loadBoolean(off))
-      case _: PInt32 => v.visitInt32(Region.loadInt(off))
-      case _: PInt64 => v.visitInt64(Region.loadLong(off))
-      case _: PFloat32 => v.visitFloat32(Region.loadFloat(off))
-      case _: PFloat64 => v.visitFloat64(Region.loadDouble(off))
-      case _: PString =>
-        val boff = off
-        v.visitString(PString.loadString(this, boff))
-      case _: PBinary =>
-        val boff = off
-        val length = PBinary.loadLength(this, boff)
-        val b = Region.loadBytes(PBinary.bytesOffset(boff), length)
-        v.visitBinary(b)
-      case t: PContainer =>
-        val aoff = off
-        val pt = t
-        val length = pt.loadLength(this, aoff)
-        v.enterArray(t, length)
-        var i = 0
-        while (i < length) {
-          v.enterElement(i)
-          if (pt.isElementDefined(this, aoff, i))
-            visit(t.elementType, pt.loadElement(this, aoff, length, i), v)
-          else
-            v.visitMissing(t.elementType)
-          i += 1
-        }
-        v.leaveArray()
-      case t: PStruct =>
-        v.enterStruct(t)
-        var i = 0
-        while (i < t.size) {
-          val f = t.fields(i)
-          v.enterField(f)
-          if (t.isFieldDefined(this, off, i))
-            visit(f.typ, t.loadField(this, off, i), v)
-          else
-            v.visitMissing(f.typ)
-          v.leaveField()
-          i += 1
-        }
-        v.leaveStruct()
-      case t: PTuple =>
-        v.enterTuple(t)
-        var i = 0
-        while (i < t.size) {
-          v.enterElement(i)
-          if (t.isFieldDefined(this, off, i))
-            visit(t.types(i), t.loadField(this, off, i), v)
-          else
-            v.visitMissing(t.types(i))
-          v.leaveElement()
-          i += 1
-        }
-        v.leaveTuple()
-      case t: ComplexPType =>
-        visit(t.representation, off, v)
-    }
-  }
+  def storeJavaObject(obj: AnyRef): Int = memory.storeJavaObject(obj)
 
-  def pretty(t: PType, off: Long): String = {
-    val v = new PrettyVisitor()
-    visit(t, off, v)
-    v.result()
-  }
+  def lookupJavaObject(idx: Int): AnyRef = memory.lookupJavaObject(idx)
 
   def prettyBits(): String = {
     "FIXME: implement prettyBits on Region"

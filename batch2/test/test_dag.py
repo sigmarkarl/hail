@@ -13,7 +13,7 @@ from .serverthread import ServerThread
 
 @pytest.fixture
 def client():
-    client = BatchClient()
+    client = BatchClient('test')
     yield client
     client.close()
 
@@ -140,12 +140,21 @@ def test_callback(client):
                 break
         callback_body = callback_body[0]
 
+        # verify msec_mcpu, cost present
+        callback_body.pop('cost')
+        callback_body.pop('msec_mcpu')
         assert (callback_body == {
             'id': b.id,
+            'billing_project': 'test',
             'state': 'success',
             'complete': True,
             'closed': True,
-            'attributes': {'foo': 'bar'},
+            'n_jobs': 2,
+            'n_completed': 2,
+            'n_succeeded': 2,
+            'n_failed': 0,
+            'n_cancelled': 0,
+            'attributes': {'foo': 'bar'}
         }), callback_body
     finally:
         if server:

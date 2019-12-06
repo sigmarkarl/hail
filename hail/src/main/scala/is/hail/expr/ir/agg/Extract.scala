@@ -13,148 +13,6 @@ import is.hail.utils._
 import scala.collection.mutable
 import scala.language.{existentials, postfixOps}
 
-object TableMapIRNew {
-
-  def apply(tv: TableValue, newRow: IR): TableValue = {
-    val typ = tv.typ
-
-    val scanRef = genUID()
-    val extracted = Extract.apply(CompileWithAggregators.liftScan(newRow), scanRef)
-    val nAggs = extracted.nAggs
-
-    if (extracted.aggs.isEmpty)
-      throw new UnsupportedExtraction("no scans to extract in TableMapRows")
-
-    val scanInitNeedsGlobals = Mentions(extracted.init, "global")
-    val scanSeqNeedsGlobals = Mentions(extracted.seqPerElt, "global")
-    val rowIterationNeedsGlobals = Mentions(extracted.postAggIR, "global")
-
-    val globalsBc =
-      if (rowIterationNeedsGlobals || scanInitNeedsGlobals || scanSeqNeedsGlobals)
-        tv.globals.broadcast
-      else
-        null
-
-    val spec = BufferSpec.defaultUncompressed
-
-    // Order of operations:
-    // 1. init op on all aggs and serialize to byte array.
-    // 2. load in init op on each partition, seq op over partition, serialize.
-    // 3. load in partition aggregations, comb op as necessary, serialize.
-    // 4. load in partStarts, calculate newRow based on those results.
-
-    val (_, initF) = ir.CompileWithAggregators2[Long, Unit](
-      extracted.aggs,
-      "global", tv.globals.t,
-      Begin(FastIndexedSeq(extracted.init, extracted.serializeSet(0, 0, spec))))
-
-    val (_, eltSeqF) = ir.CompileWithAggregators2[Long, Long, Unit](
-      extracted.aggs,
-      "global", Option(globalsBc).map(_.value.t).getOrElse(PStruct()),
-      "row", typ.rowType.physicalType,
-      extracted.eltOp())
-
-    val read = extracted.deserialize(spec)
-    val write = extracted.serialize(spec)
-    val combOpF = extracted.combOpF(spec)
-
-    val (rTyp, f) = ir.CompileWithAggregators2[Long, Long, Long](
-      extracted.aggs,
-      "global", Option(globalsBc).map(_.value.t).getOrElse(PStruct()),
-      "row", typ.rowType.physicalType,
-      Let(scanRef, extracted.results, extracted.postAggIR))
-    assert(rTyp.virtualType == newRow.typ)
-
-    // 1. init op on all aggs and write out to initPath
-    val initAgg = Region.scoped { aggRegion =>
-      Region.scoped { fRegion =>
-        val init = initF(0, fRegion)
-        init.newAggState(aggRegion)
-        init(fRegion, tv.globals.value.offset, false)
-        init.getSerializedAgg(0)
-      }
-    }
-
-    // 2. load in init op on each partition, seq op over partition, write out.
-    val scanPartitionAggs = SpillingCollectIterator(tv.rvd.mapPartitionsWithIndex { (i, ctx, it) =>
-      val globalRegion = ctx.freshRegion
-      val globals = if (scanSeqNeedsGlobals) globalsBc.value.readRegionValue(globalRegion) else 0
-
-      Region.smallScoped { aggRegion =>
-        val seq = eltSeqF(i, globalRegion)
-
-        seq.setAggState(aggRegion, read(aggRegion, initAgg))
-        it.foreach { rv =>
-          seq(rv.region, globals, false, rv.offset, false)
-          ctx.region.clear()
-        }
-        Iterator.single(write(aggRegion, seq.getAggOffset()))
-      }
-    }, HailContext.get.flags.get("max_leader_scans").toInt)
-
-
-    // 3. load in partition aggregations, comb op as necessary, write back out.
-    val partAggs = scanPartitionAggs.scanLeft(initAgg)(combOpF)
-    val scanAggCount = tv.rvd.getNumPartitions
-    val partitionIndices = new Array[Long](scanAggCount)
-    val scanAggsPerPartitionFile = HailContext.get.getTemporaryFile()
-    HailContext.get.sFS.writeFileNoCompression(scanAggsPerPartitionFile) { os =>
-      partAggs.zipWithIndex.foreach { case (x, i) =>
-        if (i < scanAggCount) {
-          partitionIndices(i) = os.getPos
-          os.writeInt(x.length)
-          os.write(x, 0, x.length)
-          os.hflush()
-        }
-      }
-    }
-
-    val bcFS = HailContext.get.bcFS
-
-    // 4. load in partStarts, calculate newRow based on those results.
-    val itF = { (i: Int, ctx: RVDContext, filePosition: Long, it: Iterator[RegionValue]) =>
-      val globalRegion = ctx.freshRegion
-      val globals = if (rowIterationNeedsGlobals || scanSeqNeedsGlobals)
-        globalsBc.value.readRegionValue(globalRegion)
-      else
-        0
-      val partitionAggs = bcFS.value.readFileNoCompression(scanAggsPerPartitionFile) { is =>
-        is.seek(filePosition)
-        val aggSize = is.readInt()
-        val partAggs = new Array[Byte](aggSize)
-        var nread = is.read(partAggs, 0, aggSize)
-        var r = nread
-        while (r > 0 && nread < aggSize) {
-          r = is.read(partAggs, nread, aggSize - nread)
-          if (r > 0) nread += r
-        }
-        if (nread != aggSize) {
-          fatal(s"aggs read wrong number of bytes: $nread vs $aggSize")
-        }
-        partAggs
-      }
-
-      val aggRegion = ctx.freshRegion
-      val newRow = f(i, globalRegion)
-      val seq = eltSeqF(i, globalRegion)
-      var aggOff = read(aggRegion, partitionAggs)
-
-      it.map { rv =>
-        newRow.setAggState(aggRegion, aggOff)
-        val off = newRow(rv.region, globals, false, rv.offset, false)
-        seq.setAggState(aggRegion, newRow.getAggOffset())
-        seq(rv.region, globals, false, rv.offset, false)
-        aggOff = seq.getAggOffset()
-        rv.setOffset(off)
-        rv
-      }
-    }
-    tv.copy(
-      typ = typ.copy(rowType = rTyp.virtualType.asInstanceOf[TStruct]),
-      rvd = tv.rvd.mapPartitionsWithIndexAndValue(RVDType(rTyp.asInstanceOf[PStruct], typ.key), partitionIndices, itF))
-  }
-}
-
 class UnsupportedExtraction(msg: String) extends Exception(msg)
 
 case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature2]) {
@@ -182,10 +40,13 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature
   def serializeSet(i: Int, i2: Int, spec: BufferSpec): IR =
     SerializeAggs(i * nAggs, i2, spec, aggs)
 
-  def eltOp(optimize: Boolean = true): IR = if (optimize) Optimize(seqPerElt) else seqPerElt
+  def eltOp(ctx: ExecuteContext, optimize: Boolean = true): IR = if (optimize)
+    Optimize(seqPerElt, true, "eltOp", ctx)
+  else
+    seqPerElt
 
-  def deserialize(spec: BufferSpec): ((Region, Array[Byte]) => Long) = {
-    val (_, f) = ir.CompileWithAggregators2[Unit](
+  def deserialize(ctx: ExecuteContext, spec: BufferSpec): ((Region, Array[Byte]) => Long) = {
+    val (_, f) = ir.CompileWithAggregators2[Unit](ctx,
       aggs, ir.DeserializeAggs(0, 0, spec, aggs))
 
     { (aggRegion: Region, bytes: Array[Byte]) =>
@@ -197,8 +58,8 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature
     }
   }
 
-  def serialize(spec: BufferSpec): (Region, Long) => Array[Byte] = {
-    val (_, f) = ir.CompileWithAggregators2[Unit](
+  def serialize(ctx: ExecuteContext, spec: BufferSpec): (Region, Long) => Array[Byte] = {
+    val (_, f) = ir.CompileWithAggregators2[Unit](ctx,
       aggs, ir.SerializeAggs(0, 0, spec, aggs))
 
     { (aggRegion: Region, off: Long) =>
@@ -209,8 +70,8 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggSignature
     }
   }
 
-  def combOpF(spec: BufferSpec): (Array[Byte], Array[Byte]) => Array[Byte] = {
-    val (_, f) = ir.CompileWithAggregators2[Unit](
+  def combOpF(ctx: ExecuteContext, spec: BufferSpec): (Array[Byte], Array[Byte]) => Array[Byte] = {
+    val (_, f) = ir.CompileWithAggregators2[Unit](ctx,
       aggs ++ aggs,
       Begin(
         deserializeSet(0, 0, spec) +:
@@ -293,6 +154,9 @@ object Extract {
       new CollectAsSetAggregator(PType.canonical(t))
     case AggSignature2(Collect(), _, Seq(t), _) =>
       new CollectAggregator(t.physicalType)
+    case AggSignature2(LinearRegression(), _, _, _) =>
+      LinearRegressionAggregator
+    case AggSignature2(ApproxCDF(), _, _, _) => new ApproxCDFAggregator
     case AggSignature2(Downsample(), _, Seq(_, _, label), _) => new DownsampleAggregator(label.physicalType.asInstanceOf[PArray])
     case _ => throw new UnsupportedExtraction(aggSig.toString)
   }
@@ -428,9 +292,11 @@ object Extract {
               transformed)))
 
       case x: ArrayAgg =>
-        throw new UnsupportedExtraction("array agg")
+        assert(!ContainsScan(x))
+        x
       case x: ArrayAggScan =>
-        throw new UnsupportedExtraction("array scan")
+        assert(!ContainsAgg(x))
+        x
       case _ => MapIR(extract)(ir)
     }
   }

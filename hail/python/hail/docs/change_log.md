@@ -4,7 +4,7 @@
 
 ### With a version like 0.x, is Hail ready for use in publications?
 
-Yes. The semantic versioning standard uses 0.x (development) versions to 
+Yes. The [semantic versioning standard](https://semver.org) uses 0.x (development) versions to 
 refer to software that is either "buggy" or "partial". While we don't view
 Hail as particularly buggy (especially compared to one-off untested
 scripts pervasive in bioinformatics!), Hail 0.2 is a partial realization
@@ -21,6 +21,29 @@ such in the reference documentation, which may change at any time**.
 Please note that **forward compatibility should not be expected, especially
 relating to file formats**: this means that it may not be possible to use
 an earlier version of Hail to read files written in a later version.
+
+---
+
+## Version 0.2.28
+
+Released 2019-11-22
+
+### Critical correctness bug fix
+- (hail#7588) Fixes a bug where filtering old matrix tables in newer versions of hail did not work as expected. Please update from 0.2.27. 
+
+### Bug fixes
+- (hail#7571) Don't set GQ to missing if PL is missing in `split_multi_hts`.
+- (hail#7577) Fixed an optimizer bug.
+
+### New Features
+- (hail#7561) Added `hl.plot.visualize_missingness()` to plot missingness patterns for MatrixTables.
+- (hail#7575) Added `hl.version()` to quickly check hail version.
+
+### `hailctl dataproc`
+- (hail#7586) `hailctl dataproc` now supports `--gcloud_configuration` option. 
+
+### Documentation
+- (hail#7570) Hail has a cheatsheet for Tables now.
 
 ---
 

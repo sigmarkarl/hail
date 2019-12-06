@@ -8,6 +8,7 @@ import is.hail.expr.ir.lowering.LoweringPipeline
 import is.hail.expr.types.physical.{PTuple, PType}
 import is.hail.expr.types.virtual._
 import is.hail.io.BufferSpec
+import is.hail.linalg.BlockMatrix
 import is.hail.methods._
 import is.hail.rvd.RVDContext
 import is.hail.utils._
@@ -30,6 +31,11 @@ object Interpret {
     lowered.execute(ctx)
   }
 
+  def apply(bmir: BlockMatrixIR, ctx: ExecuteContext, optimize: Boolean): BlockMatrix = {
+    val lowered = LoweringPipeline.legacyRelationalLowerer(ctx, bmir, optimize).asInstanceOf[BlockMatrixIR]
+    lowered.execute(ctx)
+  }
+
   def apply[T](ctx: ExecuteContext, ir: IR): T = apply(ctx, ir, Env.empty[(Any, Type)], FastIndexedSeq(), None).asInstanceOf[T]
 
   def apply[T](ctx: ExecuteContext,
@@ -46,7 +52,7 @@ object Interpret {
     var ir = ir0.unwrap
 
     def optimizeIR(context: String) {
-      ir = Optimize(ir, noisy = true, context = context)
+      ir = Optimize(ir, noisy = true, context = context, ctx)
       TypeCheck(ir, BindingEnv(typeEnv, agg = aggArgs.map { agg =>
         agg._2.fields.foldLeft(Env.empty[Type]) { case (env, f) =>
           env.bind(f.name, f.typ)
@@ -687,7 +693,7 @@ object Interpret {
             }.toFastIndexedSeq
             val wrappedIR = Copy(ir, wrappedArgs)
 
-            val (rt, makeFunction) = Compile[Long, Long]("in", argTuple, MakeTuple.ordered(FastSeq(wrappedIR)), optimize = false)
+            val (rt, makeFunction) = Compile[Long, Long](ctx, "in", argTuple, MakeTuple.ordered(FastSeq(wrappedIR)), optimize = false)
             (rt, makeFunction(0, region))
           })
           val rvb = new RegionValueBuilder()
@@ -701,8 +707,13 @@ object Interpret {
           rvb.endTuple()
           val offset = rvb.end()
 
-          val resultOffset = f(region, offset, false)
-          SafeRow(rt.asInstanceOf[PTuple], region, resultOffset).get(0)
+          try {
+            val resultOffset = f(region, offset, false)
+            SafeRow(rt.asInstanceOf[PTuple], region, resultOffset).get(0)
+          } catch {
+            case e: Exception =>
+              fatal(s"error while calling '${ ir.implementation.name }'", e)
+          }
         }
       case Uniroot(functionid, fn, minIR, maxIR) =>
         val f = { x: Double => interpret(fn, env.bind(functionid, x), args, aggArgs).asInstanceOf[Double] }
@@ -741,138 +752,82 @@ object Interpret {
         val globalsBc = value.globals.broadcast
         val globalsOffset = value.globals.value.offset
 
-        if (HailContext.getFlag("newaggs") != null) {
-          try {
-            val res = genUID()
-            val extracted = agg.Extract(query, res)
+        val res = genUID()
+        val extracted = agg.Extract(query, res)
 
-            val wrapped = if (extracted.aggs.isEmpty) {
-              val (rt: PTuple, f) = Compile[Long, Long](
-                "global", value.globals.t,
-                MakeTuple.ordered(FastSeq(extracted.postAggIR)))
+        val wrapped = if (extracted.aggs.isEmpty) {
+          val (rt: PTuple, f) = Compile[Long, Long](ctx,
+            "global", value.globals.t,
+            MakeTuple.ordered(FastSeq(extracted.postAggIR)))
 
-              Region.scoped { region =>
-                SafeRow(rt, region, f(0, region)(region, globalsOffset, false))
+          Region.scoped { region =>
+            SafeRow(rt, region, f(0, region)(region, globalsOffset, false))
+          }
+        } else {
+          val spec = BufferSpec.defaultUncompressed
+
+          val (_, initOp) = CompileWithAggregators2[Long, Unit](ctx,
+            extracted.aggs,
+            "global", value.globals.t,
+            extracted.init)
+
+          val (_, partitionOpSeq) = CompileWithAggregators2[Long, Long, Unit](ctx,
+            extracted.aggs,
+            "global", value.globals.t,
+            "row", value.rvd.rowPType,
+            extracted.seqPerElt)
+
+          val read = extracted.deserialize(ctx, spec)
+          val write = extracted.serialize(ctx, spec)
+          val combOpF = extracted.combOpF(ctx, spec)
+
+          val (rTyp: PTuple, f) = CompileWithAggregators2[Long, Long](ctx,
+            extracted.aggs,
+            "global", value.globals.t,
+            Let(res, extracted.results, MakeTuple.ordered(FastSeq(extracted.postAggIR))))
+          assert(rTyp.types(0).virtualType == query.typ)
+
+          val useTreeAggregate = extracted.shouldTreeAggregate
+          val isCommutative = extracted.isCommutative
+          log.info(s"Aggregate: useTreeAggregate=${ useTreeAggregate }")
+          log.info(s"Aggregate: commutative=${ isCommutative }")
+
+          val aggResults = value.rvd.combine[Array[Byte]](
+            Region.scoped { region =>
+              val initF = initOp(0, region)
+              Region.scoped { aggRegion =>
+                initF.newAggState(aggRegion)
+                initF(region, globalsOffset, false)
+                write(aggRegion, initF.getAggOffset())
               }
-            } else {
-              val spec = BufferSpec.defaultUncompressed
+            },
+            { (i: Int, ctx: RVDContext, it: Iterator[RegionValue]) =>
+              val partRegion = ctx.freshRegion
+              val globalsOffset = globalsBc.value.readRegionValue(partRegion)
+              val init = initOp(i, partRegion)
+              val seqOps = partitionOpSeq(i, partRegion)
 
-              val (_, initOp) = CompileWithAggregators2[Long, Unit](
-                extracted.aggs,
-                "global", value.globals.t,
-                extracted.init)
-
-              val (_, partitionOpSeq) = CompileWithAggregators2[Long, Long, Unit](
-                extracted.aggs,
-                "global", value.globals.t,
-                "row", value.rvd.rowPType,
-                extracted.seqPerElt)
-
-              val read = extracted.deserialize(spec)
-              val write = extracted.serialize(spec)
-              val combOpF = extracted.combOpF(spec)
-
-              val (rTyp: PTuple, f) = CompileWithAggregators2[Long, Long](
-                extracted.aggs,
-                "global", value.globals.t,
-                Let(res, extracted.results, MakeTuple.ordered(FastSeq(extracted.postAggIR))))
-              assert(rTyp.types(0).virtualType == query.typ)
-
-              val useTreeAggregate = extracted.shouldTreeAggregate
-              val isCommutative = extracted.isCommutative
-              log.info(s"Aggregate: useTreeAggregate=${ useTreeAggregate }")
-              log.info(s"Aggregate: commutative=${ isCommutative }")
-
-              val aggResults = value.rvd.combine[Array[Byte]](
-                Region.scoped { region =>
-                  val initF = initOp(0, region)
-                  Region.scoped { aggRegion =>
-                    initF.newAggState(aggRegion)
-                    initF(region, globalsOffset, false)
-                    write(aggRegion, initF.getAggOffset())
-                  }
-                },
-                { (i: Int, ctx: RVDContext, it: Iterator[RegionValue]) =>
-                  val partRegion = ctx.freshRegion
-                  val globalsOffset = globalsBc.value.readRegionValue(partRegion)
-                  val init = initOp(i, partRegion)
-                  val seqOps = partitionOpSeq(i, partRegion)
-
-                  Region.smallScoped { aggRegion =>
-                    init.newAggState(aggRegion)
-                    init(partRegion, globalsOffset, false)
-                    seqOps.setAggState(aggRegion, init.getAggOffset())
-                    it.foreach { rv =>
-                      seqOps(rv.region, globalsOffset, false, rv.offset, false)
-                      ctx.region.clear()
-                    }
-                    write(aggRegion, seqOps.getAggOffset())
-                  }
-                }, combOpF, commutative = isCommutative, tree = useTreeAggregate)
-
-              Region.scoped { r =>
-                val resF = f(0, r)
-                Region.smallScoped { aggRegion =>
-                  resF.setAggState(aggRegion, read(aggRegion, aggResults))
-                  SafeRow(rTyp, r, resF(r, globalsOffset, false))
+              Region.smallScoped { aggRegion =>
+                init.newAggState(aggRegion)
+                init(partRegion, globalsOffset, false)
+                seqOps.setAggState(aggRegion, init.getAggOffset())
+                it.foreach { rv =>
+                  seqOps(rv.region, globalsOffset, false, rv.offset, false)
+                  ctx.region.clear()
                 }
+                write(aggRegion, seqOps.getAggOffset())
               }
+            }, combOpF, commutative = isCommutative, tree = useTreeAggregate)
+
+          Region.scoped { r =>
+            val resF = f(0, r)
+            Region.smallScoped { aggRegion =>
+              resF.setAggState(aggRegion, read(aggRegion, aggResults))
+              SafeRow(rTyp, r, resF(r, globalsOffset, false))
             }
-            return wrapped.get(0)
-          } catch {
-            case e: agg.UnsupportedExtraction =>
-              log.info(s"couldn't lower TableAggregate: $e")
           }
         }
-
-        val (rvAggs, initOps, seqOps, aggResultType, postAggIR) = CompileWithAggregators[Long, Long, Long](
-          "global", value.globals.t,
-          "global", value.globals.t,
-          "row", value.rvd.rowPType,
-          MakeTuple.ordered(Array(query)), "AGGR",
-          (nAggs: Int, initOpIR: IR) => initOpIR,
-          (nAggs: Int, seqOpIR: IR) => seqOpIR)
-
-        val (t, f) = Compile[Long, Long, Long](
-          "global", value.globals.t,
-          "AGGR", aggResultType,
-          postAggIR)
-
-        val aggResults = if (rvAggs.nonEmpty) {
-
-          val rvb: RegionValueBuilder = new RegionValueBuilder()
-          rvb.set(ctx.r)
-
-          initOps(0, ctx.r)(ctx.r, rvAggs, globalsOffset, false)
-
-          val combOp = { (rvAggs1: Array[RegionValueAggregator], rvAggs2: Array[RegionValueAggregator]) =>
-            rvAggs1.zip(rvAggs2).foreach { case (rvAgg1, rvAgg2) => rvAgg1.combOp(rvAgg2) }
-            rvAggs1
-          }
-
-          value.rvd.aggregateWithPartitionOp(rvAggs, (i, ctx) => {
-            val partRegion =  ctx.freshRegion
-            val globalsOffset = globalsBc.value.readRegionValue(partRegion)
-            val seqOpsFunction = seqOps(i, partRegion)
-            (globalsOffset, seqOpsFunction)
-          })({ case ((globalsOffset, seqOpsFunction), comb, rv) =>
-            seqOpsFunction(rv.region, comb, globalsOffset, false, rv.offset, false)
-          }, combOp, commutative = rvAggs.forall(_.isCommutative))
-        } else
-          Array.empty[RegionValueAggregator]
-
-        val rvb: RegionValueBuilder = new RegionValueBuilder()
-        rvb.set(ctx.r)
-
-        rvb.start(aggResultType)
-        rvb.startTuple()
-        aggResults.foreach(_.result(rvb))
-        rvb.endTuple()
-        val aggResultsOffset = rvb.end()
-
-        val resultOffset = f(0, ctx.r)(ctx.r, globalsOffset, false, aggResultsOffset, false)
-
-        SafeRow(coerce[PTuple](t), ctx.r, resultOffset).get(0)
+        wrapped.get(0)
       case x: ReadPartition =>
         fatal(s"cannot interpret ${ Pretty(x) }")
     }

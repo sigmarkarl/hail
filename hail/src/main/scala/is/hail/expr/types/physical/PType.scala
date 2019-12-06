@@ -2,11 +2,11 @@ package is.hail.expr.types.physical
 
 import is.hail.annotations._
 import is.hail.check.{Arbitrary, Gen}
-import is.hail.expr.ir.{EmitMethodBuilder, IRParser}
+import is.hail.expr.ir.{Ascending, Descending, EmitMethodBuilder, IRParser, SortOrder}
 import is.hail.expr.types.virtual._
 import is.hail.expr.types.{BaseType, Requiredness}
 import is.hail.expr.types.encoded.EType
-import is.hail.table.{ Ascending, Descending, SortOrder }
+import is.hail.expr.ir.{Ascending, Descending}
 import is.hail.utils._
 import is.hail.variant.ReferenceGenome
 import org.json4s.CustomSerializer
@@ -273,13 +273,14 @@ abstract class PType extends BaseType with Serializable with Requiredness {
     }
   }
 
-  final def isPrimitive: Boolean = {
-    fundamentalType.isInstanceOf[PBoolean] ||
-      fundamentalType.isInstanceOf[PInt32] ||
+  final def isPrimitive: Boolean =
+    fundamentalType.isInstanceOf[PBoolean] || isNumeric
+
+  final def isNumeric: Boolean =
+    fundamentalType.isInstanceOf[PInt32] ||
       fundamentalType.isInstanceOf[PInt64] ||
       fundamentalType.isInstanceOf[PFloat32] ||
       fundamentalType.isInstanceOf[PFloat64]
-  }
 
   def containsPointers: Boolean = false
 
