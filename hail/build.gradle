@@ -98,6 +98,7 @@ task releaseJar(type: Exec) {
 
 compileScala {
     scalaCompileOptions.additionalParameters = [
+        "-target:jvm-1.8",
         "-feature",
         "-Xno-patmat-analysis",
         //"-Xfatal-warnings",

@@ -157,7 +157,8 @@ def is_transient_error(e):
     elif isinstance(e, aiohttp.ClientOSError):
         if (e.errno == errno.ETIMEDOUT or
                 e.errno == errno.ECONNREFUSED or
-                e.errno == errno.EHOSTUNREACH):
+                e.errno == errno.EHOSTUNREACH or
+                e.errno == errno.ECONNRESET):
             return True
     elif isinstance(e, aiohttp.ServerTimeoutError):
         return True
@@ -181,17 +182,25 @@ async def sleep_and_backoff(delay):
     return min(delay * 2, 60.0)
 
 
-async def request_retry_transient_errors(session, method, url, **kwargs):
+async def retry_transient_errors(f, *args, **kwargs):
     delay = 0.1
+    errors = 0
     while True:
         try:
-            return await session.request(method, url, **kwargs)
+            return await f(*args, **kwargs)
         except Exception as e:
+            errors += 1
+            if errors % 10 == 0:
+                log.warning(f'encountered {errors} errors, most recent one was {e}', exc_info=True)
             if is_transient_error(e):
                 pass
             else:
                 raise
         delay = await sleep_and_backoff(delay)
+
+
+async def request_retry_transient_errors(session, method, url, **kwargs):
+    return await retry_transient_errors(session.request, method, url, **kwargs)
 
 
 async def request_raise_transient_errors(session, method, url, **kwargs):
@@ -206,3 +215,15 @@ async def request_raise_transient_errors(session, method, url, **kwargs):
 
 async def collect_agen(agen):
     return [x async for x in agen]
+
+
+async def retry_forever(f, msg=None):
+    delay = 0.1
+    while True:
+        try:
+            await f()
+            break
+        except Exception as exc:
+            if msg:
+                log.info(msg(exc), exc_info=True)
+        await sleep_and_backoff(delay)

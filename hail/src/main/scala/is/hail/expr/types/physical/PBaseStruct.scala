@@ -45,6 +45,7 @@ abstract class PBaseStruct extends PType {
 
   val fields: IndexedSeq[PField]
 
+  lazy val allFieldsRequired: Boolean = types.forall(_.required)
   lazy val fieldRequired: Array[Boolean] = types.map(_.required)
 
   lazy val fieldIdx: Map[String, Int] =
@@ -134,6 +135,8 @@ abstract class PBaseStruct extends PType {
     }
   }
 
+  def nMissing: Int
+
   def nMissingBytes: Int
 
   def missingIdx: Array[Int]
@@ -146,36 +149,21 @@ abstract class PBaseStruct extends PType {
 
   def allocate(region: Code[Region]): Code[Long] = region.allocate(alignment, byteSize)
 
-  def setAllMissing(off: Code[Long]): Code[Unit] = {
-    var c: Code[Unit] = Code._empty
-    var i = 0
-    while (i < nMissingBytes) {
-      c = Code(c, Region.storeByte(off + i.toLong, const(0xFF.toByte)))
-      i += 1
+  def initialize(structAddress: Long, setMissing: Boolean = false): Unit = {
+    if (allFieldsRequired) {
+      return
     }
-    c
+
+    Region.setMemory(structAddress, nMissingBytes.toLong, if (setMissing) 0xFF.toByte else 0.toByte)
   }
 
-  def clearMissingBits(region: Region, off: Long) {
-    var i = 0
-    while (i < nMissingBytes) {
-      Region.storeByte(off + i, 0.toByte)
-      i += 1
+  def stagedInitialize(structAddress: Code[Long], setMissing: Boolean = false): Code[Unit] = {
+    if (allFieldsRequired) {
+      return Code._empty
     }
-  }
 
-  def clearMissingBits(off: Code[Long]): Code[Unit] = {
-    var c: Code[Unit] = Code._empty
-    var i = 0
-    while (i < nMissingBytes) {
-      c = Code(c, Region.storeByte(off + i.toLong, const(0)))
-      i += 1
-    }
-    c
+    Region.setMemory(structAddress, const(nMissingBytes.toLong), const(if (setMissing) 0xFF.toByte else 0.toByte))
   }
-
-  def clearMissingBits(region: Code[Region], off: Code[Long]): Code[Unit] =
-    clearMissingBits(off)
 
   def isFieldDefined(rv: RegionValue, fieldIdx: Int): Boolean =
     isFieldDefined(rv.region, rv.offset, fieldIdx)
@@ -262,8 +250,3 @@ abstract class PBaseStruct extends PType {
 
   override def containsPointers: Boolean = types.exists(_.containsPointers)
 }
-
-final class StaticallyKnownField[T, U](
-  val pType: T,
-  val load: (Code[Region], Code[Long]) => Code[U]
-)

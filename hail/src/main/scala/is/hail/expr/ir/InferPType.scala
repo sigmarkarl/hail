@@ -60,8 +60,10 @@ object InferPType {
         PType.canonical(t, ir.pType2.required)
       }
       case NA(t) => {
-        val ptype = PType.canonical(t, false)
-        ptype.deepInnerRequired(false)
+        PType.canonical(t).deepInnerRequired(false)
+      }
+      case Die(_, t) => {
+        PType.canonical(t).deepInnerRequired(true)
       }
       case IsNA(ir) => {
         InferPType(ir, env)
@@ -112,13 +114,21 @@ object InferPType {
       }
       case _: ArrayFor => PVoid
       case _: Begin => PVoid
-      case Die(_, t) => PType.canonical(t, true)
       case Let(name, value, body) => {
         InferPType(value, env)
         InferPType(body, env.bind(name, value.pType2))
 
         body.pType2
       }
+      case TailLoop(_, args, body) =>
+        args.foreach { case (_, ir) => InferPType(ir, env) }
+        InferPType(body, env.bind(args.map { case (n, ir) => n -> ir.pType2 }: _*))
+        body.pType2
+      case Recur(_, args, typ) =>
+        // FIXME: This may be difficult to infer properly from a bottom-up pass.
+        args.foreach { a => InferPType(a, env) }
+        PType.canonical(typ)
+
       case ApplyBinaryPrimOp(op, l, r) => {
           InferPType(l, env)
           InferPType(r, env)
@@ -160,10 +170,10 @@ object InferPType {
         })
         a.implementation.returnPType(pTypes, a.returnType)
       }
-      case _: Uniroot => PFloat64()
-      case ArrayRef(a, i) => {
+      case ArrayRef(a, i, s) => {
         InferPType(a, env)
         InferPType(i, env)
+        InferPType(s, env)
         assert(i.pType2 isOfType PInt32() )
 
         coerce[PStreamable](a.pType2).elementType.setRequired(a.pType2.required && i.pType2.required)
@@ -319,6 +329,14 @@ object InferPType {
         val rTyp = coerce[PNDArray](r.pType2)
         PNDArray(lTyp.elementType, TNDArray.matMulNDims(lTyp.nDims, rTyp.nDims), lTyp.required && rTyp.required)
       }
+      case NDArrayQR(nd, mode) => {
+        InferPType(nd, env)
+        mode match {
+          case "r" => PNDArray(PFloat64Required, 2)
+          case "raw" => PTuple(PNDArray(PFloat64Required, 2), PNDArray(PFloat64Required, 1))
+          case "reduced" | "complete" => PTuple(PNDArray(PFloat64Required, 2), PNDArray(PFloat64Required, 2))
+        }
+      }
       case NDArrayWrite(_, _) => PVoid
       case MakeStruct(fields) => PStruct(true, fields.map {
         case (name, a) => {
@@ -386,7 +404,19 @@ object InferPType {
         InferPType(body, env.bind(contextsName -> contexts.pType2, globalsName -> globals.pType2))
         PArray(body.pType2)
       }
-      case _: ReadPartition | _: Coalesce | _: MakeArray | _: MakeStream | _: If => throw new Exception("Node not supported")
+      case If(cond, cnsq, altr) => {
+        InferPType(cond, env)
+        InferPType(cnsq, env)
+        InferPType(altr, env)
+
+        assert((cnsq.pType2 isOfType altr.pType2) && (cond.pType2 isOfType PBoolean()))
+
+        val branchType = getNestedElementPTypes(IndexedSeq(cnsq.pType2, altr.pType2))
+
+        branchType.setRequired(branchType.required && cond.pType2.required)
+      }
+      case In(_, pType: PType) => pType
+      case _: ReadPartition | _: Coalesce | _: MakeStream => throw new Exception("Node not supported")
     }
 
     // Allow only requiredeness to diverge

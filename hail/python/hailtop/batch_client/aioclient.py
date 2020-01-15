@@ -352,7 +352,7 @@ class BatchBuilder:
         self.callback = callback
 
     def create_job(self, image, command, env=None, mount_docker_socket=False,
-                   resources=None, secrets=None,
+                   port=None, resources=None, secrets=None,
                    service_account=None, attributes=None, parents=None,
                    input_files=None, output_files=None, always_run=False, pvc_size=None):
         if self._submitted:
@@ -399,6 +399,8 @@ class BatchBuilder:
 
         if env:
             job_spec['env'] = [{'name': k, 'value': v} for (k, v) in env.items()]
+        if port is not None:
+            job_spec['port'] = port
         if resources:
             job_spec['resources'] = resources
         if secrets:
@@ -465,7 +467,7 @@ class BatchBuilder:
         group_size = 0
         for spec in byte_job_specs:
             n = len(spec)
-            if group_size + n < 1000000 and len(group) < 1000:
+            if group_size + n < 8000000 and len(group) < 1000:
                 group.append(spec)
                 group_size += n
             else:
@@ -477,7 +479,7 @@ class BatchBuilder:
 
         await bounded_gather(*[functools.partial(self._submit_jobs, batch.id, group)
                                for group in groups],
-                             parallelism=2)
+                             parallelism=50)
 
         await self._client._patch(f'/api/v1alpha/batches/{batch.id}/close')
         log.info(f'closed batch {b["id"]}')

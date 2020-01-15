@@ -1,6 +1,6 @@
 package is.hail.expr.types.encoded
 
-import is.hail.annotations.Region
+import is.hail.annotations.{Region, UnsafeUtils}
 import is.hail.asm4s._
 import is.hail.expr.ir.EmitMethodBuilder
 import is.hail.expr.types.{BaseStruct, BaseType}
@@ -34,7 +34,7 @@ final case class EBaseStruct(fields: IndexedSeq[EField], override val required: 
   def fieldType(name: String): EType = types(fieldIdx(name))
   val missingIdx = new Array[Int](size)
   val nMissing: Int = BaseStruct.getMissingness[EType](types, missingIdx)
-  val nMissingBytes = (nMissing + 7) >>> 3
+  val nMissingBytes = UnsafeUtils.packBitsToBytes(nMissing)
 
   if (!fieldNames.areDistinct()) {
     val duplicates = fieldNames.duplicates()
@@ -194,7 +194,7 @@ final case class EBaseStruct(fields: IndexedSeq[EField], override val required: 
       groupMB.emit(Code(fieldGroup.map { f =>
         if (t.hasField(f.name)) {
           val rf = t.field(f.name)
-          val readElemF = f.typ.buildInplaceDecoder(rf.typ, mb.fb)
+          val readElemF = f.typ.buildInplaceDecoder(rf.typ, mb)
           val rFieldAddr = t.fieldOffset(addrArg, rf.index)
           if (f.typ.required)
             readElemF(regionArg, rFieldAddr, inArg)

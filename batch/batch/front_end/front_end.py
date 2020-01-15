@@ -13,13 +13,12 @@ from prometheus_async.aio.web import server_stats
 import google.oauth2.service_account
 import google.api_core.exceptions
 from hailtop.utils import time_msecs, humanize_timedelta_msecs, request_retry_transient_errors
-from hailtop.auth import async_get_userinfo
 from hailtop.config import get_deploy_config
 from hailtop import batch_client
 from hailtop.batch_client.aioclient import Job
 from gear import Database, setup_aiohttp_session, \
     rest_authenticated_users_only, web_authenticated_users_only, \
-    check_csrf_token
+    web_authenticated_developers_only, check_csrf_token
 from web_common import setup_aiohttp_jinja2, setup_common_static_routes, render_template, \
     set_message
 
@@ -30,7 +29,7 @@ from ..utils import parse_cpu_in_mcpu, parse_memory_in_bytes, adjust_cores_for_m
 from ..batch import batch_record_to_dict, job_record_to_dict
 from ..log_store import LogStore
 from ..database import CallError, check_call_procedure
-from ..batch_configuration import BATCH_PODS_NAMESPACE
+from ..batch_configuration import BATCH_PODS_NAMESPACE, BATCH_BUCKET_NAME
 
 from . import schemas
 
@@ -53,6 +52,10 @@ REQUEST_TIME_GET_BATCH_UI = REQUEST_TIME.labels(endpoint='/batches/batch_id', ve
 REQUEST_TIME_POST_CANCEL_BATCH_UI = REQUEST_TIME.labels(endpoint='/batches/batch_id/cancel', verb='POST')
 REQUEST_TIME_GET_BATCHES_UI = REQUEST_TIME.labels(endpoint='/batches', verb='GET')
 REQUEST_TIME_GET_JOB_UI = REQUEST_TIME.labels(endpoint='/batches/batch_id/jobs/job_id', verb="GET")
+REQUEST_TIME_GET_BILLING_PROJECTS_UI = REQUEST_TIME.labels(endpoint='/billing_projects', verb="GET")
+REQUEST_TIME_POST_BILLING_PROJECT_REMOVE_USER_UI = REQUEST_TIME.labels(endpoint='/billing_projects/billing_project/users/user/remove', verb="POST")
+REQUEST_TIME_POST_BILLING_PROJECT_ADD_USER_UI = REQUEST_TIME.labels(endpoint='/billing_projects/billing_project/users/add', verb="POST")
+REQUEST_TIME_POST_CREATE_BILLING_PROJECT_UI = REQUEST_TIME.labels(endpoint='/billing_projects/create', verb="POST")
 
 routes = web.RouteTableDef()
 
@@ -148,9 +151,9 @@ LIMIT 50;
 '''
     sql_args = where_args
 
-    jobs = [job_record_to_dict(job)
+    jobs = [job_record_to_dict(request.app, job)
             async for job
-            in db.execute_and_fetchall(sql, sql_args)]
+            in db.select_and_fetchall(sql, sql_args)]
 
     if len(jobs) == 50:
         last_job_id = jobs[-1]['job_id']
@@ -168,7 +171,7 @@ async def get_jobs(request, userdata):
     user = userdata['username']
 
     db = request.app['db']
-    record = await db.execute_and_fetchone(
+    record = await db.select_and_fetchone(
         '''
 SELECT * FROM batches
 WHERE user = %s AND id = %s AND NOT deleted;
@@ -229,7 +232,7 @@ async def _get_job_log_from_record(app, batch_id, job_id, record):
 async def _get_job_log(app, batch_id, job_id, user):
     db = app['db']
 
-    record = await db.execute_and_fetchone('''
+    record = await db.select_and_fetchone('''
 SELECT jobs.state, jobs.spec, ip_address
 FROM jobs
 INNER JOIN batches
@@ -240,7 +243,7 @@ LEFT JOIN instances
   ON attempts.instance_name = instances.name
 WHERE user = %s AND jobs.batch_id = %s AND NOT deleted AND jobs.job_id = %s;
 ''',
-                                           (user, batch_id, job_id))
+                                          (user, batch_id, job_id))
     if not record:
         raise web.HTTPNotFound()
     return await _get_job_log_from_record(app, batch_id, job_id, record)
@@ -331,9 +334,9 @@ LIMIT 50;
 '''
     sql_args = where_args
 
-    batches = [batch_record_to_dict(batch)
+    batches = [batch_record_to_dict(request.app, batch)
                async for batch
-               in db.execute_and_fetchall(sql, sql_args)]
+               in db.select_and_fetchall(sql, sql_args)]
 
     if len(batches) == 50:
         last_batch_id = batches[-1]['id']
@@ -376,12 +379,12 @@ async def create_jobs(request, userdata):
         'username': user,
         'bucket_name': userdata['bucket_name'],
         'gsa_key_secret_name': userdata['gsa_key_secret_name'],
-        'jwt_secret_name': userdata['jwt_secret_name']
+        'tokens_secret_name': userdata['tokens_secret_name']
     }
 
     async with LoggingTimer(f'batch {batch_id} create jobs') as timer:
         async with timer.step('fetch batch'):
-            record = await db.execute_and_fetchone(
+            record = await db.select_and_fetchone(
                 '''
 SELECT closed FROM batches
 WHERE user = %s AND id = %s AND NOT deleted;
@@ -406,6 +409,9 @@ WHERE user = %s AND id = %s AND NOT deleted;
             jobs_args = []
             job_parents_args = []
             job_attributes_args = []
+
+            n_ready = 0
+            sum_ready_cores_mcpu = 0
 
             for spec in job_specs:
                 job_id = spec['job_id']
@@ -457,7 +463,12 @@ WHERE user = %s AND id = %s AND NOT deleted;
                     env = []
                     spec['env'] = env
 
-                state = 'Ready' if len(parent_ids) == 0 else 'Pending'
+                if len(parent_ids) == 0:
+                    state = 'Ready'
+                    n_ready += 1
+                    sum_ready_cores_mcpu += cores_mcpu
+                else:
+                    state = 'Pending'
 
                 jobs_args.append(
                     (batch_id, job_id, state, json.dumps(spec),
@@ -473,27 +484,31 @@ WHERE user = %s AND id = %s AND NOT deleted;
                             (batch_id, job_id, k, v))
 
         async with timer.step('insert jobs'):
-            async with db.pool.acquire() as conn:
-                await conn.begin()
-                async with conn.cursor() as cursor:
-                    await cursor.executemany('''
+            async with db.start() as tx:
+                await tx.execute_many('''
 INSERT INTO jobs (batch_id, job_id, state, spec, always_run, cores_mcpu, n_pending_parents)
 VALUES (%s, %s, %s, %s, %s, %s, %s);
 ''',
-                                             jobs_args)
-                async with conn.cursor() as cursor:
-                    await cursor.executemany('''
+                                      jobs_args)
+                await tx.execute_many('''
 INSERT INTO `job_parents` (batch_id, job_id, parent_id)
 VALUES (%s, %s, %s);
 ''',
-                                             job_parents_args)
-                async with conn.cursor() as cursor:
-                    await cursor.executemany('''
+                                      job_parents_args)
+                await tx.execute_many('''
 INSERT INTO `job_attributes` (batch_id, job_id, `key`, `value`)
 VALUES (%s, %s, %s, %s);
 ''',
-                                             job_attributes_args)
-                await conn.commit()
+                                      job_attributes_args)
+
+                await tx.execute_update('''
+UPDATE user_resources
+SET n_ready_jobs = n_ready_jobs + %s, ready_cores_mcpu = ready_cores_mcpu + %s
+WHERE user = %s;
+
+UPDATE ready_cores SET ready_cores_mcpu = ready_cores_mcpu + %s;
+''',
+                                        (n_ready, sum_ready_cores_mcpu, user, sum_ready_cores_mcpu))
 
         return web.Response()
 
@@ -515,48 +530,41 @@ async def create_batch(request, userdata):
     billing_project = batch_spec['billing_project']
 
     attributes = batch_spec.get('attributes')
-    async with db.pool.acquire() as conn:
-        await conn.begin()
-        async with conn.cursor() as cursor:
-            await cursor.execute(
-                '''
+    async with db.start() as tx:
+        rows = tx.execute_and_fetchall(
+            '''
+SELECT * FROM billing_project_users
+WHERE billing_project = %s AND user = %s;
+''',
+            (billing_project, user))
+        rows = [row async for row in rows]
+        if len(rows) != 1:
+            assert len(rows) == 0
+            raise web.HTTPForbidden(reason=f'unknown billing project {billing_project}')
+
+        await tx.just_execute(
+            '''
 INSERT IGNORE INTO user_resources (user) VALUES (%s);
 ''',
-                (user,))
+            (user,))
 
-        async with conn.cursor() as cursor:
-            now = time_msecs()
-            await cursor.execute(
-                '''
-SELECT * FROM billing_project_users
-WHERE billing_project = %s AND user = %s
-''',
-                (billing_project, user))
-            rows = await cursor.fetchall()
-            if len(rows) != 1:
-                assert len(rows) == 0
-                raise web.HTTPForbidden(reason=f'unknown billing project {billing_project}')
-
-        async with conn.cursor() as cursor:
-            await cursor.execute(
-                '''
+        now = time_msecs()
+        id = await tx.execute_insertone(
+            '''
 INSERT INTO batches (userdata, user, billing_project, attributes, callback, n_jobs, time_created)
 VALUES (%s, %s, %s, %s, %s, %s, %s);
 ''',
-                (json.dumps(userdata), user, billing_project, json.dumps(attributes),
-                 batch_spec.get('callback'), batch_spec['n_jobs'],
-                 now))
-            id = cursor.lastrowid
+            (json.dumps(userdata), user, billing_project, json.dumps(attributes),
+             batch_spec.get('callback'), batch_spec['n_jobs'],
+             now))
 
         if attributes:
-            async with conn.cursor() as cursor:
-                await cursor.executemany(
-                    '''
+            await tx.execute_many(
+                '''
 INSERT INTO `batch_attributes` (batch_id, `key`, `value`)
 VALUES (%s, %s, %s)
 ''',
-                    [(id, k, v) for k, v in attributes.items()])
-        await conn.commit()
+                [(id, k, v) for k, v in attributes.items()])
 
     return web.json_response({'id': id})
 
@@ -564,7 +572,7 @@ VALUES (%s, %s, %s)
 async def _get_batch(app, batch_id, user):
     db = app['db']
 
-    record = await db.execute_and_fetchone(
+    record = await db.select_and_fetchone(
         '''
 SELECT * FROM batches
 WHERE user = %s AND id = %s AND NOT deleted;
@@ -572,13 +580,13 @@ WHERE user = %s AND id = %s AND NOT deleted;
     if not record:
         raise web.HTTPNotFound()
 
-    return batch_record_to_dict(record)
+    return batch_record_to_dict(app, record)
 
 
 async def _cancel_batch(app, batch_id, user):
     db = app['db']
 
-    record = await db.execute_and_fetchone(
+    record = await db.select_and_fetchone(
         '''
 SELECT closed FROM batches
 WHERE user = %s AND id = %s AND NOT deleted;
@@ -587,7 +595,7 @@ WHERE user = %s AND id = %s AND NOT deleted;
     if not record:
         raise web.HTTPNotFound()
     if not record['closed']:
-        raise web.HTTPBadRequest(reason='cannot cancel open batch {batch_id}')
+        raise web.HTTPBadRequest(reason=f'cannot cancel open batch {batch_id}')
 
     await db.execute_update(
         'UPDATE batches SET cancelled = closed WHERE id = %s;', (batch_id,))
@@ -631,7 +639,7 @@ async def close_batch(request, userdata):
     app = request.app
     db = app['db']
 
-    record = await db.execute_and_fetchone(
+    record = await db.select_and_fetchone(
         '''
 SELECT closed FROM batches
 WHERE user = %s AND id = %s AND NOT deleted;
@@ -673,7 +681,7 @@ async def delete_batch(request, userdata):
     app = request.app
     db = app['db']
 
-    record = await db.execute_and_fetchone(
+    record = await db.select_and_fetchone(
         '''
 SELECT closed FROM batches
 WHERE user = %s AND id = %s AND NOT deleted;
@@ -735,7 +743,7 @@ async def ui_cancel_batch(request, userdata):
     user = userdata['username']
     await _cancel_batch(request.app, batch_id, user)
     session = await aiohttp_session.get_session(request)
-    set_message(session, 'Batch {batch_id} cancelled.', 'info')
+    set_message(session, f'Batch {batch_id} cancelled.', 'info')
     location = request.app.router['batches'].url_for()
     raise web.HTTPFound(location=location)
 
@@ -780,7 +788,7 @@ async def _get_job_running_status(record):
 async def _get_job(app, batch_id, job_id, user):
     db = app['db']
 
-    record = await db.execute_and_fetchone('''
+    record = await db.select_and_fetchone('''
 SELECT jobs.*, ip_address
 FROM jobs
 INNER JOIN batches
@@ -791,12 +799,12 @@ LEFT JOIN instances
   ON attempts.instance_name = instances.name
 WHERE user = %s AND jobs.batch_id = %s AND NOT deleted AND jobs.job_id = %s;
 ''',
-                                           (user, batch_id, job_id))
+                                          (user, batch_id, job_id))
     if not record:
         raise web.HTTPNotFound()
 
     running_status = await _get_job_running_status(record)
-    return job_record_to_dict(record, running_status)
+    return job_record_to_dict(app, record, running_status)
 
 
 @routes.get('/api/v1alpha/batches/{batch_id}/jobs/{job_id}')
@@ -829,6 +837,146 @@ async def ui_get_job(request, userdata):
     return await render_template('batch', request, userdata, 'job.html', page_context)
 
 
+@routes.get('/billing_projects')
+@prom_async_time(REQUEST_TIME_GET_BILLING_PROJECTS_UI)
+@web_authenticated_developers_only()
+async def ui_get_billing_projects(request, userdata):
+    db = request.app['db']
+
+    billing_projects = {}
+    async with db.start(read_only=True) as tx:
+        async for record in tx.execute_and_fetchall(
+                'SELECT * FROM billing_projects;'):
+            name = record['name']
+            billing_projects[name] = []
+        async for record in tx.execute_and_fetchall(
+                'SELECT * FROM billing_project_users;'):
+            billing_project = record['billing_project']
+            user = record['user']
+            billing_projects[billing_project].append(user)
+    page_context = {
+        'billing_projects': billing_projects
+    }
+    return await render_template('batch', request, userdata, 'billing_projects.html', page_context)
+
+
+@routes.post('/billing_projects/{billing_project}/users/{user}/remove')
+@prom_async_time(REQUEST_TIME_POST_BILLING_PROJECT_REMOVE_USER_UI)
+@check_csrf_token
+@web_authenticated_developers_only(redirect=False)
+async def post_billing_projects_remove_user(request, userdata):  # pylint: disable=unused-argument
+    db = request.app['db']
+    billing_project = request.match_info['billing_project']
+    user = request.match_info['user']
+
+    session = await aiohttp_session.get_session(request)
+
+    async with db.start() as tx:
+        row = await tx.execute_and_fetchone(
+            '''
+SELECT billing_projects.name as billing_project, user
+FROM billing_projects
+LEFT JOIN (SELECT * FROM billing_project_users
+    WHERE billing_project = %s AND user = %s) AS t
+  ON billing_projects.name = t.billing_project
+WHERE billing_projects.name = %s;
+''',
+            (billing_project, user, billing_project))
+        if not row:
+            set_message(session, f'No such billing project {billing_project}.', 'error')
+            raise web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+        assert row['billing_project'] == billing_project
+
+        if row['user'] is None:
+            set_message(session, f'User {user} is not member of billing project {billing_project}.', 'info')
+            return web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+
+        await tx.just_execute(
+            '''
+DELETE FROM billing_project_users
+WHERE billing_project = %s AND user = %s;
+''',
+            (billing_project, user))
+
+    set_message(session, f'Removed user {user} from billing project {billing_project}.', 'info')
+    return web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+
+
+@routes.post('/billing_projects/{billing_project}/users/add')
+@prom_async_time(REQUEST_TIME_POST_BILLING_PROJECT_ADD_USER_UI)
+@check_csrf_token
+@web_authenticated_developers_only(redirect=False)
+async def post_billing_projects_add_user(request, userdata):  # pylint: disable=unused-argument
+    db = request.app['db']
+    post = await request.post()
+    user = post['user']
+    billing_project = request.match_info['billing_project']
+
+    session = await aiohttp_session.get_session(request)
+
+    async with db.start() as tx:
+        row = await tx.execute_and_fetchone(
+            '''
+SELECT billing_projects.name as billing_project, user
+FROM billing_projects
+LEFT JOIN (SELECT * FROM billing_project_users
+    WHERE billing_project = %s AND user = %s) AS t
+  ON billing_projects.name = t.billing_project
+WHERE billing_projects.name = %s;
+''',
+            (billing_project, user, billing_project))
+        if row is None:
+            set_message(session, f'No such billing project {billing_project}.', 'error')
+            raise web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+
+        if row['user'] is not None:
+            set_message(session, f'User {user} is already member of billing project {billing_project}.', 'info')
+            return web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+
+        await tx.execute_insertone(
+            '''
+INSERT INTO billing_project_users(billing_project, user)
+VALUES (%s, %s);
+''',
+            (billing_project, user))
+
+    set_message(session, f'Added user {user} to billing project {billing_project}.', 'info')
+    return web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+
+
+@routes.post('/billing_projects/create')
+@prom_async_time(REQUEST_TIME_POST_CREATE_BILLING_PROJECT_UI)
+@check_csrf_token
+@web_authenticated_developers_only(redirect=False)
+async def post_create_billing_projects(request, userdata):  # pylint: disable=unused-argument
+    db = request.app['db']
+    post = await request.post()
+    billing_project = post['billing_project']
+
+    session = await aiohttp_session.get_session(request)
+
+    async with db.start() as tx:
+        row = await tx.execute_and_fetchone(
+            '''
+SELECT 1 FROM billing_projects
+WHERE name = %s;
+''',
+            (billing_project))
+        if row is not None:
+            set_message(session, f'Billing project {billing_project} already exists.', 'error')
+            raise web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+
+        await tx.execute_insertone(
+            '''
+INSERT INTO billing_projects(name)
+VALUES (%s);
+''',
+            (billing_project,))
+
+    set_message(session, f'Added billing project {billing_project}.', 'info')
+    return web.HTTPFound(deploy_config.external_url('batch', f'/billing_projects'))
+
+
 @routes.get('')
 @routes.get('/')
 @web_authenticated_users_only()
@@ -838,12 +986,6 @@ async def index(request, userdata):
 
 
 async def on_startup(app):
-    userinfo = await async_get_userinfo()
-    log.info(f'running as {userinfo["username"]}')
-
-    bucket_name = userinfo['bucket_name']
-    log.info(f'bucket_name {bucket_name}')
-
     pool = concurrent.futures.ThreadPoolExecutor()
     app['blocking_pool'] = pool
 
@@ -851,11 +993,12 @@ async def on_startup(app):
     await db.async_init()
     app['db'] = db
 
-    row = await db.execute_and_fetchone(
-        'SELECT worker_type, worker_cores, instance_id, internal_token FROM globals;')
+    row = await db.select_and_fetchone(
+        'SELECT worker_type, worker_cores, worker_disk_size_gb, instance_id, internal_token FROM globals;')
 
     app['worker_type'] = row['worker_type']
     app['worker_cores'] = row['worker_cores']
+    app['worker_disk_size_gb'] = row['worker_disk_size_gb']
 
     instance_id = row['instance_id']
     log.info(f'instance_id {instance_id}')
@@ -866,8 +1009,8 @@ async def on_startup(app):
     }
 
     credentials = google.oauth2.service_account.Credentials.from_service_account_file(
-        '/batch-gsa-key/privateKeyData')
-    app['log_store'] = LogStore(bucket_name, instance_id, pool, credentials=credentials)
+        '/gsa-key/key.json')
+    app['log_store'] = LogStore(BATCH_BUCKET_NAME, instance_id, pool, credentials=credentials)
 
 
 async def on_cleanup(app):
@@ -876,7 +1019,7 @@ async def on_cleanup(app):
 
 
 def run():
-    app = web.Application(client_max_size=None)
+    app = web.Application()
     setup_aiohttp_session(app)
 
     setup_aiohttp_jinja2(app, 'batch.front_end')
@@ -887,4 +1030,8 @@ def run():
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
 
-    web.run_app(deploy_config.prefix_application(app, 'batch'), host='0.0.0.0', port=5000)
+    web.run_app(deploy_config.prefix_application(app,
+                                                 'batch',
+                                                 client_max_size=8 * 1024 * 1024),
+                host='0.0.0.0',
+                port=5000)

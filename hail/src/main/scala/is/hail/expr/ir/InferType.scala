@@ -38,7 +38,7 @@ object InferType {
       case _: SeqOp2 => TVoid
       case _: CombOp2 => TVoid
       case ResultOp2(_, aggSigs) =>
-        TTuple(aggSigs.map(agg.Extract.getType): _*)
+        TTuple(aggSigs.map(agg.Extract.getAgg(_).resultType.virtualType): _*)
       case _: SerializeAggs => TVoid
       case _: DeserializeAggs => TVoid
       case _: Begin => TVoid
@@ -54,6 +54,10 @@ object InferType {
         body.typ
       case AggLet(name, value, body, _) =>
         body.typ
+      case TailLoop(_, _, body) =>
+        body.typ
+      case Recur(_, _, typ) =>
+        typ
       case ApplyBinaryPrimOp(op, l, r) =>
         BinaryOp.getReturnType(op, l.typ, r.typ).setRequired(l.typ.required && r.typ.required)
       case ApplyUnaryPrimOp(op, v) =>
@@ -69,8 +73,7 @@ object InferType {
         val argTypes = a.args.map(_.typ)
         a.implementation.unify(argTypes :+ a.returnType)
         a.returnType
-      case _: Uniroot => TFloat64()
-      case ArrayRef(a, i) =>
+      case ArrayRef(a, i, s) =>
         assert(i.typ.isOfType(TInt32()))
         coerce[TStreamable](a.typ).elementType.setRequired(a.typ.required && i.typ.required)
       case ArraySort(a, _, _, compare) =>
@@ -139,6 +142,16 @@ object InferType {
         val lTyp = coerce[TNDArray](l.typ)
         val rTyp = coerce[TNDArray](r.typ)
         TNDArray(lTyp.elementType, Nat(TNDArray.matMulNDims(lTyp.nDims, rTyp.nDims)), lTyp.required && rTyp.required)
+      case NDArrayQR(nd, mode) =>
+        if (Array("complete", "reduced").contains(mode)) {
+          TTuple(TNDArray(TFloat64(), Nat(2), false), TNDArray(TFloat64(), Nat(2), false))
+        } else if (mode == "raw") {
+          TTuple(TNDArray(TFloat64(), Nat(2), false), TNDArray(TFloat64(), Nat(1), false))
+        } else if (mode == "r") {
+          TNDArray(TFloat64(), Nat(2), false)
+        } else {
+          throw new NotImplementedError(s"Cannot infer type for mode $mode")
+        }
       case NDArrayWrite(_, _) => TVoid
       case AggFilter(_, aggIR, _) =>
         aggIR.typ
@@ -147,9 +160,9 @@ object InferType {
       case AggGroupBy(key, aggIR, _) =>
         TDict(key.typ, aggIR.typ)
       case AggArrayPerElement(a, _, _, aggBody, _, _) => TArray(aggBody.typ)
-      case ApplyAggOp(_, _, _, aggSig) =>
+      case ApplyAggOp(_, _, aggSig) =>
         aggSig.returnType
-      case ApplyScanOp(_, _, _, aggSig) =>
+      case ApplyScanOp(_, _, aggSig) =>
         aggSig.returnType
       case MakeStruct(fields) =>
         TStruct(fields.map { case (name, a) =>

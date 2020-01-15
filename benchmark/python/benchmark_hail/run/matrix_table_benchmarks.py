@@ -67,6 +67,11 @@ def matrix_table_take_entry(mt_path):
     mt = hl.read_matrix_table(mt_path)
     mt.GT.take(100)
 
+@benchmark(args=profile_25.handle('mt'))
+def matrix_table_entries_show(mt_path):
+    mt = hl.read_matrix_table(mt_path)
+    mt.entries().show()
+
 
 @benchmark(args=profile_25.handle('mt'))
 def matrix_table_take_row(mt_path):
@@ -327,3 +332,17 @@ def kyle_sex_specific_qc(mt_path):
     )
 
     mt.rows()._force_count()
+
+
+@benchmark()
+def matrix_table_scan_count_rows():
+    mt = hl.utils.range_matrix_table(n_rows=200_000_000, n_cols=10, n_partitions=16)
+    mt.annotate_rows(x=hl.scan.count())
+    mt._force_count_rows()
+
+
+@benchmark()
+def matrix_table_scan_count_cols():
+    mt = hl.utils.range_matrix_table(n_cols=10_000_000, n_rows=10)
+    mt.annotate_cols(x=hl.scan.count())
+    mt._force_count_rows()

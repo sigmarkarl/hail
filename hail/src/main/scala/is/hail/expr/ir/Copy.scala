@@ -33,6 +33,12 @@ object Copy {
       case AggLet(name, _, _, isScan) =>
         assert(newChildren.length == 2)
         AggLet(name, newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], isScan)
+      case TailLoop(name, params, _) =>
+        assert(newChildren.length == params.length + 1)
+        TailLoop(name, params.map(_._1).zip(newChildren.init.map(_.asInstanceOf[IR])), newChildren.last.asInstanceOf[IR])
+      case Recur(name, args, t) =>
+        assert(newChildren.length == args.length)
+        Recur(name, newChildren.map(_.asInstanceOf[IR]), t)
       case Ref(name, t) => Ref(name, t)
       case RelationalRef(name, t) => RelationalRef(name, t)
       case RelationalLet(name, _, _) =>
@@ -53,9 +59,9 @@ object Copy {
       case MakeStream(args, typ) =>
         assert(args.length == newChildren.length)
         MakeStream(newChildren.map(_.asInstanceOf[IR]), typ)
-      case ArrayRef(_, _) =>
-        assert(newChildren.length == 2)
-        ArrayRef(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR])
+      case ArrayRef(_, _, _) =>
+        assert(newChildren.length == 3)
+        ArrayRef(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], newChildren(2).asInstanceOf[IR])
       case ArrayLen(_) =>
         assert(newChildren.length == 1)
         ArrayLen(newChildren(0).asInstanceOf[IR])
@@ -94,6 +100,9 @@ object Copy {
       case NDArrayMatMul(_, _) =>
         assert(newChildren.length == 2)
         NDArrayMatMul(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR])
+      case NDArrayQR(_, mode) =>
+        assert(newChildren.length == 1)
+        NDArrayQR(newChildren(0).asInstanceOf[IR], mode)
       case NDArrayWrite(_, _) =>
         assert(newChildren.length == 2)
         NDArrayWrite(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR])
@@ -192,19 +201,19 @@ object Copy {
       case x: DeserializeAggs => x
       case Begin(_) =>
         Begin(newChildren.map(_.asInstanceOf[IR]))
-      case x@ApplyAggOp(_, initOpArgs, _, aggSig) =>
+      case x@ApplyAggOp(initOpArgs, seqOpArgs, aggSig) =>
         val args = newChildren.map(_.asInstanceOf[IR])
+        assert(args.length == x.nInitArgs + x.nSeqOpArgs)
         ApplyAggOp(
-          args.take(x.nConstructorArgs),
-          initOpArgs.map(_ => args.drop(x.nConstructorArgs).dropRight(x.nSeqOpArgs)),
-          args.takeRight(x.nSeqOpArgs),
+          args.take(x.nInitArgs),
+          args.drop(x.nInitArgs),
           aggSig)
-      case x@ApplyScanOp(_, initOpArgs, _, aggSig) =>
+      case x@ApplyScanOp(initOpArgs, _, aggSig) =>
         val args = newChildren.map(_.asInstanceOf[IR])
+        assert(args.length == x.nInitArgs + x.nSeqOpArgs)
         ApplyScanOp(
-          args.take(x.nConstructorArgs),
-          initOpArgs.map(_ => args.drop(x.nConstructorArgs).dropRight(x.nSeqOpArgs)),
-          args.takeRight(x.nSeqOpArgs),
+          args.take(x.nInitArgs),
+          args.drop(x.nInitArgs),
           aggSig)
       case MakeTuple(fields) =>
         assert(fields.length == newChildren.length)
@@ -227,9 +236,6 @@ object Copy {
         ApplySeeded(fn, newChildren.map(_.asInstanceOf[IR]), seed, t)
       case ApplySpecial(fn, args, t) =>
         ApplySpecial(fn, newChildren.map(_.asInstanceOf[IR]), t)
-      case Uniroot(argname, _, _, _) =>
-        assert(newChildren.length == 3)
-        Uniroot(argname, newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], newChildren(2).asInstanceOf[IR])
       // from MatrixIR
       case MatrixWrite(_, writer) =>
         assert(newChildren.length == 1)

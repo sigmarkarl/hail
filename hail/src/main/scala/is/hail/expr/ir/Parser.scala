@@ -330,6 +330,13 @@ object IRParser {
     struct_field(type_expr(env))(it)
   }
 
+  def ptype_exprs(env: TypeParserEnvironment)(it: TokenIterator): Array[PType] = {
+    punctuation(it, "(")
+    val types = repUntil(it, type_expr(env), PunctuationToken(")")).map(_.physicalType)
+    punctuation(it, ")")
+    types
+  }
+
   def type_exprs(env: TypeParserEnvironment)(it: TokenIterator): Array[Type] = {
     punctuation(it, "(")
     val types = repUntil(it, type_expr(env), PunctuationToken(")"))
@@ -522,26 +529,33 @@ object IRParser {
   def agg_signature(env: TypeParserEnvironment)(it: TokenIterator): AggSignature = {
     punctuation(it, "(")
     val op = agg_op(it)
-    val ctorArgs = type_exprs(env)(it).map(t => -t)
-    val initOpArgs = opt(it, type_exprs(env)).map(_.map(t => -t))
-    val seqOpArgs = type_exprs(env)(it).map(t => -t)
-    punctuation(it, ")")
-    AggSignature(op, ctorArgs, initOpArgs.map(_.toFastIndexedSeq), seqOpArgs)
-  }
-
-  def agg_signature2(env: TypeParserEnvironment)(it: TokenIterator): AggSignature2 = {
-    punctuation(it, "(")
-    val op = agg_op(it)
     val initArgs = type_exprs(env)(it).map(t => -t)
     val seqOpArgs = type_exprs(env)(it).map(t => -t)
     val nested = opt(it, agg_signatures(env)).map(_.toFastSeq)
     punctuation(it, ")")
-    AggSignature2(op, initArgs, seqOpArgs, nested)
+    AggSignature(op, initArgs, seqOpArgs, nested)
   }
 
-  def agg_signatures(env: TypeParserEnvironment)(it: TokenIterator): Array[AggSignature2] = {
+  def physical_agg_signature(env: TypeParserEnvironment)(it: TokenIterator): PhysicalAggSignature = {
     punctuation(it, "(")
-    val sigs = repUntil(it, agg_signature2(env), PunctuationToken(")"))
+    val op = agg_op(it)
+    val initArgs = ptype_exprs(env)(it).map(t => -t)
+    val seqOpArgs = ptype_exprs(env)(it).map(t => -t)
+    val nested = opt(it, physical_agg_signatures(env)).map(_.toFastSeq)
+    punctuation(it, ")")
+    PhysicalAggSignature(op, initArgs, seqOpArgs, nested)
+  }
+
+  def agg_signatures(env: TypeParserEnvironment)(it: TokenIterator): Array[AggSignature] = {
+    punctuation(it, "(")
+    val sigs = repUntil(it, agg_signature(env), PunctuationToken(")"))
+    punctuation(it, ")")
+    sigs
+  }
+
+  def physical_agg_signatures(env: TypeParserEnvironment)(it: TokenIterator): Array[PhysicalAggSignature] = {
+    punctuation(it, "(")
+    val sigs = repUntil(it, physical_agg_signature(env), PunctuationToken(")"))
     punctuation(it, ")")
     sigs
   }
@@ -624,6 +638,18 @@ object IRParser {
         val value = ir_value_expr(env)(it)
         val body = ir_value_expr(env + (name -> value.typ))(it)
         AggLet(name, value, body, isScan)
+      case "TailLoop" =>
+        val name = identifier(it)
+        val paramNames = identifiers(it)
+        val params = paramNames.map { n => n -> ir_value_expr(env)(it) }
+        val bodyEnv = env.update(params.map { case (n, v) => n -> v.typ}.toMap)
+        val body = ir_value_expr(bodyEnv)(it)
+        TailLoop(name, params, body)
+      case "Recur" =>
+        val name = identifier(it)
+        val typ = type_expr(env.typEnv)(it)
+        val args = ir_value_children(env)(it)
+        Recur(name, args, typ)
       case "Ref" =>
         val id = identifier(it)
         Ref(id, env.refMap(id))
@@ -662,7 +688,8 @@ object IRParser {
       case "ArrayRef" =>
         val a = ir_value_expr(env)(it)
         val i = ir_value_expr(env)(it)
-        ArrayRef(a, i)
+        val s = ir_value_expr(env)(it)
+        ArrayRef(a, i, s)
       case "ArrayLen" => ArrayLen(ir_value_expr(env)(it))
       case "ArrayRange" =>
         val start = ir_value_expr(env)(it)
@@ -731,6 +758,10 @@ object IRParser {
         val nd = ir_value_expr(env)(it)
         val path = ir_value_expr(env)(it)
         NDArrayWrite(nd, path)
+      case "NDArrayQR" =>
+        val mode = string_literal(it)
+        val nd = ir_value_expr(env)(it)
+        NDArrayQR(nd, mode)
       case "ToSet" => ToSet(ir_value_expr(env)(it))
       case "ToDict" => ToDict(ir_value_expr(env)(it))
       case "ToArray" => ToArray(ir_value_expr(env)(it))
@@ -839,48 +870,46 @@ object IRParser {
         AggArrayPerElement(a, elementName, indexName, aggBody, knownLength, isScan)
       case "ApplyAggOp" =>
         val aggOp = agg_op(it)
-        val ctorArgs = ir_value_exprs(env)(it)
-        val initOpArgs = opt(it, ir_value_exprs(env))
+        val initOpArgs = ir_value_exprs(env)(it)
         val seqOpArgs = ir_value_exprs(env)(it)
-        val aggSig = AggSignature(aggOp, ctorArgs.map(arg => -arg.typ), initOpArgs.map(_.map(arg => -arg.typ)), seqOpArgs.map(arg => -arg.typ))
-        ApplyAggOp(ctorArgs, initOpArgs.map(_.toFastIndexedSeq), seqOpArgs, aggSig)
+        val aggSig = AggSignature(aggOp, initOpArgs.map(arg => -arg.typ), seqOpArgs.map(arg => -arg.typ), None)
+        ApplyAggOp(initOpArgs, seqOpArgs, aggSig)
       case "ApplyScanOp" =>
         val aggOp = agg_op(it)
-        val ctorArgs = ir_value_exprs(env)(it)
-        val initOpArgs = opt(it, ir_value_exprs(env))
+        val initOpArgs = ir_value_exprs(env)(it)
         val seqOpArgs = ir_value_exprs(env)(it)
-        val aggSig = AggSignature(aggOp, ctorArgs.map(arg => -arg.typ), initOpArgs.map(_.map(arg => -arg.typ)), seqOpArgs.map(arg => -arg.typ))
-        ApplyScanOp(ctorArgs, initOpArgs.map(_.toFastIndexedSeq), seqOpArgs, aggSig)
+        val aggSig = AggSignature(aggOp, initOpArgs.map(arg => -arg.typ), seqOpArgs.map(arg => -arg.typ), None)
+        ApplyScanOp(initOpArgs, seqOpArgs, aggSig)
       case "InitOp2" =>
         val i = int32_literal(it)
-        val aggSig = agg_signature2(env.typEnv)(it)
+        val aggSig = physical_agg_signature(env.typEnv)(it)
         val args = ir_value_exprs(env)(it)
         InitOp2(i, args, aggSig)
       case "SeqOp2" =>
         val i = int32_literal(it)
-        val aggSig = agg_signature2(env.typEnv)(it)
+        val aggSig = physical_agg_signature(env.typEnv)(it)
         val args = ir_value_exprs(env)(it)
         SeqOp2(i, args, aggSig)
       case "CombOp2" =>
         val i1 = int32_literal(it)
         val i2 = int32_literal(it)
-        val aggSig = agg_signature2(env.typEnv)(it)
+        val aggSig = physical_agg_signature(env.typEnv)(it)
         CombOp2(i1, i2, aggSig)
       case "ResultOp2" =>
         val i = int32_literal(it)
-        val aggSigs = agg_signatures(env.typEnv)(it)
+        val aggSigs = physical_agg_signatures(env.typEnv)(it)
         ResultOp2(i, aggSigs)
       case "SerializeAggs" =>
         val i = int32_literal(it)
         val i2 = int32_literal(it)
         val spec = BufferSpec.parse(string_literal(it))
-        val aggSigs = agg_signatures(env.typEnv)(it)
+        val aggSigs = physical_agg_signatures(env.typEnv)(it)
         SerializeAggs(i, i2, spec, aggSigs)
       case "DeserializeAggs" =>
         val i = int32_literal(it)
         val i2 = int32_literal(it)
         val spec = BufferSpec.parse(string_literal(it))
-        val aggSigs = agg_signatures(env.typEnv)(it)
+        val aggSigs = physical_agg_signatures(env.typEnv)(it)
         DeserializeAggs(i, i2, spec, aggSigs)
       case "Begin" =>
         val xs = ir_value_children(env)(it)
@@ -928,12 +957,6 @@ object IRParser {
         val rt = type_expr(env.typEnv)(it)
         val args = ir_value_children(env)(it)
         invoke(function, rt, args: _*)
-      case "Uniroot" =>
-        val name = identifier(it)
-        val function = ir_value_expr(env + (name -> TFloat64()))(it)
-        val min = ir_value_expr(env)(it)
-        val max = ir_value_expr(env)(it)
-        Uniroot(name, function, min, max)
       case "TableCount" =>
         val child = table_ir(env.withRefMap(Map.empty))(it)
         TableCount(child)
@@ -1076,6 +1099,10 @@ object IRParser {
         val expr = ir_value_expr(newEnv)(it)
         val newKey = ir_value_expr(newEnv)(it)
         TableKeyByAndAggregate(child, expr, newKey, nPartitions, bufferSize)
+      case "TableGroupWithinPartitions" =>
+        val n = int32_literal(it)
+        val child = table_ir(env)(it)
+        TableGroupWithinPartitions(child, n)
       case "TableRepartition" =>
         val n = int32_literal(it)
         val strategy = int32_literal(it)
