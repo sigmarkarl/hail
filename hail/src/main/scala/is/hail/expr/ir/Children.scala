@@ -79,6 +79,8 @@ object Children {
       Array(collection)
     case ArrayMap(a, name, body) =>
       Array(a, body)
+    case ArrayZip(as, names, body, _) =>
+      as ++ Array(body)
     case ArrayFilter(a, name, cond) =>
       Array(a, cond)
     case ArrayFlatMap(a, name, body) =>
@@ -97,6 +99,10 @@ object Children {
       Array(a, query)
     case ArrayAggScan(a, name, query) =>
       Array(a, query)
+    case RunAggScan(array, _, init, seq, result, _) =>
+      Array(array, init, seq, result)
+    case RunAgg(body, result, _) =>
+      Array(body, result)
     case NDArrayRef(nd, idxs) =>
       nd +: idxs
     case NDArraySlice(nd, slices) =>
@@ -128,10 +134,12 @@ object Children {
       Array(old)
     case InsertFields(old, fields, _) =>
       (old +: fields.map(_._2)).toFastIndexedSeq
-    case InitOp2(_, args, _) => args
-    case SeqOp2(_, args, _) => args
-    case _: ResultOp2 => none
-    case _: CombOp2 => none
+    case InitOp(_, args, _) => args
+    case SeqOp(_, args, _) => args
+    case _: ResultOp => none
+    case _: AggStateValue => none
+    case _: CombOp => none
+    case CombOpValue(_, value, _) => Array(value)
     case SerializeAggs(_, _, _, _) => none
     case DeserializeAggs(_, _, _, _) => none
     case Begin(xs) =>
@@ -177,5 +185,6 @@ object Children {
     case BlockMatrixMultiWrite(blockMatrices, _) => blockMatrices
     case CollectDistributedArray(ctxs, globals, _, _, body) => Array(ctxs, globals, body)
     case ReadPartition(path, _, _) => Array(path)
+    case LiftMeOut(child) => Array(child)
   }
 }

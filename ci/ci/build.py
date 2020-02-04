@@ -10,6 +10,7 @@ from .utils import flatten, generate_token
 from .constants import BUCKET
 from .environment import GCP_PROJECT, GCP_ZONE, DOMAIN, IP, CI_UTILS_IMAGE, \
     DEFAULT_NAMESPACE, BATCH_PODS_NAMESPACE, KUBERNETES_SERVER_URL
+from .globals import is_test_deployment
 
 log = logging.getLogger('ci')
 
@@ -19,9 +20,6 @@ pretty_print_log = "jq -Rr '. as $raw | try \
     ([.levelname, .asctime, .filename, .funcNameAndLine, .message, .exc_info] | @tsv) \
     else $raw end) \
 catch $raw'"
-
-
-is_test_deployment = DEFAULT_NAMESPACE != 'default'
 
 
 def expand_value_from(value, config):
@@ -193,8 +191,8 @@ class Step(abc.ABC):
             return CreateNamespaceStep.from_json(params)
         if kind == 'deploy':
             return DeployStep.from_json(params)
-        if kind == 'createDatabase2':
-            return CreateDatabase2Step.from_json(params)
+        if kind in ('createDatabase', 'createDatabase2'):
+            return CreateDatabaseStep.from_json(params)
         raise ValueError(f'unknown build step kind: {kind}')
 
     def __eq__(self, other):
@@ -799,7 +797,7 @@ date
                                         always_run=True)
 
 
-class CreateDatabase2Step(Step):
+class CreateDatabaseStep(Step):
     def __init__(self, params, database_name, namespace, migrations, shutdowns, inputs):
         super().__init__(params)
 
@@ -850,12 +848,12 @@ class CreateDatabase2Step(Step):
     @staticmethod
     def from_json(params):
         json = params.json
-        return CreateDatabase2Step(params,
-                                   json['databaseName'],
-                                   json['namespace'],
-                                   json['migrations'],
-                                   json.get('shutdowns', []),
-                                   json.get('inputs'))
+        return CreateDatabaseStep(params,
+                                  json['databaseName'],
+                                  json['namespace'],
+                                  json['migrations'],
+                                  json.get('shutdowns', []),
+                                  json.get('inputs'))
 
     def config(self, scope):  # pylint: disable=unused-argument
         return {

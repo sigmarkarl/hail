@@ -1,12 +1,9 @@
+
 package is.hail.expr.types.physical
 import is.hail.variant.ReferenceGenome
-
 import is.hail.annotations._
 import is.hail.asm4s.{Code, coerce}
-import is.hail.backend.BroadcastValue
 import is.hail.expr.ir.EmitMethodBuilder
-import is.hail.expr.types.virtual.TLocus
-import is.hail.utils._
 import is.hail.variant._
 
 
@@ -27,28 +24,25 @@ object PCanonicalLocus {
 }
 
 final case class PCanonicalLocus(rgBc: BroadcastRG, required: Boolean = false) extends PLocus {
-    def rg: ReferenceGenome = rgBc.value
+  def rg: ReferenceGenome = rgBc.value
 
-    def _asIdent = "locus"
-    def _toPretty = s"Locus($rg)"
+  def _asIdent = "locus"
 
-    override def pyString(sb: StringBuilder): Unit = {
-      sb.append("locus<")
-      sb.append(prettyIdentifier(rg.name))
-      sb.append('>')
-    }
+  override def _pretty(sb: StringBuilder, indent: Call, compact: Boolean): Unit = sb.append(s"PCLocus($rg)")
 
-    def copy(required: Boolean = this.required) = PCanonicalLocus(this.rgBc, required)
+  def copy(required: Boolean = this.required) = PCanonicalLocus(this.rgBc, required)
 
-    val representation: PStruct = PCanonicalLocus.representation(required)
+  val representation: PStruct = PCanonicalLocus.representation(required)
 
-    def contig(region: Code[Region], off: Code[Long]): Code[Long] = representation.loadField(region, off, 0)
+  def contig(address: Code[Long]): Code[Long] = representation.loadField(address, 0)
 
-    lazy val contigType: PString = representation.field("contig").typ.asInstanceOf[PString]
+  def contig(address: Long): Long = representation.loadField(address, 0)
 
-    def position(region: Code[Region], off: Code[Long]): Code[Int] = Region.loadInt(representation.loadField(region, off, 1))
+  lazy val contigType: PString = representation.field("contig").typ.asInstanceOf[PString]
 
-    lazy val positionType: PInt32 = representation.field("position").typ.asInstanceOf[PInt32]
+  def position(off: Code[Long]): Code[Int] = Region.loadInt(representation.loadField(off, 1))
+
+  lazy val positionType: PInt32 = representation.field("position").typ.asInstanceOf[PInt32]
 
   // FIXME: Remove when representation of contig/position is a naturally-ordered Long
   override def unsafeOrdering(): UnsafeOrdering = {
@@ -59,16 +53,16 @@ final case class PCanonicalLocus(rgBc: BroadcastRG, required: Boolean = false) e
 
     new UnsafeOrdering {
       def compare(r1: Region, o1: Long, r2: Region, o2: Long): Int = {
-        val cOff1 = repr.loadField(r1, o1, 0)
-        val cOff2 = repr.loadField(r2, o2, 0)
+        val cOff1 = repr.loadField(o1, 0)
+        val cOff2 = repr.loadField(o2, 0)
 
         if (binaryOrd.compare(r1, cOff1, r2, cOff2) == 0) {
-          val posOff1 = repr.loadField(r1, o1, 1)
-          val posOff2 = repr.loadField(r2, o2, 1)
+          val posOff1 = repr.loadField(o1, 1)
+          val posOff2 = repr.loadField(o2, 1)
           java.lang.Integer.compare(Region.loadInt(posOff1), Region.loadInt(posOff2))
         } else {
-          val contig1 = PString.loadString(r1, cOff1)
-          val contig2 = PString.loadString(r2, cOff2)
+          val contig1 = contigType.loadString(cOff1)
+          val contig2 = contigType.loadString(cOff2)
           localRGBc.value.compare(contig1, contig2)
         }
       }
@@ -79,15 +73,14 @@ final case class PCanonicalLocus(rgBc: BroadcastRG, required: Boolean = false) e
     assert(other isOfType this)
     new CodeOrderingCompareConsistentWithOthers {
       type T = Long
-      val contigBin = representation.fundamentalType.fieldType("contig").asInstanceOf[PBinary]
-      val bincmp = contigBin.codeOrdering(mb)
+      val bincmp = representation.fundamentalType.fieldType("contig").asInstanceOf[PBinary].codeOrdering(mb)
 
       override def compareNonnull(x: Code[Long], y: Code[Long]): Code[Int] = {
         val c1 = mb.newLocal[Long]("c1")
         val c2 = mb.newLocal[Long]("c2")
 
-        val s1 = PString.loadString(c1)
-        val s2 = PString.loadString(c2)
+        val s1 = contigType.loadString(c1)
+        val s2 = contigType.loadString(c2)
 
         val p1 = Region.loadInt(representation.fieldOffset(x, 1))
         val p2 = Region.loadInt(representation.fieldOffset(y, 1))

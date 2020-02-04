@@ -104,7 +104,7 @@ object Interpret {
           .headOption
           .orNull
       case If(cond, cnsq, altr) =>
-        assert(cnsq.typ == altr.typ)
+        assert(cnsq.typ isOfType altr.typ)
         val condValue = interpret(cond, env, args)
         if (condValue == null)
           null
@@ -348,6 +348,27 @@ object Interpret {
         else {
           aValue.asInstanceOf[IndexedSeq[Any]].map { element =>
             interpret(body, env.bind(name, element), args)
+          }
+        }
+      case ArrayZip(as, names, body, behavior) =>
+        val aValues = as.map(interpret(_, env, args).asInstanceOf[IndexedSeq[_]])
+        if (aValues.contains(null))
+          null
+        else {
+          val len = behavior match {
+            case ArrayZipBehavior.AssertSameLength | ArrayZipBehavior.AssumeSameLength =>
+              val lengths = aValues.map(_.length).toSet
+              if (lengths.size != 1)
+                fatal(s"zip: length mismatch: ${ lengths.mkString(", ") }")
+              lengths.head
+            case ArrayZipBehavior.TakeMinLength =>
+              aValues.map(_.length).min
+            case ArrayZipBehavior.ExtendNA =>
+              aValues.map(_.length).max
+          }
+          (0 until len).map { i =>
+            val e = env.bindIterable(names.zip(aValues.map(a => if (i >= a.length) null else a.apply(i))))
+            interpret(body, e, args)
           }
         }
       case ArrayFilter(a, name, cond) =>
@@ -653,6 +674,12 @@ object Interpret {
         wrapped.get(0)
       case x: ReadPartition =>
         fatal(s"cannot interpret ${ Pretty(x) }")
+      case LiftMeOut(child) =>
+        val (rt, makeFunction) = Compile[Long](ctx, MakeTuple.ordered(FastSeq(child)), None, false)
+        Region.scoped { r =>
+          SafeRow.read(rt, r, makeFunction(0, r)(r)).asInstanceOf[Row](0)
+        }
+
     }
   }
 }

@@ -74,6 +74,7 @@ abstract class PBaseStruct extends PType {
   }
 
   def identBase: String
+  
   def _asIdent: String = {
     val sb = new StringBuilder
     sb.append(identBase)
@@ -117,11 +118,11 @@ abstract class PBaseStruct extends PType {
       def compare(r1: Region, o1: Long, r2: Region, o2: Long): Int = {
         var i = 0
         while (i < types.length) {
-          val leftDefined = isFieldDefined(r1, o1, i)
-          val rightDefined = right.isFieldDefined(r2, o2, i)
+          val leftDefined = isFieldDefined(o1, i)
+          val rightDefined = right.isFieldDefined(o2, i)
 
           if (leftDefined && rightDefined) {
-            val c = fieldOrderings(i).compare(r1, loadField(r1, o1, i), r2, right.loadField(r2, o2, i))
+            val c = fieldOrderings(i).compare(r1, loadField(o1, i), r2, right.loadField(o2, i))
             if (c != 0)
               return c
           } else if (leftDefined != rightDefined) {
@@ -147,7 +148,30 @@ abstract class PBaseStruct extends PType {
     region.allocate(alignment, byteSize)
   }
 
-  def allocate(region: Code[Region]): Code[Long] = region.allocate(alignment, byteSize)
+  def allocate(region: Code[Region]): Code[Long] =
+    region.allocate(alignment, byteSize)
+
+  def copyFrom(region: Region, srcAddress: Long): Long = {
+    val destAddress = this.allocate(region)
+    this.storeShallowAtOffset(destAddress, srcAddress)
+    destAddress
+  }
+
+  def copyFrom(mb: MethodBuilder, region: Code[Region], srcAddress: Code[Long]): Code[Long] = {
+    val destAddress = mb.newField[Long]
+    Code(
+      destAddress := this.allocate(region),
+      this.storeShallowAtOffset(destAddress, srcAddress),
+      destAddress
+    )
+  }
+
+  def storeShallowAtOffset(destAddress: Code[Long], srcAddress: Code[Long]): Code[Unit] =
+    Region.copyFrom(srcAddress, destAddress, this.byteSize)
+
+  def storeShallowAtOffset(destAddress: Long, srcAddress: Long) {
+    Region.copyFrom(srcAddress, destAddress, this.byteSize)
+  }
 
   def initialize(structAddress: Long, setMissing: Boolean = false): Unit = {
     if (allFieldsRequired) {
@@ -165,12 +189,6 @@ abstract class PBaseStruct extends PType {
     Region.setMemory(structAddress, const(nMissingBytes.toLong), const(if (setMissing) 0xFF.toByte else 0.toByte))
   }
 
-  def isFieldDefined(rv: RegionValue, fieldIdx: Int): Boolean =
-    isFieldDefined(rv.region, rv.offset, fieldIdx)
-
-  def isFieldDefined(region: Region, offset: Long, fieldIdx: Int): Boolean =
-    fieldRequired(fieldIdx) || !Region.loadBit(offset, missingIdx(fieldIdx))
-
   def isFieldDefined(offset: Long, fieldIdx: Int): Boolean =
     fieldRequired(fieldIdx) || !Region.loadBit(offset, missingIdx(fieldIdx))
 
@@ -182,16 +200,10 @@ abstract class PBaseStruct extends PType {
     else
       Region.loadBit(offset, missingIdx(fieldIdx).toLong)
 
-  def isFieldMissing(region: Code[Region], offset: Code[Long], fieldIdx: Int): Code[Boolean] =
-    isFieldMissing(offset, fieldIdx)
-
   def isFieldDefined(offset: Code[Long], fieldIdx: Int): Code[Boolean] =
     !isFieldMissing(offset, fieldIdx)
 
-  def isFieldDefined(region: Code[Region], offset: Code[Long], fieldIdx: Int): Code[Boolean] =
-    isFieldDefined(offset, fieldIdx)
-
-  def setFieldMissing(region: Region, offset: Long, fieldIdx: Int) {
+  def setFieldMissing(offset: Long, fieldIdx: Int) {
     assert(!fieldRequired(fieldIdx))
     Region.setBit(offset, missingIdx(fieldIdx))
   }
@@ -201,31 +213,21 @@ abstract class PBaseStruct extends PType {
     Region.setBit(offset, missingIdx(fieldIdx).toLong)
   }
 
-  def setFieldMissing(region: Code[Region], offset: Code[Long], fieldIdx: Int): Code[Unit] =
-    setFieldMissing(offset, fieldIdx)
-
-  def setFieldPresent(region: Region, offset: Long, fieldIdx: Int) {
+  def setFieldPresent(offset: Long, fieldIdx: Int) {
     assert(!fieldRequired(fieldIdx))
     Region.clearBit(offset, missingIdx(fieldIdx))
   }
 
   def setFieldPresent(offset: Code[Long], fieldIdx: Int): Code[Unit] = {
     assert(!fieldRequired(fieldIdx))
-    Region.clearBit(offset, missingIdx(fieldIdx))
+    Region.clearBit(offset, missingIdx(fieldIdx).toLong)
   }
 
-  def setFieldPresent(region: Code[Region], offset: Code[Long], fieldIdx: Int): Code[Unit] =
-    setFieldPresent(offset, fieldIdx)
+  def fieldOffset(structAddress: Long, fieldIdx: Int): Long =
+    structAddress + byteOffsets(fieldIdx)
 
-  def fieldOffset(offset: Long, fieldIdx: Int): Long =
-    offset + byteOffsets(fieldIdx)
-
-  def fieldOffset(offset: Code[Long], fieldIdx: Int): Code[Long] =
-    offset + byteOffsets(fieldIdx)
-
-  def loadField(rv: RegionValue, fieldIdx: Int): Long = loadField(rv.region, rv.offset, fieldIdx)
-
-  def loadField(region: Region, offset: Long, fieldIdx: Int): Long = loadField(offset, fieldIdx)
+  def fieldOffset(structAddress: Code[Long], fieldIdx: Int): Code[Long] =
+    structAddress + byteOffsets(fieldIdx)
 
   def loadField(offset: Long, fieldIdx: Int): Long = {
     val off = fieldOffset(offset, fieldIdx)
@@ -238,14 +240,180 @@ abstract class PBaseStruct extends PType {
   def loadField(offset: Code[Long], fieldIdx: Int): Code[Long] =
     loadField(fieldOffset(offset, fieldIdx), types(fieldIdx))
 
-  def loadField(region: Code[Region], offset: Code[Long], fieldIdx: Int): Code[Long] =
-    loadField(fieldOffset(offset, fieldIdx), types(fieldIdx))
-
   private def loadField(fieldOffset: Code[Long], fieldType: PType): Code[Long] = {
     fieldType.fundamentalType match {
       case _: PArray | _: PBinary => Region.loadAddress(fieldOffset)
       case _ => fieldOffset
     }
+  }
+
+  def deepCopyFromAddress(mb: MethodBuilder, region: Code[Region], srcStructAddress: Code[Long]): Code[Long] = {
+    val dstAddress = mb.newField[Long]
+    Code(
+      dstAddress := this.copyFrom(mb, region, srcStructAddress),
+      this.deepPointerCopy(mb, region, dstAddress),
+      dstAddress
+    )
+  }
+
+  def deepCopyFromAddress(region: Region, srcStructAddress: Long): Long = {
+    val dstAddress = this.copyFrom(region, srcStructAddress)
+    this.deepPointerCopy(region, dstAddress)
+    dstAddress
+  }
+
+  def deepPointerCopy(mb: MethodBuilder, region: Code[Region], dstStructAddress: Code[Long]): Code[Unit] = {
+    var c: Code[Unit] = Code._empty
+
+    var i = 0
+    while(i < this.size) {
+      val dstFieldType = this.fields(i).typ.fundamentalType
+      if(dstFieldType.containsPointers) {
+        val dstFieldAddress = mb.newField[Long]
+        c = Code(
+          c,
+          this.isFieldDefined(dstStructAddress, i).orEmpty(
+            Code(
+              dstFieldAddress := this.fieldOffset(dstStructAddress, i),
+              dstFieldType match {
+                case t@(_: PBinary | _: PArray) =>
+                  t.storeShallowAtOffset(dstFieldAddress, t.copyFromType(mb, region, dstFieldType, Region.loadAddress(dstFieldAddress)))
+                case t: PBaseStruct =>
+                  t.deepPointerCopy(mb, region, dstFieldAddress)
+                case t: PType =>
+                  fatal(s"Field type isn't supported ${t}")
+              }
+            )
+          )
+        )
+      }
+      i += 1
+    }
+
+    c
+  }
+
+  def deepPointerCopy(region: Region, dstStructAddress: Long) {
+    var i = 0
+    while(i < this.size) {
+      val dstFieldType = this.fields(i).typ.fundamentalType
+      if(dstFieldType.containsPointers && this.isFieldDefined(dstStructAddress, i)) {
+        val dstFieldAddress = this.fieldOffset(dstStructAddress, i)
+        dstFieldType match {
+          case t@(_: PBinary | _: PArray) =>
+            t.storeShallowAtOffset(dstFieldAddress, t.copyFromType(region, dstFieldType, Region.loadAddress(dstFieldAddress)))
+          case t: PBaseStruct =>
+            t.deepPointerCopy(region, dstFieldAddress)
+          case t: PType =>
+            fatal(s"Field type isn't supported ${t}")
+        }
+      }
+      i += 1
+    }
+  }
+
+  def copyFromType(mb: MethodBuilder, region: Code[Region], srcPType: PType, srcStructAddress: Code[Long], forceDeep: Boolean): Code[Long] = {
+    val sourceType = srcPType.asInstanceOf[PBaseStruct]
+
+    assert(sourceType.size == this.size)
+
+    if(this.fields.map(_.typ.fundamentalType) == sourceType.fields.map(_.typ.fundamentalType)) {
+      if(!forceDeep) {
+        return srcStructAddress
+      }
+
+      return this.deepCopyFromAddress(mb, region, srcStructAddress)
+    }
+
+    val dstStructAddress = mb.newField[Long]
+    var loop: Code[_] = Code()
+    var i = 0
+    while(i < this.size) {
+      val dstField = this.fields(i)
+      val srcField = sourceType.fields(i)
+
+      assert((dstField.typ.required <= srcField.typ.required) && (dstField.typ isOfType srcField.typ) && (dstField.name == srcField.name) && (dstField.index == srcField.index))
+
+      val srcFieldType = srcField.typ.fundamentalType
+      val dstFieldType = dstField.typ.fundamentalType
+
+      val body = dstFieldType.storeShallowAtOffset(
+        this.fieldOffset(dstStructAddress, dstField.index),
+        dstFieldType.copyFromType(
+          mb,
+          region,
+          srcFieldType,
+          sourceType.loadField(srcStructAddress, srcField.index),
+          forceDeep
+        )
+      )
+
+      if(!srcFieldType.required) {
+        loop = Code(loop, sourceType.isFieldMissing(srcStructAddress, srcField.index).mux(
+          this.setFieldMissing(dstStructAddress, dstField.index),
+          body
+        ))
+      } else {
+        loop = Code(loop, body)
+      }
+
+      i+=1
+    }
+
+    Code(
+      dstStructAddress := this.allocate(region),
+      this.stagedInitialize(dstStructAddress),
+      loop,
+      dstStructAddress
+    )
+  }
+
+  def copyFromTypeAndStackValue(mb: MethodBuilder, region: Code[Region], srcPType: PType, stackValue: Code[_], forceDeep: Boolean): Code[_] =
+    this.copyFromType(mb, region, srcPType, stackValue.asInstanceOf[Code[Long]], forceDeep)
+
+  def copyFromType(region: Region, srcPType: PType, srcStructAddress: Long, forceDeep: Boolean): Long = {
+    val sourceType = srcPType.asInstanceOf[PBaseStruct]
+    if(this.fields.map(_.typ.fundamentalType) == sourceType.fields.map(_.typ.fundamentalType)) {
+      if(!forceDeep) {
+        return srcStructAddress
+      }
+
+      return this.deepCopyFromAddress(region, srcStructAddress)
+    }
+
+    assert(sourceType.size == this.size)
+
+    val dstStructAddress = this.allocate(region)
+    this.initialize(dstStructAddress)
+
+    var i = 0
+    while(i < this.size) {
+      val dstField = this.fields(i)
+      val srcField = sourceType.fields(i)
+
+      assert((dstField.typ.required <= srcField.typ.required) && (dstField.typ isOfType srcField.typ) && (dstField.name == srcField.name) && (dstField.index == srcField.index))
+
+      val srcType = srcField.typ.fundamentalType
+      val dstType = dstField.typ.fundamentalType
+
+      if(!srcType.required && sourceType.isFieldMissing(srcStructAddress, srcField.index)) {
+        this.setFieldMissing(dstStructAddress, dstField.index)
+      } else {
+        dstType.storeShallowAtOffset(
+          this.fieldOffset(dstStructAddress, dstField.index),
+          dstType.copyFromType(
+            region,
+            srcType,
+            sourceType.loadField(srcStructAddress, srcField.index),
+            forceDeep
+          )
+        )
+      }
+
+      i+=1
+    }
+
+    dstStructAddress
   }
 
   override def containsPointers: Boolean = types.exists(_.containsPointers)

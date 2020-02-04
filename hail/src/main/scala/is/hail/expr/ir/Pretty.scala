@@ -75,8 +75,8 @@ object Pretty {
       sb += '('
       sb.append(prettyClass(aggSig.op))
       sb += ' '
-      sb.append(aggSig.initOpArgs.map(_.parsableString()).mkString(" (", " ", ")"))
-      sb.append(aggSig.seqOpArgs.map(_.parsableString()).mkString(" (", " ", ")"))
+      sb.append(aggSig.physicalInitOpArgs.map(_.toString).mkString(" (", " ", ")"))
+      sb.append(aggSig.physicalSeqOpArgs.map(_.toString).mkString(" (", " ", ")"))
       if (aggSig.nested.isEmpty)
         sb.append(" None")
       else
@@ -143,32 +143,42 @@ object Pretty {
           prettySeq(initOpArgs, depth + 2)
           sb += '\n'
           prettySeq(seqOpArgs, depth + 2)
-        case InitOp2(i, args, aggSig) =>
+        case InitOp(i, args, aggSig) =>
           sb += ' '
           sb.append(i)
           sb += ' '
           prettyPhysAggSignature(aggSig, depth + 2)
           sb += '\n'
           prettySeq(args, depth + 2)
-        case SeqOp2(i, args, aggSig) =>
+        case SeqOp(i, args, aggSig) =>
           sb += ' '
           sb.append(i)
           sb += ' '
           prettyPhysAggSignature(aggSig, depth + 2)
           sb += '\n'
           prettySeq(args, depth + 2)
-        case CombOp2(i1, i2, aggSig) =>
+        case CombOp(i1, i2, aggSig) =>
           sb += ' '
           sb.append(i1)
           sb += ' '
           sb.append(i2)
           sb += ' '
           prettyPhysAggSignature(aggSig, depth + 2)
-        case ResultOp2(i, aggSigs) =>
+        case ResultOp(i, aggSigs) =>
           sb += ' '
           sb.append(i)
           sb += '\n'
           prettyPhysAggSeq(aggSigs, depth + 2)
+        case AggStateValue(i, sig) =>
+          sb += ' '
+          sb.append(i)
+          sb += ' '
+          prettyPhysAggSignature(sig, depth + 2)
+        case CombOpValue(i, _, sig) =>
+          sb += ' '
+          sb.append(i)
+          sb += ' '
+          prettyPhysAggSignature(sig, depth + 2)
         case SerializeAggs(i, i2, spec, aggSigs) =>
           sb += ' '
           sb.append(i)
@@ -187,6 +197,10 @@ object Pretty {
           sb.append(prettyStringLiteral(spec.toString))
           sb += '\n'
           prettyPhysAggSeq(aggSigs, depth + 2)
+        case RunAgg(_, _, signature) =>
+          prettyPhysAggSeq(signature, depth + 2)
+        case RunAggScan(_, name, _, _, _, signature) =>
+          prettyIdentifier(name) + " " + prettyPhysAggSeq(signature, depth + 2)
         case InsertFields(old, fields, fieldOrder) =>
           sb += '\n'
           pretty(old, depth + 2)
@@ -237,6 +251,12 @@ object Pretty {
             case MakeArray(_, typ) => typ.parsableString()
             case MakeStream(_, typ) => typ.parsableString()
             case ArrayMap(_, name, _) => prettyIdentifier(name)
+            case ArrayZip(_, names, _, behavior) => prettyIdentifier(behavior match {
+              case ArrayZipBehavior.AssertSameLength => "AssertSameLength"
+              case ArrayZipBehavior.TakeMinLength => "TakeMinLength"
+              case ArrayZipBehavior.ExtendNA => "ExtendNA"
+              case ArrayZipBehavior.AssumeSameLength => "AssumeSameLength"
+            }) + " " + prettyIdentifiers(names)
             case ArrayFilter(_, name, _) => prettyIdentifier(name)
             case ArrayFlatMap(_, name, _) => prettyIdentifier(name)
             case ArrayFold(_, _, accumName, valueName, _) => prettyIdentifier(accumName) + " " + prettyIdentifier(valueName)
@@ -262,7 +282,7 @@ object Pretty {
             case ApplySpecial(function, _, t) => prettyIdentifier(function) + " " + t.parsableString()
             case SelectFields(_, fields) => fields.map(prettyIdentifier).mkString("(", " ", ")")
             case LowerBoundOnOrderedCollection(_, _, onKey) => prettyBooleanLiteral(onKey)
-            case In(i, typ) => s"${ typ.parsableString() } $i"
+            case In(i, typ) => s"$typ $i"
             case Die(message, typ) => typ.parsableString()
             case CollectDistributedArray(_, _, cname, gname, _) =>
               s"${ prettyIdentifier(cname) } ${ prettyIdentifier(gname) }"

@@ -4,13 +4,14 @@ import is.hail.ExecStrategy.ExecStrategy
 import is.hail.TestUtils._
 import is.hail.annotations.BroadcastRow
 import is.hail.asm4s.Code
+import is.hail.expr.ir.ArrayZipBehavior.ArrayZipBehavior
 import is.hail.expr.ir.IRBuilder._
 import is.hail.expr.ir.IRSuite.TestFunctions
 import is.hail.expr.ir.functions._
 import is.hail.expr.types.TableType
 import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
-import is.hail.expr.{Nat, ir}
+import is.hail.expr.Nat
 import is.hail.io.bgen.MatrixBGENReader
 import is.hail.io.{BufferSpec, TypedCodecSpec}
 import is.hail.linalg.BlockMatrix
@@ -198,6 +199,53 @@ class IRSuite extends HailSuite {
       FastIndexedSeq(Row(1)))
   }
 
+  @Test def testCastRenameIR() {
+    var expectedPType: PType = PCanonicalStruct(true, "foo" -> PInt32(true))
+    var childPType: PType = PCanonicalStruct(true, "x" -> PInt32(true))
+    var targetType: Type = TStruct("foo" -> TInt32())
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+
+    expectedPType = PCanonicalArray(PCanonicalStruct(true, "foo" -> PInt64(true)))
+    childPType = PCanonicalArray(PCanonicalStruct(true, "c" -> PInt64(true)))
+    targetType = TArray(TStruct("foo" -> TInt64()))
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+
+    expectedPType = PCanonicalArray(PCanonicalStruct("foo" -> PCanonicalString(true)))
+    childPType = PCanonicalArray(PCanonicalStruct("q" -> PCanonicalString(true)))
+    targetType = TArray(TStruct("foo" -> TString()))
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+
+    expectedPType = PCanonicalArray(PCanonicalStruct(true, "foo" -> PCanonicalStruct("baz" -> PBoolean(true))))
+    childPType = PCanonicalArray(PCanonicalStruct(true, "b" -> PCanonicalStruct("a" -> PBoolean(true))))
+    targetType = TArray(TStruct("foo" -> TStruct("baz" -> TBoolean())))
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+
+    expectedPType = PCanonicalArray(PCanonicalStruct("foo" -> PCanonicalArray(PFloat64(true), true), "bar" -> PCanonicalBinary()))
+    childPType = PCanonicalArray(PCanonicalStruct("x" -> PCanonicalArray(PFloat64(true), true), "y" -> PCanonicalBinary()))
+    targetType = TArray(TStruct("foo" -> TArray(TFloat64()), "bar" -> TBinary()))
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+
+    expectedPType = PCanonicalTuple(true, PCanonicalStruct(true, "foo" -> PInterval(PFloat32())), PCanonicalStruct(false, "bar" -> PFloat64(true)))
+    childPType = PCanonicalTuple(true, PCanonicalStruct(true, "v" -> PInterval(PFloat32())), PCanonicalStruct(false, "q" -> PFloat64(true)))
+    targetType = TTuple(TStruct("foo" -> TInterval(TFloat32())), TStruct("bar" -> TFloat64()))
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+
+    expectedPType = PCanonicalDict(PString(), PCanonicalTuple(false,
+      PCanonicalStruct("foo" -> PCanonicalStruct("bar" -> PNDArray(PInt32(true), 3, true))),
+      PCanonicalStruct(false, "bar" -> PCanonicalBinary(true))))
+    childPType = PCanonicalDict(PString(), PCanonicalTuple(false,
+      PCanonicalStruct("xxxxxx" -> PCanonicalStruct("qqq" -> PNDArray(PInt32(true), 3, true))),
+      PCanonicalStruct(false, "ddd" -> PCanonicalBinary(true))))
+    targetType = TDict(TString(), TTuple(TStruct("foo" -> TStruct("bar" -> TNDArray(TInt32(), Nat(3)))),
+      TStruct("bar" -> TBinary())))
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+
+    expectedPType = PStream(PCanonicalStruct("foo2a" -> PCanonicalArray(PFloat64(true), true), "bar2a" -> PCanonicalBinary()))
+    childPType = PStream(PCanonicalStruct("q" -> PCanonicalArray(PFloat64(true), true), "yxxx" -> PCanonicalBinary()))
+    targetType = TStream(TStruct("foo2a" -> TArray(TFloat64()), "bar2a" -> TBinary()))
+    assertPType(CastRename(In(0, childPType), targetType), expectedPType)
+  }
+
   @Test def testNA() {
     assertEvalsTo(NA(TInt32()), null)
   }
@@ -213,10 +261,32 @@ class IRSuite extends HailSuite {
     assertEvalsTo(Coalesce(FastSeq(In(0, TInt32()))), FastIndexedSeq((null, TInt32())), null)
     assertEvalsTo(Coalesce(FastSeq(In(0, TInt32()))), FastIndexedSeq((1, TInt32())), 1)
     assertEvalsTo(Coalesce(FastSeq(NA(TInt32()), In(0, TInt32()))), FastIndexedSeq((null, TInt32())), null)
-    assertEvalsTo(Coalesce(FastSeq(NA(TInt32()), In(0, TInt32()))), FastIndexedSeq((1, TInt32())), 1)
+    assertEvalsTo(Coalesce(FastSeq(NA(TInt32()), In(0, TInt32(true)))), FastIndexedSeq((1, TInt32(true))), 1)
     assertEvalsTo(Coalesce(FastSeq(In(0, TInt32()), NA(TInt32()))), FastIndexedSeq((1, TInt32())), 1)
     assertEvalsTo(Coalesce(FastSeq(NA(TInt32()), I32(1), I32(1), NA(TInt32()), I32(1), NA(TInt32()), I32(1))), 1)
     assertEvalsTo(Coalesce(FastSeq(NA(TInt32()), I32(1), Die("foo", TInt32()))), 1)(ExecStrategy.javaOnly)
+  }
+
+  @Test def testCoalesceWithDifferentRequiredeness() {
+    val t1 = In(0, TArray(TInt32(true)))
+    val t2 = NA(TArray(TInt32()))
+    val value = FastIndexedSeq(1, 2, 3, 4)
+
+    assertEvalsTo(Coalesce(FastSeq(t1, t2)), FastIndexedSeq((value, TArray(TInt32()))), value)
+  }
+
+  @Test def testCoalesceInferPType() {
+    assertPType(Coalesce(FastSeq(In(0, PInt32()))), PInt32())
+    assertPType(Coalesce(FastSeq(In(0, PInt32()), In(0, PInt32(true)))), PInt32())
+    assertPType(Coalesce(FastSeq(In(0, PArray(PArray(PInt32()))), In(0, PArray(PArray(PInt32(true)))))), PArray(PArray(PInt32())))
+    assertPType(Coalesce(FastSeq(In(0, PArray(PArray(PInt32()))), In(0, PArray(PArray(PInt32(true), true))))), PArray(PArray(PInt32())))
+    assertPType(Coalesce(FastSeq(In(0, PArray(PArray(PInt32()))), In(0, PArray(PArray(PInt32(true), true), true)))), PArray(PArray(PInt32())))
+    assertPType(Coalesce(FastSeq(In(0, PArray(PArray(PInt32()))), In(0, PArray(PArray(PInt32(true), true), true)))), PArray(PArray(PInt32())))
+    assertPType(Coalesce(FastSeq(
+      In(0, PArray(PArray(PInt32()))),
+      In(0, PArray(PArray(PInt32(), true))),
+      In(0, PArray(PArray(PInt32(true)), true))
+    )), PArray(PArray(PInt32())))
   }
 
   val i32na = NA(TInt32())
@@ -748,13 +818,14 @@ class IRSuite extends HailSuite {
   }
 
   @Test def testIfWithDifferentRequiredness() {
-    val t = TStruct(true, "foo" -> TStruct("bar" -> TArray(TInt32Required, required = true)))
+    val t = TStruct(true, "foo" -> TStruct("bar" -> TArray(TInt32(true), true)))
     val value = Row(Row(FastIndexedSeq(1, 2, 3)))
     assertEvalsTo(
-      If.unify(
+      If(
         In(0, TBoolean()),
         In(1, t),
-        MakeStruct(Seq("foo" -> MakeStruct(Seq("bar" -> ArrayRange(I32(0), I32(1), I32(1))))))),
+        MakeStruct(Seq("foo" -> MakeStruct(Seq("bar" -> ArrayRange(I32(0), I32(1), I32(1))))))
+      ),
       FastIndexedSeq((true, TBoolean()), (value, t)),
       value
     )
@@ -1430,13 +1501,13 @@ class IRSuite extends HailSuite {
   }
 
   @Test def testMakeArrayWithDifferentRequiredness(): Unit = {
-    val t = TArray(TStruct("a" -> TInt32Required, "b" -> TArray(TInt32Optional, required = true)))
+    val pt1 = PArray(PStruct("a" -> PInt32(), "b" -> PArray(PInt32())))
+    val pt2 = PArray(PStruct(true, "a" -> PInt32(true), "b" -> PArray(PInt32(), true)))
+
     val value = Row(2, FastIndexedSeq(1))
     assertEvalsTo(
-      MakeArray.unify(
-        Seq(NA(t.elementType.deepOptional()), In(0, t.elementType))
-      ),
-      FastIndexedSeq((value, t.elementType)),
+      MakeArray(Seq(In(0, pt1.elementType), In(1, pt2.elementType)), pt1.virtualType),
+      FastIndexedSeq((null, pt1.virtualType.elementType), (value, pt2.virtualType.elementType)),
       FastIndexedSeq(null, value)
     )
   }
@@ -1484,6 +1555,42 @@ class IRSuite extends HailSuite {
       FastIndexedSeq(-7, 2, 2, null))
     assertEvalsTo(ArraySort(a, False()),
       FastIndexedSeq(2, 2, -7, null))
+  }
+
+  @Test def testArrayZip() {
+    val range12 = ArrayRange(0, 12, 1)
+    val range6 = ArrayRange(0, 12, 2)
+    val range8 = ArrayRange(0, 24, 3)
+    val empty = ArrayRange(0, 0, 1)
+    val lit6 = Literal(TArray(TFloat64()), FastIndexedSeq(0d, -1d, 2.5d, -3d, 4d, null))
+    val range6dup = ArrayRange(0, 6, 1)
+
+    def zipToTuple(behavior: ArrayZipBehavior, irs: IR*): ArrayZip = ArrayZip(
+      irs.toFastIndexedSeq,
+      irs.indices.map(_.toString),
+      MakeTuple.ordered(irs.zipWithIndex.map { case (ir, i) => Ref(i.toString, ir.typ.asInstanceOf[TStreamable].elementType) }),
+      behavior)
+
+    for (b <- Array(ArrayZipBehavior.TakeMinLength, ArrayZipBehavior.ExtendNA)) {
+      assertEvalSame(zipToTuple(b, range12), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, range6, range8), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, range6, range8), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, range6, range8, lit6), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, range12, lit6), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, range12, lit6, empty), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, empty, lit6), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, empty), FastIndexedSeq())
+    }
+
+    for (b <- Array(ArrayZipBehavior.AssumeSameLength, ArrayZipBehavior.AssertSameLength)) {
+      assertEvalSame(zipToTuple(b, range6, lit6), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, range6, lit6, range6dup), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, range12), FastIndexedSeq())
+      assertEvalSame(zipToTuple(b, empty), FastIndexedSeq())
+    }
+
+    assertThrows[HailException](zipToTuple(ArrayZipBehavior.AssertSameLength, range6, range8), "zip: length mismatch")
+    assertThrows[HailException](zipToTuple(ArrayZipBehavior.AssertSameLength, range12, lit6), "zip: length mismatch")
   }
 
   @Test def testToSet() {
@@ -2348,6 +2455,7 @@ class IRSuite extends HailSuite {
     val takeBySig = AggSignature(TakeBy(), Seq(TInt32()), Seq(TFloat64(), TInt32()), None)
 
     val countSig = AggSignature(Count(), Seq(), Seq(), None)
+    val countPSig = PhysicalAggSignature(Count(), Seq(), Seq(), None)
     val count = ApplyAggOp(FastIndexedSeq.empty, FastIndexedSeq.empty, countSig)
 
     val table = TableRange(100, 10)
@@ -2404,6 +2512,7 @@ class IRSuite extends HailSuite {
       LowerBoundOnOrderedCollection(a, i, onKey = true),
       GroupByKey(da),
       ArrayMap(a, "v", v),
+      ArrayZip(FastIndexedSeq(aa, aa), FastIndexedSeq("foo", "bar"), True(), ArrayZipBehavior.TakeMinLength),
       ArrayFilter(a, "v", b),
       ArrayFlatMap(aa, "v", a),
       ArrayFold(a, I32(0), "x", "v", v),
@@ -2419,10 +2528,10 @@ class IRSuite extends HailSuite {
       ApplyAggOp(FastIndexedSeq.empty, FastIndexedSeq(I32(0)), collectSig),
       ApplyAggOp(FastIndexedSeq(I32(2)), FastIndexedSeq(call), callStatsSig),
       ApplyAggOp(FastIndexedSeq(I32(10)), FastIndexedSeq(F64(-2.11), I32(4)), takeBySig),
-      InitOp2(0, FastIndexedSeq(I32(2)), callStatsSig2),
-      SeqOp2(0, FastIndexedSeq(i), collectSig2),
-      CombOp2(0, 1, collectSig2),
-      ResultOp2(0, FastSeq(collectSig2)),
+      InitOp(0, FastIndexedSeq(I32(2)), callStatsSig2),
+      SeqOp(0, FastIndexedSeq(i), collectSig2),
+      CombOp(0, 1, collectSig2),
+      ResultOp(0, FastSeq(collectSig2)),
       SerializeAggs(0, 0, BufferSpec.default, FastSeq(collectSig2)),
       DeserializeAggs(0, 0, BufferSpec.default, FastSeq(collectSig2)),
       Begin(FastIndexedSeq(Void())),
@@ -2456,6 +2565,7 @@ class IRSuite extends HailSuite {
       BlockMatrixMultiWrite(IndexedSeq(blockMatrix, blockMatrix), blockMatrixMultiWriter),
       CollectDistributedArray(ArrayRange(0, 3, 1), 1, "x", "y", Ref("x", TInt32())),
       ReadPartition(Str("foo"), TypedCodecSpec(PStruct("foo" -> PInt32(), "bar" -> PString()), BufferSpec.default), TStruct("foo" -> TInt32())),
+      LiftMeOut(I32(1)),
       RelationalLet("x", I32(0), I32(0)),
       TailLoop("y", IndexedSeq("x" -> I32(0)), Recur("y", FastSeq(I32(4)), TInt32()))
     )
@@ -2899,7 +3009,6 @@ class IRSuite extends HailSuite {
     Array(LocalLDPrune("x", 0.95, 123, 456)),
     Array(PCA("x", 1, false)),
     Array(PCRelate(0.00, 4096, Some(0.1), PCRelate.PhiK2K0K1)),
-    Array(WindowByLocus(1)),
     Array(MatrixFilterPartitions(Array(1, 2, 3), keep = true)),
     Array(ForceCountTable()),
     Array(ForceCountMatrixTable()),

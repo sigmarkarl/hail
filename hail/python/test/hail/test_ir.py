@@ -67,6 +67,7 @@ class ValueIRTests(unittest.TestCase):
             ir.LowerBoundOnOrderedCollection(a, i, True),
             ir.GroupByKey(da),
             ir.ArrayMap(a, 'v', v),
+            ir.ArrayZip([a, a], ['a', 'b'], ir.TrueIR(), 'ExtendNA'),
             ir.ArrayFilter(a, 'v', v),
             ir.ArrayFlatMap(aa, 'v', v),
             ir.ArrayFold(a, ir.I32(0), 'x', 'v', v),
@@ -88,7 +89,6 @@ class ValueIRTests(unittest.TestCase):
             ir.GetField(s, 'x'),
             ir.MakeTuple([i, b]),
             ir.GetTupleElement(t, 1),
-            ir.In(2, hl.tfloat64),
             ir.Die(ir.Str('mumblefoo'), hl.tfloat64),
             ir.Apply('&&', hl.tbool, b, c),
             ir.Apply('toFloat64', hl.tfloat64, i),
@@ -110,7 +110,8 @@ class ValueIRTests(unittest.TestCase):
             ir.MatrixWrite(matrix_read, ir.MatrixGENWriter(new_temp_file(), 4)),
             ir.MatrixWrite(matrix_read, ir.MatrixPLINKWriter(new_temp_file())),
             ir.MatrixMultiWrite([matrix_read, matrix_read], ir.MatrixNativeMultiWriter(new_temp_file(), False, False)),
-            ir.BlockMatrixWrite(block_matrix_read, ir.BlockMatrixNativeWriter('fake_file_path', False, False, False))
+            ir.BlockMatrixWrite(block_matrix_read, ir.BlockMatrixNativeWriter('fake_file_path', False, False, False)),
+            ir.LiftMeOut(ir.I32(1))
         ]
 
         return value_irs

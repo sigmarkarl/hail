@@ -103,9 +103,14 @@ def test_ndarray_slice():
         hl.eval(flat[::0])
     assert "Slice step cannot be zero" in str(exc)
 
+
 @skip_unless_spark_backend()
 def test_ndarray_eval():
     data_list = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    mishapen_data_list1 = [[4], [1, 2, 3]]
+    mishapen_data_list2 = [[[1], [2, 3]]]
+    mishapen_data_list3 = [[4], [1, 2, 3], 5]
+
     nd_expr = hl.nd.array(data_list)
     evaled = hl.eval(nd_expr)
     np_equiv = np.array(data_list, dtype=np.int32)
@@ -131,11 +136,26 @@ def test_ndarray_eval():
     assert np.array_equal(hl.eval(hl.nd.array(hl.range(6))), np.arange(6))
     assert np.array_equal(hl.eval(hl.nd.array(hl.int64(4))), np.array(4))
 
+    # Testing from nested hail arrays
+    assert np.array_equal(hl.eval(hl.nd.array(hl.array([hl.array(x) for x in data_list]))), np.arange(9).reshape((3, 3)) + 1)
+
     # Testing missing data
     assert hl.eval(hl.nd.array(hl.null(hl.tarray(hl.tint32)))) is None
 
     with pytest.raises(ValueError) as exc:
-        hl.nd.array([[4], [1, 2, 3], 5])
+        hl.nd.array(mishapen_data_list1)
+    assert "inner dimensions do not match" in str(exc.value)
+
+    with pytest.raises(FatalError) as exc:
+        hl.eval(hl.nd.array(hl.array(mishapen_data_list1)))
+    assert "inner dimensions do not match" in str(exc.value)
+
+    with pytest.raises(FatalError) as exc:
+        hl.eval(hl.nd.array(hl.array(mishapen_data_list2)))
+    assert "inner dimensions do not match" in str(exc.value)
+
+    with pytest.raises(ValueError) as exc:
+        hl.nd.array(mishapen_data_list3)
     assert "inner dimensions do not match" in str(exc.value)
 
 
@@ -422,8 +442,13 @@ def test_ndarray_transpose():
 @skip_unless_spark_backend()
 def test_ndarray_matmul():
     np_v = np.array([1, 2])
+    np_y = np.array([1, 1, 1])
     np_m = np.array([[1, 2], [3, 4]])
+    np_m_f32 = np_m.astype(np.float32)
+    np_m_f64 = np_m.astype(np.float64)
     np_r = np.array([[1, 2, 3], [4, 5, 6]])
+    np_r_f32 = np_r.astype(np.float32)
+    np_r_f64 = np_r.astype(np.float64)
     np_cube = np.arange(8).reshape((2, 2, 2))
     np_rect_prism = np.arange(12).reshape((3, 2, 2))
     np_broadcasted_mat = np.arange(4).reshape((1, 2, 2))
@@ -433,8 +458,13 @@ def test_ndarray_matmul():
     np_ones_float64 = np.ones((4, 4), dtype=np.float64)
 
     v = hl.nd.array(np_v)
+    y = hl.nd.array(np_y)
     m = hl.nd.array(np_m)
+    m_f32 = hl.nd.array(np_m_f32)
+    m_f64 = hl.nd.array(np_m_f64)
     r = hl.nd.array(np_r)
+    r_f32 = hl.nd.array(np_r_f32)
+    r_f64 = hl.nd.array(np_r_f64)
     cube = hl.nd.array(np_cube)
     rect_prism = hl.nd.array(np_rect_prism)
     broadcasted_mat = hl.nd.array(np_broadcasted_mat)
@@ -446,10 +476,17 @@ def test_ndarray_matmul():
     assert_ndarrays_eq(
         (v @ v, np_v @ np_v),
         (m @ m, np_m @ np_m),
+        (m_f32 @ m_f32, np_m_f32 @ np_m_f32),
+        (m_f64 @ m_f64, np_m_f64 @ np_m_f64),
         (m @ m.T, np_m @ np_m.T),
+        (m_f64 @ m_f64.T, np_m_f64 @ np_m_f64.T),
         (r @ r.T, np_r @ np_r.T),
+        (r_f32 @ r_f32.T, np_r_f32 @ np_r_f32.T),
+        (r_f64 @ r_f64.T, np_r_f64 @ np_r_f64.T),
         (v @ m, np_v @ np_m),
         (m @ v, np_m @ np_v),
+        (v @ r, np_v @ np_r),
+        (r @ y, np_r @ np_y),
         (cube @ cube, np_cube @ np_cube),
         (cube @ v, np_cube @ np_v),
         (v @ cube, np_v @ np_cube),
@@ -530,6 +567,18 @@ def test_ndarray_show():
     hl.nd.arange(6).show()
     hl.nd.arange(6).reshape((2, 3)).show()
     hl.nd.arange(8).reshape((2, 2, 2)).show()
+
+
+@skip_unless_spark_backend()
+def test_ndarray_diagonal():
+    assert np.array_equal(hl.eval(hl.nd.diagonal(hl.nd.array([[1, 2], [3, 4]]))), np.array([1, 4]))
+    assert np.array_equal(hl.eval(hl.nd.diagonal(hl.nd.array([[1, 2, 3], [4, 5, 6]]))), np.array([1, 5]))
+    assert np.array_equal(hl.eval(hl.nd.diagonal(hl.nd.array([[1, 2], [3, 4], [5, 6]]))), np.array([1, 4]))
+
+    with pytest.raises(AssertionError) as exc:
+        hl.nd.diagonal(hl.nd.array([1, 2]))
+    assert "2 dimensional" in str(exc)
+
 
 @skip_unless_spark_backend()
 def test_ndarray_qr():

@@ -17,6 +17,7 @@ object Bindings {
       args.map { case (name, ir) => name -> ir.typ } :+
         name -> TTuple(TTuple(args.map(_._2.typ): _*), body.typ) else empty
     case ArrayMap(a, name, _) => if (i == 1) Array(name -> -coerce[TStreamable](a.typ).elementType) else empty
+    case ArrayZip(as, names, _, _) => if (i == as.length) names.zip(as.map(a => -coerce[TStreamable](a.typ).elementType)) else empty
     case ArrayFor(a, name, _) => if (i == 1) Array(name -> -coerce[TStreamable](a.typ).elementType) else empty
     case ArrayFlatMap(a, name, _) => if (i == 1) Array(name -> -coerce[TStreamable](a.typ).elementType) else empty
     case ArrayFilter(a, name, _) => if (i == 1) Array(name -> -coerce[TStreamable](a.typ).elementType) else empty
@@ -28,6 +29,7 @@ object Bindings {
         Array((valueName, -coerce[TStreamable](a.typ).elementType)) ++ accum.map { case (name, value) => (name, value.typ) }
       else
         accum.map { case (name, value) => (name, value.typ) }
+    case RunAggScan(a, name, _, _, _, _) => if (i == 2 || i == 3) Array(name -> -coerce[TStreamable](a.typ).elementType) else empty
     case ArrayScan(a, zero, accumName, valueName, _) => if (i == 2) Array(accumName -> zero.typ, valueName -> -coerce[TStreamable](a.typ).elementType) else empty
     case ArrayAggScan(a, name, _) => if (i == 1) FastIndexedSeq(name -> a.typ.asInstanceOf[TStreamable].elementType) else empty
     case ArrayLeftJoinDistinct(ll, rr, l, r, _, _) => if (i == 2 || i == 3) Array(l -> -coerce[TStreamable](ll.typ).elementType, r -> -coerce[TStreamable](rr.typ).elementType) else empty
@@ -174,6 +176,7 @@ object ChildEnvWithoutBindings {
       case MatrixAggregate(_, _) => BindingEnv(Env.empty, agg = Some(Env.empty))
       case TableAggregate(_, _) => BindingEnv(Env.empty, agg = Some(Env.empty))
       case RelationalLet(_, _, _) => if (i == 0) BindingEnv.empty else env
+      case LiftMeOut(_) => BindingEnv.empty
       case _ => if (UsesAggEnv(ir, i)) env.promoteAgg else if (UsesScanEnv(ir, i)) env.promoteScan else env
     }
   }

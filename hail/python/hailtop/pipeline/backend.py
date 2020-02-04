@@ -194,7 +194,14 @@ class BatchBackend(Backend):
     def close(self):
         self._batch_client.close()
 
-    def _run(self, pipeline, dry_run, verbose, delete_scratch_on_exit, wait=True, open=False):  # pylint: disable-msg=R0915
+    def _run(self,
+             pipeline,
+             dry_run,
+             verbose,
+             delete_scratch_on_exit,
+             wait=True,
+             open=False,
+             batch_submit_args=None):  # pylint: disable-msg=too-many-statements
         build_dag_start = time.time()
 
         bucket = self._batch_client.bucket
@@ -298,7 +305,8 @@ class BatchBackend(Backend):
                                  resources=resources,
                                  input_files=inputs if len(inputs) > 0 else None,
                                  output_files=outputs if len(outputs) > 0 else None,
-                                 pvc_size=task._storage)
+                                 pvc_size=task._storage,
+                                 always_run=task._always_run)
             n_jobs_submitted += 1
 
             task_to_job_mapping[task] = j
@@ -306,7 +314,7 @@ class BatchBackend(Backend):
 
         if dry_run:
             print("\n\n".join(commands))
-            return
+            return None
 
         if delete_scratch_on_exit and used_remote_tmpdir:
             parents = list(jobs_to_command.keys())
@@ -325,7 +333,7 @@ class BatchBackend(Backend):
             print(f'Built DAG with {n_jobs_submitted} jobs in {round(time.time() - build_dag_start, 3)} seconds.')
 
         submit_batch_start = time.time()
-        batch = batch.submit()
+        batch = batch.submit(**(batch_submit_args or {}))
 
         jobs_to_command = {j.id: cmd for j, cmd in jobs_to_command.items()}
 
@@ -346,3 +354,4 @@ class BatchBackend(Backend):
             print(f'Waiting for batch {batch.id}...')
             status = batch.wait()
             print(f'Batch {batch.id} complete: {status["state"]}')
+        return batch

@@ -1000,6 +1000,42 @@ class ArrayMap(IR):
             return {}
 
 
+class ArrayZip(IR):
+    @typecheck_method(arrays=sequenceof(IR), names=sequenceof(str), body=IR, behavior=str)
+    def __init__(self, arrays, names, body, behavior):
+        super().__init__(*arrays, body)
+        self.arrays = arrays
+        self.names = names
+        self.body = body
+        self.behavior = behavior
+
+    @typecheck_method(children=IR)
+    def copy(self, *children):
+        return ArrayZip(children[:-1], self.names, children[-1], self.behavior)
+
+    def head_str(self):
+        return f'{escape_id(self.behavior)} ({" ".join(map(escape_id, self.names))})'
+
+    def _eq(self, other):
+        return self.names == other.names and self.behavior == other.behavior
+
+    @property
+    def bound_variables(self):
+        return set(self.names) | super().bound_variables
+
+    def _compute_type(self, env, agg_env):
+        for a in self.arrays:
+            a._compute_type(env, agg_env)
+        self.body._compute_type(_env_bind(env, self.bindings(len(self.names))), agg_env)
+        self._type = tarray(self.body.typ)
+
+    def renderable_bindings(self, i, default_value=None):
+        if i == len(self.names):
+            return {name: default_value if default_value is not None else a.typ.element_type for name, a in zip(self.names, self.arrays)}
+        else:
+            return {}
+
+
 class ArrayFilter(IR):
     @typecheck_method(a=IR, name=str, body=IR)
     def __init__(self, a, name, body):
@@ -1758,31 +1794,6 @@ class GetTupleElement(IR):
         self._type = self.o.typ.types[self.idx]
 
 
-class In(IR):
-    @typecheck_method(i=int, typ=hail_type)
-    def __init__(self, i, typ):
-        super().__init__()
-        self.i = i
-        self._typ = typ
-
-    @property
-    def typ(self):
-        return self._typ
-
-    def copy(self):
-        return In(self.i, self._typ)
-
-    def head_str(self):
-        return f'{self._typ._parsable_string()} {self.i}'
-
-    def _eq(self, other):
-        return other.i == self.i and \
-               other._typ == self._typ
-
-    def _compute_type(self, env, agg_env):
-        self._type = self._typ
-
-
 class Die(IR):
     @typecheck_method(message=IR, typ=hail_type)
     def __init__(self, message, typ):
@@ -2256,6 +2267,20 @@ class Literal(IR):
 
     def _compute_type(self, env, agg_env):
         self._type = self._typ
+
+
+class LiftMeOut(IR):
+    @typecheck_method(child=IR)
+    def __init__(self, child):
+        super().__init__(child)
+        self.child = child
+
+    def copy(self, child):
+        return LiftMeOut(child)
+
+    def _compute_type(self, env, agg_env):
+        self.child._compute_type(env, agg_env)
+        self._type = self.child.typ
 
 
 class Join(IR):

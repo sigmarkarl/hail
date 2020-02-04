@@ -141,6 +141,9 @@ object Simplify {
 
     case x@ArrayMap(NA(_), _, _) => NA(x.typ)
 
+    case ArrayZip(as, names, body, _) if as.length == 1 => ArrayMap(as.head, names.head, body)
+    case ArrayMap(ArrayZip(as, names, zipBody, b), name, mapBody) => ArrayZip(as, names, Let(name, zipBody, mapBody), b)
+
     case x@ArrayFlatMap(NA(_), _, _) => NA(x.typ)
 
     case x@ArrayFilter(NA(_), _, _) => NA(x.typ)
@@ -521,6 +524,8 @@ object Simplify {
 
     case BlockMatrixToValueApply(ValueToBlockMatrix(child, IndexedSeq(nrows, ncols), _), functions.GetElement(Seq(i, j))) =>
       if (child.typ.isInstanceOf[TArray]) ArrayRef(child, I32((i * ncols + j).toInt)) else child
+
+    case LiftMeOut(child) if IsConstant(child) => child
   }
 
   private[this] def tableRules(canRepartition: Boolean): PartialFunction[TableIR, TableIR] = {
@@ -708,7 +713,7 @@ object Simplify {
         && child.typ.key.nonEmpty && canRepartition =>
       TableAggregateByKey(child, expr)
 
-    case TableAggregateByKey(TableKeyBy(child, keys, _), expr) if canRepartition =>
+    case TableAggregateByKey(x@TableKeyBy(child, keys, false), expr) if canRepartition && !x.definitelyDoesNotShuffle =>
       TableKeyByAndAggregate(child, expr, MakeStruct(keys.map(k => k -> GetField(Ref("row", child.typ.rowType), k))))
 
     case TableParallelize(TableCollect(child), _) if isDeterministicallyRepartitionable(child) => child

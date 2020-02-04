@@ -56,16 +56,6 @@ abstract class PStruct extends PBaseStruct {
 
   def identBase: String = "tuple"
 
-  override def pyString(sb: StringBuilder): Unit = {
-    sb.append("struct{")
-    fields.foreachBetween({ field =>
-      sb.append(prettyIdentifier(field.name))
-      sb.append(": ")
-      field.typ.pyString(sb)
-    }) { sb.append(", ")}
-    sb.append('}')
-  }
-
   def selectFields(names: Seq[String]): PStruct
 
   def select(keep: IndexedSeq[String]): (PStruct, (Row) => Row)
@@ -77,19 +67,17 @@ abstract class PStruct extends PBaseStruct {
   protected val structFundamentalType: PStruct
   override lazy val fundamentalType: PStruct = structFundamentalType
 
-  def loadField(region: Code[Region], offset: Code[Long], fieldName: String): Code[Long]
+  def loadField(offset: Code[Long], fieldName: String): Code[Long]
 
-  def loadField(offset: Code[Long], field: String): Code[Long]
+  final def isFieldDefined(offset: Code[Long], fieldName: String): Code[Boolean] = !isFieldMissing(offset, fieldName)
 
-  final def isFieldDefined(offset: Code[Long], field: String): Code[Boolean] = !isFieldMissing(offset, field)
-
-  def isFieldMissing(offset: Code[Long], field: String): Code[Boolean]
+  def isFieldMissing(offset: Code[Long], fieldName: String): Code[Boolean]
 
   def fieldOffset(offset: Code[Long], fieldName: String): Code[Long]
 
-  def setFieldPresent(offset: Code[Long], field: String): Code[Unit]
+  def setFieldPresent(offset: Code[Long], fieldName: String): Code[Unit]
 
-  def setFieldMissing(offset: Code[Long], field: String): Code[Unit]
+  def setFieldMissing(offset: Code[Long], fieldName: String): Code[Unit]
 
   def insertFields(fieldsToInsert: TraversableOnce[(String, PType)]): PStruct
 }

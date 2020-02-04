@@ -72,12 +72,14 @@ object ContainsAgg {
 
 object ContainsAggIntermediate {
   def apply(root: IR): Boolean = (root match {
-    case _: ResultOp2 => true
-    case _: SeqOp2 => true
-    case _: InitOp2 => true
-    case _: CombOp2 => true
+    case _: ResultOp => true
+    case _: SeqOp => true
+    case _: InitOp => true
+    case _: CombOp => true
     case _: DeserializeAggs => true
     case _: SerializeAggs => true
+    case _: AggStateValue => true
+    case _: CombOpValue => true
     case _ => false
   }) || root.children.exists {
     case child: IR => ContainsAggIntermediate(child)

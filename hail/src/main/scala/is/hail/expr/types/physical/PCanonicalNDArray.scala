@@ -1,38 +1,37 @@
 package is.hail.expr.types.physical
 
-import is.hail.annotations.{ Region, StagedRegionValueBuilder, UnsafeOrdering}
+import is.hail.annotations.{Region, StagedRegionValueBuilder, UnsafeOrdering}
 import is.hail.asm4s.{Code, MethodBuilder, _}
+import is.hail.expr.types.virtual.{TNDArray, Type}
 
 final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boolean = false) extends PNDArray  {
   assert(elementType.required, "elementType must be required")
 
   def _asIdent: String = s"ndarray_of_${elementType.asIdent}"
 
-  override def _toPretty = throw new NotImplementedError("Only _pretty should be called.")
-
   override def _pretty(sb: StringBuilder, indent: Int, compact: Boolean = false) {
-    sb.append("NDArray[")
+    sb.append("PCNDArray[")
     elementType.pretty(sb, indent, compact)
     sb.append(s",$nDims]")
   }
 
-  @transient lazy val flags = new StaticallyKnownField(PInt32Required, (r, off) => Region.loadInt(representation.loadField(r, off, "flags")))
+  @transient lazy val flags = new StaticallyKnownField(PInt32Required, off => Region.loadInt(representation.loadField(off, "flags")))
   @transient lazy val offset = new StaticallyKnownField(
     PInt32Required,
-    (r, off) => Region.loadInt(representation.loadField(r, off, "offset"))
+    off => Region.loadInt(representation.loadField(off, "offset"))
   )
   @transient lazy val shape = new StaticallyKnownField(
     PTuple(true, Array.tabulate(nDims)(_ => PInt64Required):_*),
-    (r, off) => representation.loadField(r, off, "shape")
+    off => representation.loadField(off, "shape")
   )
   @transient lazy val strides = new StaticallyKnownField(
     PTuple(true, Array.tabulate(nDims)(_ => PInt64Required):_*),
-    (r, off) => representation.loadField(r, off, "strides")
+    (off) => representation.loadField(off, "strides")
   )
 
   @transient lazy val data: StaticallyKnownField[PArray, Long] = new StaticallyKnownField(
     PArray(elementType, required = true),
-    (r, off) => representation.loadField(r, off, "data")
+    off => representation.loadField(off, "data")
   )
 
   lazy val representation: PStruct = {
@@ -89,13 +88,13 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     )
   }
 
-  def getElementAddress(indices: Array[Code[Long]], nd: Code[Long], region: Code[Region], mb: MethodBuilder): Code[Long] = {
-    val stridesTuple  = new CodePTuple(strides.pType, region, strides.load(region, nd))
+  def getElementAddress(indices: Array[Code[Long]], nd: Code[Long], mb: MethodBuilder): Code[Long] = {
+    val stridesTuple  = new CodePTuple(strides.pType, strides.load(nd))
     val bytesAway = mb.newLocal[Long]
     val dataStore = mb.newLocal[Long]
 
     coerce[Long](Code(
-      dataStore := data.load(region, nd),
+      dataStore := data.load(nd),
       bytesAway := 0L,
       indices.zipWithIndex.foldLeft(Code._empty[Unit]){case (codeSoFar: Code[_], (requestedIndex: Code[Long], strideIndex: Int)) =>
         Code(
@@ -106,12 +105,12 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     ))
   }
 
-  def loadElementToIRIntermediate(indices: Array[Code[Long]], ndAddress: Code[Long], region: Code[Region], mb: MethodBuilder): Code[_] = {
-    Region.loadIRIntermediate(this.elementType)(this.getElementAddress(indices, ndAddress, region, mb))
+  def loadElementToIRIntermediate(indices: Array[Code[Long]], ndAddress: Code[Long], mb: MethodBuilder): Code[_] = {
+    Region.loadIRIntermediate(this.elementType)(this.getElementAddress(indices, ndAddress, mb))
   }
 
-  def outOfBounds(indices: Array[Code[Long]], nd: Code[Long], region: Code[Region], mb: MethodBuilder): Code[Boolean] = {
-    val shapeTuple = new CodePTuple(shape.pType, region, shape.load(region, nd))
+  def outOfBounds(indices: Array[Code[Long]], nd: Code[Long], mb: MethodBuilder): Code[Boolean] = {
+    val shapeTuple = new CodePTuple(shape.pType, shape.load(nd))
     val outOfBounds = mb.newField[Boolean]
     Code(
       outOfBounds := false,
@@ -122,7 +121,7 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     )
   }
 
-  def linearizeIndicesRowMajor(indices: Array[Code[Long]], shapeArray: Array[Code[Long]], region: Code[Region], mb: MethodBuilder): Code[Long] = {
+  def linearizeIndicesRowMajor(indices: Array[Code[Long]], shapeArray: Array[Code[Long]], mb: MethodBuilder): Code[Long] = {
     val index = mb.newField[Long]
     val elementsInProcessedDimensions = mb.newField[Long]
     Code(
@@ -138,7 +137,7 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     )
   }
 
-  def unlinearizeIndexRowMajor(index: Code[Long], shapeArray: Array[Code[Long]], region: Code[Region], mb: MethodBuilder): (Code[Unit], Array[Code[Long]]) = {
+  def unlinearizeIndexRowMajor(index: Code[Long], shapeArray: Array[Code[Long]], mb: MethodBuilder): (Code[Unit], Array[Code[Long]]) = {
     val nDim = shapeArray.length
     val newIndices = (0 until nDim).map(_ => mb.newField[Long]).toArray
     val elementsInProcessedDimensions = mb.newField[Long]
@@ -208,4 +207,35 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
       srvb.end()
     ))
   }
+
+  def storeShallowAtOffset(dstAddress: Code[Long], valueAddress: Code[Long]): Code[Unit] =
+    this.representation.storeShallowAtOffset(dstAddress, valueAddress)
+
+  def storeShallowAtOffset(dstAddress: Long, valueAddress: Long) {
+    this.representation.storeShallowAtOffset(dstAddress, valueAddress)
+  }
+
+  def copyFromType(mb: MethodBuilder, region: Code[Region], srcPType: PType, srcAddress: Code[Long], forceDeep: Boolean): Code[Long] = {
+    val sourceNDPType = srcPType.asInstanceOf[PNDArray]
+
+    assert(this.elementType == sourceNDPType.elementType && this.nDims == sourceNDPType.nDims)
+
+    this.representation.copyFromType(mb, region, sourceNDPType.representation, srcAddress, forceDeep)
+  }
+
+  def copyFromTypeAndStackValue(mb: MethodBuilder, region: Code[Region], srcPType: PType, stackValue: Code[_], forceDeep: Boolean): Code[_] =
+    this.copyFromType(mb, region, srcPType, stackValue.asInstanceOf[Code[Long]], forceDeep)
+
+  def copyFromType(region: Region, srcPType: PType, srcAddress: Long, forceDeep: Boolean): Long  = {
+    val sourceNDPType = srcPType.asInstanceOf[PNDArray]
+
+    assert(this.elementType == sourceNDPType.elementType && this.nDims == sourceNDPType.nDims)
+
+    this.representation.copyFromType(region, sourceNDPType.representation, srcAddress, forceDeep)
+  }
+
+  override def deepRename(t: Type) = deepRenameNDArray(t.asInstanceOf[TNDArray])
+
+  private def deepRenameNDArray(t: TNDArray) =
+    PCanonicalNDArray(this.elementType.deepRename(t.elementType), this.nDims, this.required)
 }

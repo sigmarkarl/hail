@@ -6,15 +6,9 @@ import is.hail.annotations.{UnsafeOrdering, _}
 import is.hail.expr.ir.EmitMethodBuilder
 import is.hail.expr.types.virtual.TString
 
-case object PStringOptional extends PCanonicalString(false)
-case object PStringRequired extends PCanonicalString(true)
 
 abstract class PString extends PType {
   lazy val virtualType: TString = TString(required)
-
-  override def pyString(sb: StringBuilder): Unit = {
-    sb.append("str")
-  }
 
   override def unsafeOrdering(): UnsafeOrdering = PBinary(required).unsafeOrdering()
 
@@ -25,22 +19,26 @@ abstract class PString extends PType {
 
   protected val binaryFundamentalType: PBinary
   override lazy val fundamentalType: PBinary = binaryFundamentalType
+
+  def bytesOffset(boff: Long): Long
+
+  def bytesOffset(boff: Code[Long]): Code[Long]
+
+  def loadLength(boff: Long): Int
+
+  def loadLength(boff: Code[Long]): Code[Int]
+
+  def loadString(boff: Long): String
+
+  def loadString(boff: Code[Long]): Code[String]
+
+  def allocateAndStoreString(region: Region, str: String): Long
+
+  def allocateAndStoreString(mb: MethodBuilder, region: Code[Region], str: Code[String]): Code[Long]
 }
 
 object PString {
-  def apply(required: Boolean = false): PString = if (required) PStringRequired else PStringOptional
+  def apply(required: Boolean = false): PString = PCanonicalString(required)
 
   def unapply(t: PString): Option[Boolean] = PCanonicalString.unapply(t)
-
-  def loadString(boff: Long): String = PCanonicalString.loadString(boff)
-
-  def loadString(region: Region, boff: Long): String = PCanonicalString.loadString(region, boff)
-
-  def loadString(boff: Code[Long]): Code[String] = PCanonicalString.loadString(boff)
-
-  def loadString(region: Code[Region], boff: Code[Long]): Code[String] = PCanonicalString.loadString(region, boff)
-
-  def loadLength(region: Region, boff: Long): Int = PCanonicalString.loadLength(region, boff)
-
-  def loadLength(region: Code[Region], boff: Code[Long]): Code[Int] = PCanonicalString.loadLength(region, boff)
 }

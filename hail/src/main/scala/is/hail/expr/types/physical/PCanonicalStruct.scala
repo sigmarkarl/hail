@@ -3,9 +3,10 @@ package is.hail.expr.types.physical
 import is.hail.annotations._
 import is.hail.asm4s.Code
 import is.hail.expr.types.BaseStruct
-import is.hail.expr.types.virtual.{Field, TStruct, Type}
+import is.hail.expr.types.virtual.{TStruct, Type}
 import is.hail.utils._
 import org.apache.spark.sql.Row
+
 import collection.JavaConverters._
 
 object PCanonicalStruct {
@@ -49,8 +50,7 @@ final case class PCanonicalStruct(fields: IndexedSeq[PField], required: Boolean 
       s"${fieldNames.map(prettyIdentifier).mkString(", ")}", fieldNames.duplicates())
   }
 
-  val missingIdx = new Array[Int](size)
-  val nMissing: Int = BaseStruct.getMissingness[PType](types, missingIdx)
+  val (missingIdx: Array[Int], nMissing: Int) = BaseStruct.getMissingIndexAndCount(types.map(_.required))
   val nMissingBytes = (nMissing + 7) >>> 3
   val byteOffsets = new Array[Long](size)
   override val byteSize: Long = PBaseStruct.getByteSizeAndOffsets(types, nMissingBytes, byteOffsets)
@@ -88,8 +88,8 @@ final case class PCanonicalStruct(fields: IndexedSeq[PField], required: Boolean 
                 rvb.setMissing()
               i += 1
             }
-            if (region != null && isFieldDefined(region, offset, j))
-              fieldInserter(region, loadField(region, offset, j), rvb, inserter)
+            if (region != null && isFieldDefined(offset, j))
+              fieldInserter(region, loadField(offset, j), rvb, inserter)
             else
               fieldInserter(null, 0, rvb, inserter)
             i += 1
@@ -178,7 +178,7 @@ final case class PCanonicalStruct(fields: IndexedSeq[PField], required: Boolean 
 
   override def _pretty(sb: StringBuilder, indent: Int, compact: Boolean) {
     if (compact) {
-      sb.append("Struct{")
+      sb.append("PCStruct{")
       fields.foreachBetween(_.pretty(sb, indent, compact))(sb += ',')
       sb += '}'
     } else {
@@ -228,18 +228,20 @@ final case class PCanonicalStruct(fields: IndexedSeq[PField], required: Boolean 
     }
   }
 
-  def loadField(region: Code[Region], offset: Code[Long], fieldName: String): Code[Long] =
-    loadField(region, offset, fieldIdx(fieldName))
+  def loadField(offset: Code[Long], fieldName: String): Code[Long] =
+    loadField(offset, fieldIdx(fieldName))
 
-  def loadField(offset: Code[Long], field: String): Code[Long] = loadField(offset, fieldIdx(field))
+  def isFieldMissing(offset: Code[Long], field: String): Code[Boolean] =
+    isFieldMissing(offset, fieldIdx(field))
 
-  def isFieldMissing(offset: Code[Long], field: String): Code[Boolean] = isFieldMissing(offset, fieldIdx(field))
+  def fieldOffset(offset: Code[Long], fieldName: String): Code[Long] =
+    fieldOffset(offset, fieldIdx(fieldName))
 
-  def fieldOffset(offset: Code[Long], fieldName: String): Code[Long] = fieldOffset(offset, fieldIdx(fieldName))
+  def setFieldPresent(offset: Code[Long], field: String): Code[Unit] =
+    setFieldPresent(offset, fieldIdx(field))
 
-  def setFieldPresent(offset: Code[Long], field: String): Code[Unit] = setFieldPresent(offset, fieldIdx(field))
-
-  def setFieldMissing(offset: Code[Long], field: String): Code[Unit] = setFieldMissing(offset, fieldIdx(field))
+  def setFieldMissing(offset: Code[Long], field: String): Code[Unit] =
+    setFieldMissing(offset, fieldIdx(field))
 
   def insertFields(fieldsToInsert: TraversableOnce[(String, PType)]): PStruct = {
     val ab = new ArrayBuilder[PField](fields.length)
@@ -258,5 +260,14 @@ final case class PCanonicalStruct(fields: IndexedSeq[PField], required: Boolean 
         ab += PField(name, typ, ab.length)
     }
     PCanonicalStruct(ab.result(), required)
+  }
+
+  override def deepRename(t: Type): PType = deepRenameStruct(t.asInstanceOf[TStruct])
+
+  private def deepRenameStruct(t: TStruct): PStruct = {
+    PCanonicalStruct((t.fields, this.fields).zipped.map( (tfield, pfield) => {
+      assert(tfield.index == pfield.index)
+      PField(tfield.name, pfield.typ.deepRename(tfield.typ), pfield.index)
+    }), this.required)
   }
 }

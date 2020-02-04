@@ -130,6 +130,9 @@ object Copy {
       case ArrayMap(_, name, _) =>
         assert(newChildren.length == 2)
         ArrayMap(newChildren(0).asInstanceOf[IR], name, newChildren(1).asInstanceOf[IR])
+      case ArrayZip(_, names, _, behavior) =>
+        assert(newChildren.length == names.length + 1)
+        ArrayZip(newChildren.init.asInstanceOf[IndexedSeq[IR]], names, newChildren(names.length).asInstanceOf[IR], behavior)
       case ArrayFilter(_, name, _) =>
         assert(newChildren.length == 2)
         ArrayFilter(newChildren(0).asInstanceOf[IR], name, newChildren(1).asInstanceOf[IR])
@@ -161,6 +164,11 @@ object Copy {
       case ArrayAggScan(_, name, _) =>
         assert(newChildren.length == 2)
         ArrayAggScan(newChildren(0).asInstanceOf[IR], name, newChildren(1).asInstanceOf[IR])
+      case RunAgg(_, _, signatures) =>
+        RunAgg(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], signatures)
+      case RunAggScan(_, name, _, _, _, signatures) =>
+        RunAggScan(newChildren(0).asInstanceOf[IR], name, newChildren(1).asInstanceOf[IR],
+          newChildren(2).asInstanceOf[IR], newChildren(3).asInstanceOf[IR], signatures)
       case AggFilter(_, _, isScan) =>
         assert(newChildren.length == 2)
         AggFilter(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], isScan)
@@ -190,13 +198,16 @@ object Copy {
       case GetField(_, name) =>
         assert(newChildren.length == 1)
         GetField(newChildren(0).asInstanceOf[IR], name)
-      case InitOp2(i, _, aggSig) =>
-        InitOp2(i, newChildren.map(_.asInstanceOf[IR]), aggSig)
-      case SeqOp2(i, _, aggSig) =>
-        SeqOp2(i, newChildren.map(_.asInstanceOf[IR]), aggSig)
-      case x@(_: ResultOp2 | _: CombOp2) =>
+      case InitOp(i, _, aggSig) =>
+        InitOp(i, newChildren.map(_.asInstanceOf[IR]), aggSig)
+      case SeqOp(i, _, aggSig) =>
+        SeqOp(i, newChildren.map(_.asInstanceOf[IR]), aggSig)
+      case x@(_: ResultOp | _: CombOp | _: AggStateValue) =>
         assert(newChildren.isEmpty)
         x
+      case CombOpValue(i, _, aggSig) =>
+        assert(newChildren.length == 1)
+        CombOpValue(i, newChildren(0).asInstanceOf[IR], aggSig)
       case x: SerializeAggs => x
       case x: DeserializeAggs => x
       case Begin(_) =>
@@ -283,6 +294,8 @@ object Copy {
       case ReadPartition(path, spec, rowType) =>
         assert(newChildren.length == 1)
         ReadPartition(newChildren(0).asInstanceOf[IR], spec, rowType)
+      case LiftMeOut(_) =>
+        LiftMeOut(newChildren(0).asInstanceOf[IR])
     }
   }
 }

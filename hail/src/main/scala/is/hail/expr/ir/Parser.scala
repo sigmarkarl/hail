@@ -2,12 +2,12 @@ package is.hail.expr.ir
 
 import is.hail.HailContext
 import is.hail.expr.ir.functions.RelationalFunctions
-import is.hail.expr.types.physical.PType
+import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
 import is.hail.expr.types.{MatrixType, TableType}
 import is.hail.expr.{JSONAnnotationImpex, Nat, ParserUtils}
 import is.hail.io.bgen.MatrixBGENReaderSerializer
-import is.hail.io.{BufferSpec, AbstractTypedCodecSpec}
+import is.hail.io.{AbstractTypedCodecSpec, BufferSpec}
 import is.hail.rvd.{AbstractRVDSpec, RVDType}
 import is.hail.utils.StringEscapeUtils._
 import is.hail.utils._
@@ -150,6 +150,7 @@ case class IRParserEnvironment(
   }
 
   def +(t: (String, Type)): IRParserEnvironment = copy(refMap = refMap + t, irMap)
+  def ++(ts: Array[(String, Type)]): IRParserEnvironment = copy(refMap = refMap ++ ts, irMap)
 }
 
 object IRParser {
@@ -310,6 +311,14 @@ object IRParser {
     (name, desc)
   }
 
+  def ptuple_subset_field(env: TypeParserEnvironment)(it: TokenIterator): (Int, PType) = {
+    val i = int32_literal(it)
+    punctuation(it, ":")
+    val t = ptype_expr(env)(it)
+    i -> t
+  }
+
+
   def tuple_subset_field(env: TypeParserEnvironment)(it: TokenIterator): (Int, Type) = {
     val i = int32_literal(it)
     punctuation(it, ":")
@@ -326,13 +335,90 @@ object IRParser {
     }
     (name, typ)
   }
+
+  def ptype_field(env: TypeParserEnvironment)(it: TokenIterator): (String, PType) = {
+    struct_field(ptype_expr(env))(it)
+  }
+
   def type_field(env: TypeParserEnvironment)(it: TokenIterator): (String, Type) = {
     struct_field(type_expr(env))(it)
   }
 
+  def ptype_expr(env: TypeParserEnvironment)(it: TokenIterator): PType = {
+    val req = it.head match {
+      case x: PunctuationToken if x.value == "+" =>
+        consumeToken(it)
+        true
+      case _ => false
+    }
+
+    val typ = identifier(it) match {
+      case "PCInterval" =>
+        punctuation(it, "[")
+        val pointType = ptype_expr(env)(it)
+        punctuation(it, "]")
+        PCanonicalInterval(pointType, req)
+      case "PBoolean" => PBoolean(req)
+      case "PInt32" => PInt32(req)
+      case "PInt64" => PInt64(req)
+      case "PFloat32" => PFloat32(req)
+      case "PFloat64" => PFloat64(req)
+      case "PCBinary" => PCanonicalBinary(req)
+      case "PCString" => PCanonicalString(req)
+      case "PCLocus" =>
+        punctuation(it, "(")
+        val rg = identifier(it)
+        punctuation(it, ")")
+        PCanonicalLocus(env.getReferenceGenome(rg), req)
+      case "PCCall" => PCanonicalCall(req)
+      case "PStream" =>
+        punctuation(it, "[")
+        val elementType = ptype_expr(env)(it)
+        punctuation(it, "]")
+        PStream(elementType, req)
+      case "PCArray" =>
+        punctuation(it, "[")
+        val elementType = ptype_expr(env)(it)
+        punctuation(it, "]")
+        PCanonicalArray(elementType, req)
+      case "PCNDArray" =>
+        punctuation(it, "[")
+        val elementType = ptype_expr(env)(it)
+        punctuation(it, ",")
+        val nDims = int32_literal(it)
+        punctuation(it, "]")
+        PCanonicalNDArray(elementType, nDims, req)
+      case "PCSet" =>
+        punctuation(it, "[")
+        val elementType = ptype_expr(env)(it)
+        punctuation(it, "]")
+        PCanonicalSet(elementType, req)
+      case "PCDict" =>
+        punctuation(it, "[")
+        val keyType = ptype_expr(env)(it)
+        punctuation(it, ",")
+        val valueType = ptype_expr(env)(it)
+        punctuation(it, "]")
+        PCanonicalDict(keyType, valueType, req)
+      case "PCTuple" =>
+        punctuation(it, "[")
+        val fields = repsepUntil(it, ptuple_subset_field(env), PunctuationToken(","), PunctuationToken("]"))
+        punctuation(it, "]")
+        PCanonicalTuple(fields.map { case (idx, t) => PTupleField(idx, t)}, req)
+      case "PCStruct" =>
+        punctuation(it, "{")
+        val args = repsepUntil(it, ptype_field(env), PunctuationToken(","), PunctuationToken("}"))
+        punctuation(it, "}")
+        val fields = args.zipWithIndex.map { case ((id, t), i) => PField(id, t, i) }
+        PCanonicalStruct(fields, req)
+    }
+    assert(typ.required == req)
+    typ
+  }
+
   def ptype_exprs(env: TypeParserEnvironment)(it: TokenIterator): Array[PType] = {
     punctuation(it, "(")
-    val types = repUntil(it, type_expr(env), PunctuationToken(")")).map(_.physicalType)
+    val types = repUntil(it, ptype_expr(env), PunctuationToken(")"))
     punctuation(it, ")")
     types
   }
@@ -457,8 +543,8 @@ object IRParser {
         punctuation(it, ",")
         identifier(it, "row")
         punctuation(it, ":")
-        val rowType = coerce[TStruct](type_expr(env)(it))
-        RVDType(rowType.physicalType, partitionKey ++ restKey)
+        val rowType = coerce[PStruct](ptype_expr(env)(it))
+        RVDType(rowType, partitionKey ++ restKey)
     }
   }
 
@@ -621,12 +707,13 @@ object IRParser {
       case "IsNA" => IsNA(ir_value_expr(env)(it))
       case "Coalesce" =>
         val children = ir_value_children(env)(it)
-        Coalesce.unify(children)
+        require(children.nonEmpty)
+        Coalesce(children)
       case "If" =>
         val cond = ir_value_expr(env)(it)
         val consq = ir_value_expr(env)(it)
         val altr = ir_value_expr(env)(it)
-        If.unify(cond, consq, altr)
+        If(cond, consq, altr)
       case "Let" =>
         val name = identifier(it)
         val value = ir_value_expr(env)(it)
@@ -779,6 +866,17 @@ object IRParser {
         val a = ir_value_expr(env)(it)
         val body = ir_value_expr(env + (name -> -coerce[TStreamable](a.typ).elementType))(it)
         ArrayMap(a, name, body)
+      case "ArrayZip" =>
+        val behavior = identifier(it) match {
+          case "AssertSameLength" => ArrayZipBehavior.AssertSameLength
+          case "TakeMinLength" => ArrayZipBehavior.TakeMinLength
+          case "ExtendNA" => ArrayZipBehavior.ExtendNA
+          case "AssumeSameLength" => ArrayZipBehavior.AssumeSameLength
+        }
+        val names = identifiers(it)
+        val as = names.map(_ => ir_value_expr(env)(it))
+        val body = ir_value_expr(env ++ names.zip(as.map(a => -coerce[TStreamable](a.typ).elementType)))(it)
+        ArrayZip(as, names, body, behavior)
       case "ArrayFilter" =>
         val name = identifier(it)
         val a = ir_value_expr(env)(it)
@@ -841,6 +939,19 @@ object IRParser {
         val a = ir_value_expr(env)(it)
         val query = ir_value_expr(env + (name -> coerce[TStreamable](a.typ).elementType))(it)
         ArrayAggScan(a, name, query)
+      case "RunAgg" =>
+        val signatures = physical_agg_signatures(env.typEnv)(it)
+        val body = ir_value_expr(env)(it)
+        val result = ir_value_expr(env)(it)
+        RunAgg(body, result, signatures)
+      case "RunAggScan" =>
+        val name = identifier(it)
+        val signatures = physical_agg_signatures(env.typEnv)(it)
+        val array = ir_value_expr(env)(it)
+        val init = ir_value_expr(env)(it)
+        val seq = ir_value_expr(env)(it)
+        val result = ir_value_expr(env)(it)
+        RunAggScan(array, name, init, seq, result, signatures)
       case "AggFilter" =>
         val isScan = boolean_literal(it)
         val cond = ir_value_expr(env)(it)
@@ -880,25 +991,34 @@ object IRParser {
         val seqOpArgs = ir_value_exprs(env)(it)
         val aggSig = AggSignature(aggOp, initOpArgs.map(arg => -arg.typ), seqOpArgs.map(arg => -arg.typ), None)
         ApplyScanOp(initOpArgs, seqOpArgs, aggSig)
-      case "InitOp2" =>
+      case "InitOp" =>
         val i = int32_literal(it)
         val aggSig = physical_agg_signature(env.typEnv)(it)
         val args = ir_value_exprs(env)(it)
-        InitOp2(i, args, aggSig)
-      case "SeqOp2" =>
+        InitOp(i, args, aggSig)
+      case "SeqOp" =>
         val i = int32_literal(it)
         val aggSig = physical_agg_signature(env.typEnv)(it)
         val args = ir_value_exprs(env)(it)
-        SeqOp2(i, args, aggSig)
-      case "CombOp2" =>
+        SeqOp(i, args, aggSig)
+      case "CombOp" =>
         val i1 = int32_literal(it)
         val i2 = int32_literal(it)
         val aggSig = physical_agg_signature(env.typEnv)(it)
-        CombOp2(i1, i2, aggSig)
-      case "ResultOp2" =>
+        CombOp(i1, i2, aggSig)
+      case "ResultOp" =>
         val i = int32_literal(it)
         val aggSigs = physical_agg_signatures(env.typEnv)(it)
-        ResultOp2(i, aggSigs)
+        ResultOp(i, aggSigs)
+      case "AggStateValue" =>
+        val i = int32_literal(it)
+        val sig = physical_agg_signature(env.typEnv)(it)
+        AggStateValue(i, sig)
+      case "CombOpValue" =>
+        val i = int32_literal(it)
+        val sig = physical_agg_signature(env.typEnv)(it)
+        val value = ir_value_expr(env)(it)
+        CombOpValue(i, value, sig)
       case "SerializeAggs" =>
         val i = int32_literal(it)
         val i2 = int32_literal(it)
@@ -939,9 +1059,9 @@ object IRParser {
         val tuple = ir_value_expr(env)(it)
         GetTupleElement(tuple, idx)
       case "In" =>
-        val typ = type_expr(env.typEnv)(it)
+        val typ = ptype_expr(env.typEnv)(it)
         val idx = int32_literal(it)
-        In(idx, typ.physicalType)
+        In(idx, typ)
       case "Die" =>
         val typ = type_expr(env.typEnv)(it)
         val msg = ir_value_expr(env)(it)
@@ -1036,6 +1156,8 @@ object IRParser {
         val rowType = coerce[TStruct](type_expr(env.typEnv)(it))
         val path = ir_value_expr(env)(it)
         ReadPartition(path, spec, rowType)
+      case "LiftMeOut" =>
+        LiftMeOut(ir_value_expr(env)(it))
     }
   }
 
@@ -1488,7 +1610,7 @@ object IRParser {
 
   def parseType(code: String, env: TypeParserEnvironment): Type = parse(code, type_expr(env))
 
-  def parsePType(code: String, env: TypeParserEnvironment): PType = parse(code, type_expr(env)).physicalType
+  def parsePType(code: String, env: TypeParserEnvironment): PType = parse(code, ptype_expr(env))
 
   def parseStructType(code: String, env: TypeParserEnvironment): TStruct = coerce[TStruct](parse(code, type_expr(env)))
 

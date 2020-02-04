@@ -34,11 +34,13 @@ object InferType {
       case _: StreamRange => TStream(TInt32())
       case _: LowerBoundOnOrderedCollection => TInt32()
       case _: ArrayFor => TVoid
-      case _: InitOp2 => TVoid
-      case _: SeqOp2 => TVoid
-      case _: CombOp2 => TVoid
-      case ResultOp2(_, aggSigs) =>
+      case _: InitOp => TVoid
+      case _: SeqOp => TVoid
+      case _: CombOp => TVoid
+      case ResultOp(_, aggSigs) =>
         TTuple(aggSigs.map(agg.Extract.getAgg(_).resultType.virtualType): _*)
+      case AggStateValue(i, sig) => TBinary()
+      case _: CombOpValue => TVoid
       case _: SerializeAggs => TVoid
       case _: DeserializeAggs => TVoid
       case _: Begin => TVoid
@@ -97,6 +99,7 @@ object InferType {
         TDict(elt.types(0), TArray(elt.types(1)), collection.typ.required)
       case ArrayMap(a, name, body) =>
         coerce[TStreamable](a.typ).copyStreamable(body.typ.setRequired(false))
+      case ArrayZip(as, _, body, _) => as.head.typ.asInstanceOf[TStreamable].copyStreamable(body.typ, false)
       case ArrayFilter(a, name, cond) =>
         a.typ
       case ArrayFlatMap(a, name, body) =>
@@ -112,6 +115,10 @@ object InferType {
         query.typ
       case ArrayAggScan(_, _, query) =>
         TArray(query.typ)
+      case RunAgg(body, result, _) =>
+        result.typ
+      case RunAggScan(_, _, _, _, result, _) =>
+        TArray(result.typ)
       case ArrayLeftJoinDistinct(left, right, l, r, compare, join) =>
         coerce[TStreamable](left.typ).copyStreamable(join.typ)
         TArray(join.typ)
@@ -208,6 +215,7 @@ object InferType {
       case BlockMatrixToValueApply(child, function) => function.typ(child.typ)
       case CollectDistributedArray(_, _, _, _, body) => TArray(body.typ)
       case ReadPartition(_, _, rowType) => TStream(rowType)
+      case LiftMeOut(child) => child.typ
     }
   }
 }

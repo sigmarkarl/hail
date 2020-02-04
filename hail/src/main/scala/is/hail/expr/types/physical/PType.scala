@@ -1,6 +1,7 @@
 package is.hail.expr.types.physical
 
 import is.hail.annotations._
+import is.hail.asm4s._
 import is.hail.check.{Arbitrary, Gen}
 import is.hail.expr.ir.{EmitMethodBuilder, IRParser, SortOrder}
 import is.hail.expr.types.virtual._
@@ -12,8 +13,8 @@ import org.json4s.CustomSerializer
 import org.json4s.JsonAST.JString
 
 class PTypeSerializer extends CustomSerializer[PType](format => (
-  { case JString(s) => PType.canonical(IRParser.parseType(s)) },
-  { case t: PType => JString(t.parsableString()) }))
+  { case JString(s) => PType.canonical(IRParser.parsePType(s)) },
+  { case t: PType => JString(t.toString) }))
 
 
 object PType {
@@ -153,14 +154,20 @@ object PType {
   }
 }
 
-abstract class PType extends BaseType with Serializable with Requiredness {
+abstract class PType extends Serializable with Requiredness {
   self =>
 
   def virtualType: Type
 
+  override def toString: String = {
+    val sb = new StringBuilder
+    pretty(sb, 0, true)
+    sb.result()
+  }
+
   def unsafeOrdering(): UnsafeOrdering = ???
 
-  def isCanonical: Boolean = PType.canonical(this) == this  // will recons, may need to rewrite this method
+  def isCanonical: Boolean = PType.canonical(this) == this // will recons, may need to rewrite this method
 
   def unsafeOrdering(rightType: PType): UnsafeOrdering = {
     require(this.isOfType(rightType))
@@ -169,15 +176,6 @@ abstract class PType extends BaseType with Serializable with Requiredness {
 
   def unsafeInsert(typeToInsert: PType, path: List[String]): (PType, UnsafeInserter) =
     PStruct.empty().unsafeInsert(typeToInsert, path)
-
-  def insert(signature: PType, fields: String*): (PType, Inserter) = insert(signature, fields.toList)
-
-  def insert(signature: PType, path: List[String]): (PType, Inserter) = {
-    if (path.nonEmpty)
-      PStruct.empty().insert(signature, path)
-    else
-      (signature, (a, toIns) => toIns)
-  }
 
   def asIdent: String = (if (required) "r_" else "o_") + _asIdent
 
@@ -189,11 +187,7 @@ abstract class PType extends BaseType with Serializable with Requiredness {
     _pretty(sb, indent, compact)
   }
 
-  def _toPretty: String
-
-  def _pretty(sb: StringBuilder, indent: Int, compact: Boolean) {
-    sb.append(_toPretty)
-  }
+  def _pretty(sb: StringBuilder, indent: Int, compact: Boolean)
 
   def codeOrdering(mb: EmitMethodBuilder): CodeOrdering =
     codeOrdering(mb, this)
@@ -282,13 +276,34 @@ abstract class PType extends BaseType with Serializable with Requiredness {
   def containsPointers: Boolean = false
 
   def subsetTo(t: Type): PType = {
-    // FIXME
-    t.physicalType
+    this match {
+      case PCanonicalStruct(fields, r) =>
+        val ts = t.asInstanceOf[TStruct]
+        PCanonicalStruct(r, fields.flatMap { pf => ts.fieldOption(pf.name).map { vf => (pf.name, pf.typ.subsetTo(vf.typ)) } }: _*)
+      case PCanonicalTuple(fields, r) =>
+        val tt = t.asInstanceOf[TTuple]
+        PCanonicalTuple(fields.flatMap { pf => tt.fieldIndex.get(pf.index).map(vi => PTupleField(vi, pf.typ.subsetTo(tt.types(vi)))) }, r)
+      case PCanonicalArray(e, r) =>
+        val ta = t.asInstanceOf[TArray]
+        PCanonicalArray(e.subsetTo(ta.elementType), r)
+      case PCanonicalSet(e, r) =>
+        val ts = t.asInstanceOf[TSet]
+        PCanonicalSet(e.subsetTo(ts.elementType), r)
+      case PCanonicalDict(k, v, r) =>
+        val td = t.asInstanceOf[TDict]
+        PCanonicalDict(k.subsetTo(td.keyType), v.subsetTo(td.valueType), r)
+      case PCanonicalInterval(p, r) =>
+        val ti = t.asInstanceOf[TInterval]
+        PCanonicalInterval(p.subsetTo(ti.pointType), r)
+      case _ =>
+        assert(virtualType == t)
+        this
+    }
   }
 
   def deepInnerRequired(required: Boolean): PType =
     this match {
-      case t: PArray =>  PArray(t.elementType.deepInnerRequired(true), required)
+      case t: PArray => PArray(t.elementType.deepInnerRequired(true), required)
       case t: PSet => PSet(t.elementType.deepInnerRequired(true), required)
       case t: PDict => PDict(t.keyType.deepInnerRequired(true), t.valueType.deepInnerRequired(true), required)
       case t: PStruct =>
@@ -301,7 +316,25 @@ abstract class PType extends BaseType with Serializable with Requiredness {
         t.setRequired(required)
     }
 
-  def unify(concrete: PType): Boolean = {
-    this.isOfType(concrete)
-  }
+  // Semantics: must be callable without requiredeness check: srcAddress must point to non-null value
+  def copyFromType(mb: MethodBuilder, region: Code[Region], srcPType: PType, srcAddress: Code[Long], forceDeep: Boolean): Code[Long]
+
+  def copyFromTypeAndStackValue(mb: MethodBuilder, region: Code[Region], srcPType: PType, stackValue: Code[_], forceDeep: Boolean): Code[_]
+
+  def copyFromType(mb: MethodBuilder, region: Code[Region], srcPType: PType, srcAddress: Code[Long]): Code[Long] =
+    this.copyFromType(mb, region, srcPType, srcAddress, false)
+
+  def copyFromTypeAndStackValue(mb: MethodBuilder, region: Code[Region], srcPType: PType, stackValue: Code[_]): Code[_] =
+    this.copyFromTypeAndStackValue(mb, region, srcPType, stackValue, false)
+
+  def copyFromType(region: Region, srcPType: PType, srcAddress: Long, forceDeep: Boolean): Long
+
+  def copyFromType(region: Region, srcPType: PType, srcAddress: Long): Long =
+    this.copyFromType(region, srcPType, srcAddress, false)
+
+  def deepRename(t: Type) = this
+
+  def storeShallowAtOffset(dstAddress: Code[Long], srcAddress: Code[Long]): Code[Unit]
+
+  def storeShallowAtOffset(dstAddress: Long, srcAddress: Long)
 }

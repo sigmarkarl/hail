@@ -349,6 +349,8 @@ case class TableKeyBy(child: TableIR, keys: IndexedSeq[String], isSorted: Boolea
 
   val typ: TableType = child.typ.copy(key = keys)
 
+  def definitelyDoesNotShuffle: Boolean = child.typ.key.startsWith(keys) || isSorted
+
   def copy(newChildren: IndexedSeq[BaseIR]): TableKeyBy = {
     assert(newChildren.length == 1)
     TableKeyBy(newChildren(0).asInstanceOf[TableIR], keys, isSorted)
@@ -406,7 +408,7 @@ case class TableRange(n: Int, nPartitions: Int) extends TableIR {
             Iterator.range(start, start + localPartCounts(i))
               .map { j =>
                 val off = localRowType.allocate(region)
-                localRowType.setFieldPresent(region, off, 0)
+                localRowType.setFieldPresent(off, 0)
                 Region.storeInt(localRowType.fieldOffset(off, 0), j)
                 rv.setOffset(off)
                 rv
@@ -863,8 +865,6 @@ case class TableMultiWayZipJoin(children: IndexedSeq[TableIR], fieldName: String
     globalType = newGlobalType
   )
 
-  val rvdType: RVDType = typ.canonicalRVDType
-
   def copy(newChildren: IndexedSeq[BaseIR]): TableMultiWayZipJoin =
     TableMultiWayZipJoin(newChildren.asInstanceOf[IndexedSeq[TableIR]], fieldName, globalName)
 
@@ -948,7 +948,6 @@ case class TableLeftJoinRightDistinct(left: TableIR, right: TableIR, root: Strin
 
   private val newRowType = left.typ.rowType.structInsert(right.typ.valueType, List(root))._1
   val typ: TableType = left.typ.copy(rowType = newRowType)
-  val rvdType: RVDType = typ.canonicalRVDType
 
   override def partitionCounts: Option[IndexedSeq[Long]] = left.partitionCounts
 
@@ -1284,8 +1283,6 @@ case class TableUnion(children: IndexedSeq[TableIR]) extends TableIR {
 
   val typ: TableType = children(0).typ
 
-  val rvdType: RVDType = typ.canonicalRVDType
-
   protected[ir] override def execute(ctx: ExecuteContext): TableValue = {
     val tvs = children.map(_.execute(ctx))
     tvs(0).copy(
@@ -1376,8 +1373,6 @@ case class TableKeyByAndAggregate(
     globalType = child.typ.globalType,
     key = keyType.fieldNames
   )
-
-  val rvdType: RVDType = typ.canonicalRVDType
 
   protected[ir] override def execute(ctx: ExecuteContext): TableValue = {
     val prev = child.execute(ctx)
@@ -1517,8 +1512,6 @@ case class TableAggregateByKey(child: TableIR, expr: IR) extends TableIR {
   }
 
   val typ: TableType = child.typ.copy(rowType = child.typ.keyType ++ coerce[TStruct](expr.typ))
-
-  val rvdType: RVDType = typ.canonicalRVDType
 
   protected[ir] override def execute(ctx: ExecuteContext): TableValue = {
     val prev = child.execute(ctx)
@@ -1767,6 +1760,7 @@ case class TableGroupWithinPartitions(child: TableIR, n: Int) extends TableIR {
     val newRVDType = prevRVD.typ.copy(rowType = rowType)
     val keyIndices = child.typ.keyFieldIdx
 
+    val blockSize = n
     val newRVD = prevRVD.mapPartitionsWithIndex(newRVDType, { (int, ctx, it) =>
       val targetRegion = ctx.region
 
@@ -1779,10 +1773,11 @@ case class TableGroupWithinPartitions(child: TableIR, n: Int) extends TableIR {
           if (!hasNext)
             throw new java.util.NoSuchElementException()
 
-          val offsetArray = new Array[Long](n) // May be longer than the amount of data
+          val offsetArray = new Array[Long](blockSize) // May be longer than the amount of data
           var childIterationCount = 0
-          while (it.hasNext && childIterationCount != n) {
+          while (it.hasNext && childIterationCount != blockSize) {
             val nextRV = it.next()
+            targetRegion.addReferenceTo(nextRV.region)
             offsetArray(childIterationCount) = nextRV.offset
             childIterationCount += 1
           }

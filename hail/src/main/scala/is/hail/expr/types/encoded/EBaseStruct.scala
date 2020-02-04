@@ -32,8 +32,7 @@ final case class EBaseStruct(fields: IndexedSeq[EField], override val required: 
   val fieldIdx: Map[String, Int] = fields.map(f => (f.name, f.index)).toMap
   def hasField(name: String): Boolean = fieldIdx.contains(name)
   def fieldType(name: String): EType = types(fieldIdx(name))
-  val missingIdx = new Array[Int](size)
-  val nMissing: Int = BaseStruct.getMissingness[EType](types, missingIdx)
+  val (missingIdx: Array[Int], nMissing: Int) = BaseStruct.getMissingIndexAndCount(types.map(_.required))
   val nMissingBytes = UnsafeUtils.packBitsToBytes(nMissing)
 
   if (!fieldNames.areDistinct()) {
@@ -94,7 +93,13 @@ final case class EBaseStruct(fields: IndexedSeq[EField], override val required: 
   def _buildEncoder(pt: PType, mb: EmitMethodBuilder, v: Code[_], out: Code[OutputBuffer]): Code[Unit] = {
     val ft = pt.asInstanceOf[PBaseStruct]
     val writeMissingBytes = if (ft.size == size) {
-      out.writeBytes(coerce[Long](v), ft.nMissingBytes)
+      val missingBytes = ft.nMissingBytes
+      var c = Code._empty[Unit]
+      if (nMissingBytes > 1)
+        c = Code(c, out.writeBytes(coerce[Long](v), missingBytes - 1))
+      if (nMissingBytes > 0)
+        c = Code(c, out.writeByte((Region.loadByte(coerce[Long](v) + (missingBytes.toLong - 1)).toI & const(EType.lowBitMask(ft.nMissing & 0x7))).toB))
+      c
     } else {
       val groupSize = 64
       var methodIdx = 0

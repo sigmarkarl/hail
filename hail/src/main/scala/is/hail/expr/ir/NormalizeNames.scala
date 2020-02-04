@@ -109,6 +109,9 @@ class NormalizeNames(normFunction: Int => String, allowFreeVariables: Boolean = 
       case ArrayMap(a, name, body) =>
         val newName = gen()
         ArrayMap(normalize(a), newName, normalize(body, env.bindEval(name, newName)))
+      case ArrayZip(as, names, body, behavior) =>
+        val newNames = names.map(_ => gen())
+        ArrayZip(as.map(normalize(_)), newNames, normalize(body, env.bindEval(names.zip(newNames): _*)), behavior)
       case ArrayFilter(a, name, body) =>
         val newName = gen()
         ArrayFilter(normalize(a), newName, normalize(body, env.bindEval(name, newName)))
@@ -140,6 +143,10 @@ class NormalizeNames(normFunction: Int => String, allowFreeVariables: Boolean = 
         // assert(env.agg.isEmpty)
         val newName = gen()
         ArrayAgg(normalize(a), newName, normalize(body, env.copy(agg = Some(env.eval.bind(name, newName)))))
+      case RunAggScan(a, name, init, seq, result, sig) =>
+        val newName = gen()
+        val e2 = env.bindEval(name, newName)
+        RunAggScan(normalize(a), newName, normalize(init, env), normalize(seq, e2), normalize(result, e2), sig)
       case ArrayAggScan(a, name, body) =>
         // FIXME: Uncomment when bindings are threaded through test suites
         // assert(env.scan.isEmpty)
