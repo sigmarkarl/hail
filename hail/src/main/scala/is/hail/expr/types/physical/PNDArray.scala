@@ -32,27 +32,23 @@ abstract class PNDArray extends PType {
 
   val representation: PStruct
 
-  def copy(elementType: PType = this.elementType, nDims: Int = this.nDims, required: Boolean = this.required): PNDArray
-
   def dimensionLength(off: Code[Long], idx: Int): Code[Long] = {
     Region.loadLong(shape.pType.fieldOffset(shape.load(off), idx))
   }
 
-  def numElements(shape: Array[Code[Long]], mb: MethodBuilder): Code[Long]
+  def numElements(shape: IndexedSeq[Code[Long]], mb: MethodBuilder): Code[Long]
 
-  def makeShapeBuilder(shapeArray: Array[Code[Long]]): StagedRegionValueBuilder => Code[Unit]
+  def makeShapeBuilder(shapeArray: IndexedSeq[Code[Long]]): StagedRegionValueBuilder => Code[Unit]
 
-  def makeDefaultStridesBuilder(sourceShapeArray: Array[Code[Long]], mb: MethodBuilder): StagedRegionValueBuilder => Code[Unit]
+  def makeDefaultStridesBuilder(sourceShapeArray: IndexedSeq[Code[Long]], mb: MethodBuilder): StagedRegionValueBuilder => Code[Unit]
 
-  def getElementAddress(indices: Array[Code[Long]], nd: Code[Long], mb: MethodBuilder): Code[Long]
+  def loadElementToIRIntermediate(indices: IndexedSeq[Code[Long]], ndAddress: Code[Long], mb: MethodBuilder): Code[_]
 
-  def loadElementToIRIntermediate(indices: Array[Code[Long]], ndAddress: Code[Long], mb: MethodBuilder): Code[_]
+  def outOfBounds(indices: IndexedSeq[Code[Long]], nd: Code[Long], mb: MethodBuilder): Code[Boolean]
 
-  def outOfBounds(indices: Array[Code[Long]], nd: Code[Long], mb: MethodBuilder): Code[Boolean]
+  def linearizeIndicesRowMajor(indices: IndexedSeq[Code[Long]], shapeArray: IndexedSeq[Code[Long]], mb: MethodBuilder): Code[Long]
 
-  def linearizeIndicesRowMajor(indices: Array[Code[Long]], shapeArray: Array[Code[Long]], mb: MethodBuilder): Code[Long]
-
-  def unlinearizeIndexRowMajor(index: Code[Long], shapeArray: Array[Code[Long]], mb: MethodBuilder): (Code[Unit], Array[Code[Long]])
+  def unlinearizeIndexRowMajor(index: Code[Long], shapeArray: IndexedSeq[Code[Long]], mb: MethodBuilder): (Code[Unit], IndexedSeq[Code[Long]])
 
   def copyRowMajorToColumnMajor(rowMajorAddress: Code[Long], targetAddress: Code[Long], nRows: Code[Long], nCols: Code[Long], mb: MethodBuilder): Code[Unit]
 

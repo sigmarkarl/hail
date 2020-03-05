@@ -17,8 +17,8 @@ class TakeByRVAS(val valueType: PType, val keyType: PType, val resultType: PArra
 
   val region: Code[Region] = r.load()
 
-  private val indexedKeyType = PTuple(true, keyType, PInt64Required)
-  private val eltTuple = PTuple(true, indexedKeyType, valueType)
+  private val indexedKeyType = PCanonicalTuple(true, keyType, PInt64Required)
+  private val eltTuple = PCanonicalTuple(true, indexedKeyType, valueType)
   val ab = new StagedArrayBuilder(eltTuple, fb, region)
 
   private val maxIndex = fb.newField[Long]("max_index")
@@ -81,7 +81,7 @@ class TakeByRVAS(val valueType: PType, val keyType: PType, val resultType: PArra
   private def maybeGCCode(alwaysRun: Code[Unit]*)(runIfGarbage: => Array[Code[Unit]], runBefore: Boolean = false): Code[Unit] = {
     val gcCodes = (if (canHaveGarbage) runIfGarbage else Array[Code[Unit]]())
     val allCode = if (runBefore) (gcCodes ++ alwaysRun) else (alwaysRun.toArray ++ gcCodes)
-    asm4s.coerce[Unit](Code(allCode: _*))
+    Code(allCode)
   }
 
   def newState(off: Code[Long]): Code[Unit] = region.getNewRegion(regionSize)
@@ -261,7 +261,7 @@ class TakeByRVAS(val valueType: PType, val keyType: PType, val resultType: PArra
 
     val parent = mb.newLocal[Int]("parent")
 
-    mb.emit(Code(
+    mb.emit(
       (idx > 0).orEmpty(
         Code(
           parent := (idx + 1) / 2 - 1,
@@ -271,7 +271,7 @@ class TakeByRVAS(val valueType: PType, val keyType: PType, val resultType: PArra
             Code(
               swap(ii, jj),
               mb.invoke(parent))
-          )))))
+          ))))
 
     mb.invoke(_)
   }
@@ -386,26 +386,34 @@ class TakeByRVAS(val valueType: PType, val keyType: PType, val resultType: PArra
 
     mb.emit(
       (maxSize > 0).orEmpty(
-        Code(
-          (ab.size < maxSize).mux(
-            Code(
-              stageAndIndexKey(keyM, key),
-              copyToStaging(value, valueM, keyStage),
-              enqueueStaging()),
-            Code(
-              tempPtr := eltTuple.loadField(elementOffset(0), 0),
-              (compareKey((keyM, key), loadKey(tempPtr)) < 0)
-                .orEmpty(Code(
-                  stageAndIndexKey(keyM, key),
-                  copyToStaging(value, valueM, keyStage),
-                  swapStaging(),
-                  gc
-                )))
-          )
-        ))
+        (ab.size < maxSize).mux(
+          Code(
+            stageAndIndexKey(keyM, key),
+            copyToStaging(value, valueM, keyStage),
+            enqueueStaging()),
+          Code(
+            tempPtr := eltTuple.loadField(elementOffset(0), 0),
+            (compareKey((keyM, key), loadKey(tempPtr)) < 0)
+              .orEmpty(Code(
+                stageAndIndexKey(keyM, key),
+                copyToStaging(value, valueM, keyStage),
+                swapStaging(),
+                gc
+              )))
+        )
+      )
     )
 
-    mb.invoke(_, _, _, _)
+    val kmVar = fb.newField[Boolean]("km")
+    val vmVar = fb.newField[Boolean]("vm")
+
+    { (vm: Code[Boolean], v: Code[_], km: Code[Boolean], k: Code[_]) =>
+      Code(
+        vmVar := vm,
+        kmVar := km,
+        mb.invoke(vmVar, vmVar.mux(defaultValue(valueType), v), kmVar, kmVar.mux(defaultValue(keyType), k))
+      )
+    }
   }
 
   def combine(other: TakeByRVAS, dummy: Boolean): Code[Unit] = {
@@ -422,21 +430,20 @@ class TakeByRVAS(val valueType: PType, val keyType: PType, val resultType: PArra
         indexOffset := indexedKeyType.fieldOffset(eltTuple.loadField(offset, 0), 1),
         Region.storeLong(indexOffset, Region.loadLong(indexOffset) + maxIndex),
         (maxSize > 0).orEmpty(
-          Code(
-            (ab.size < maxSize).mux(
-              Code(
-                copyElementToStaging(offset),
-                enqueueStaging()),
-              Code(
-                tempPtr := elementOffset(0),
-                (compareElt(offset, tempPtr) < 0)
-                  .orEmpty(Code(
-                    copyElementToStaging(offset),
-                    swapStaging(),
-                    gc
-                  )))
-            )
-          )),
+          (ab.size < maxSize).mux(
+            Code(
+              copyElementToStaging(offset),
+              enqueueStaging()),
+            Code(
+              tempPtr := elementOffset(0),
+              (compareElt(offset, tempPtr) < 0)
+                .orEmpty(Code(
+                  copyElementToStaging(offset),
+                  swapStaging(),
+                  gc
+                )))
+          )
+        ),
         i := i + 1
       ),
       maxIndex := maxIndex + other.maxIndex
@@ -584,6 +591,8 @@ class TakeByAggregator(valueType: PType, keyType: PType) extends StagedAggregato
 
   def seqOp(state: State, seq: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
     val Array(value: EmitTriplet, key: EmitTriplet) = seq
+    assert(value.pv.pt == valueType)
+    assert(key.pv.pt == keyType)
     Code(
       value.setup,
       key.setup,

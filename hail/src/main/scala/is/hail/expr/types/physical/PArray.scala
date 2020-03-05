@@ -14,10 +14,8 @@ trait PArrayIterator {
   def iterate(): Unit
 }
 
-abstract class PArray extends PContainer with PStreamable {
+abstract class PArray extends PContainer {
   lazy val virtualType: TArray = TArray(elementType.virtualType, required)
-
-  def copy(elementType: PType = this.elementType, required: Boolean = this.required): PArray
 
   def codeOrdering(mb: EmitMethodBuilder, other: PType): CodeOrdering = {
     assert(this isOfType other)

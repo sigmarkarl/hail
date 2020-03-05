@@ -184,7 +184,7 @@ object TextMatrixReader {
           }
         }
         it
-      }.countPerPartition().scanLeft(0L)(_ + _)
+      }.countPerPartition()
   }
 }
 
@@ -330,7 +330,7 @@ class CompiledLineParser(
   @transient private[this] val pos = mb.newField[Int]("pos")
   @transient private[this] val srvb = new StagedRegionValueBuilder(mb, requestedRowType)
 
-  fb.addInitInstructions(Code(
+  fb.classBuilder.addInitInstructions(Code(
     pos := 0,
     filename := Code._null,
     lineNumber := 0L,
@@ -344,13 +344,14 @@ class CompiledLineParser(
   parseIntMb.emit(parseInt(parseIntMb))
   @transient private[this] val parseLongMb = fb.newMethod[Region, Long]
   parseLongMb.emit(parseLong(parseLongMb))
+  @transient private[this] val parseRowFieldsMb = fb.newMethod[Region, Unit]
+  parseRowFieldsMb.emit(parseRowFields(parseRowFieldsMb))
+
   @transient private[this] val parseEntriesMbOpt = entriesType.map { entriesType =>
     val parseEntriesMb = fb.newMethod[Region, Unit]
     parseEntriesMb.emit(parseEntries(parseEntriesMb, entriesType))
     parseEntriesMb
   }
-  @transient private[this] val parseRowFieldsMb = fb.newMethod[Region, Unit]
-  parseRowFieldsMb.emit(parseRowFields(parseRowFieldsMb))
 
   mb.emit(Code(
     pos := 0,
@@ -493,7 +494,7 @@ class CompiledLineParser(
     var inputIndex = 0
     var outputIndex = 0
     assert(onDiskRowFieldsType.size >= rowFieldsType.size)
-    val ab = new ArrayBuilder[Code[_]]()
+    val ab = new ArrayBuilder[Code[Unit]]()
     while (inputIndex < onDiskRowFieldsType.size) {
       val onDiskField = onDiskRowFieldsType.fields(inputIndex)
       val onDiskPType = PType.canonical(onDiskField.typ) // will always be optional
@@ -526,7 +527,7 @@ class CompiledLineParser(
       inputIndex += 1
     }
     assert(outputIndex == rowFieldsType.size)
-    Code.apply(ab.result():_*)
+    Code(ab.result())
   }
 
   private[this] def parseEntries(mb: MethodBuilder, entriesType: PArray): Code[Unit] = {

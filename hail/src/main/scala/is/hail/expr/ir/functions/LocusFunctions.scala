@@ -48,7 +48,7 @@ object LocusFunctions extends RegistryFunctions {
     val len = r.mb.newLocal[Int]
     val srvb = new StagedRegionValueBuilder(r, rt)
     val addLocus = { srvb: StagedRegionValueBuilder =>
-      emitLocus(srvb, Code.checkcast[Locus](vlocal.get[java.lang.Object]("_1")))
+      emitLocus(srvb, Code.checkcast[Locus](vlocal.getField[java.lang.Object]("_1")))
     }
     val addAlleles = { srvb: StagedRegionValueBuilder =>
       Code(
@@ -60,7 +60,7 @@ object LocusFunctions extends RegistryFunctions {
 
     Code(
       vlocal := variant,
-      alocal := Code.checkcast[IndexedSeq[String]](vlocal.get[java.lang.Object]("_2")),
+      alocal := Code.checkcast[IndexedSeq[String]](vlocal.getField[java.lang.Object]("_2")),
       len := alocal.invoke[Int]("size"),
       srvb.start(),
       srvb.addBaseStruct(types.coerce[PStruct](rt.field("locus").typ.fundamentalType), addLocus),
@@ -82,7 +82,7 @@ object LocusFunctions extends RegistryFunctions {
     }
 
     val lt = pt.pointType.fundamentalType.asInstanceOf[PBaseStruct]
-    asm4s.coerce[Unit](Code(
+    Code(FastIndexedSeq(
       ilocal := interval,
       srvb.start(),
       srvb.addBaseStruct(types.coerce[PBaseStruct](lt), addLocus(_, "start")),
@@ -100,12 +100,12 @@ object LocusFunctions extends RegistryFunctions {
     val blocal = r.mb.newLocal[Boolean]
     val srvb = new StagedRegionValueBuilder(r, rt)
     val addLocus = { srvb: StagedRegionValueBuilder =>
-      emitLocus(srvb, Code.checkcast[Locus](rlocal.get[java.lang.Object]("_1")))
+      emitLocus(srvb, Code.checkcast[Locus](rlocal.getField[java.lang.Object]("_1")))
     }
 
     Code(
       rlocal := result,
-      blocal := Code.checkcast[java.lang.Boolean](rlocal.get[java.lang.Object]("_2")).invoke[Boolean]("booleanValue"),
+      blocal := Code.checkcast[java.lang.Boolean](rlocal.getField[java.lang.Object]("_2")).invoke[Boolean]("booleanValue"),
       srvb.start(),
       srvb.addBaseStruct(types.coerce[PStruct](rt.field("result").typ.fundamentalType), addLocus),
       srvb.advance(),
@@ -126,8 +126,8 @@ object LocusFunctions extends RegistryFunctions {
 
     Code(
       rlocal := result,
-      ilocal := Code.checkcast[Interval](rlocal.get[java.lang.Object]("_1")),
-      blocal := Code.checkcast[java.lang.Boolean](rlocal.get[java.lang.Object]("_2")).invoke[Boolean]("booleanValue"),
+      ilocal := Code.checkcast[Interval](rlocal.getField[java.lang.Object]("_1")),
+      blocal := Code.checkcast[java.lang.Boolean](rlocal.getField[java.lang.Object]("_2")).invoke[Boolean]("booleanValue"),
       srvb.start(),
       srvb.addBaseStruct(types.coerce[PStruct](pinterval.fundamentalType), addInterval),
       srvb.advance(),
@@ -176,8 +176,8 @@ object LocusFunctions extends RegistryFunctions {
         val alleles = Code.checkcast[IndexedSeq[String]](wrapArg(r, allelesT)(aOff).asInstanceOf[Code[AnyRef]])
         val tuple = Code.invokeScalaObject[Locus, IndexedSeq[String], (Locus, IndexedSeq[String])](VariantMethods.getClass, "minRep", locus, alleles)
 
-        val newLocus = Code.checkcast[Locus](returnTuple.load().get[java.lang.Object]("_1"))
-        val newAlleles = Code.checkcast[IndexedSeq[String]](returnTuple.load().get[java.lang.Object]("_2"))
+        val newLocus = Code.checkcast[Locus](returnTuple.load().getField[java.lang.Object]("_1"))
+        val newAlleles = Code.checkcast[IndexedSeq[String]](returnTuple.load().getField[java.lang.Object]("_2"))
 
         val newLocusT = rt.field("locus").typ
         val newAllelesT = rt.field("alleles").typ.asInstanceOf[PArray]
@@ -317,7 +317,7 @@ object LocusFunctions extends RegistryFunctions {
         EmitTriplet(
           Code(ioff.setup, invalidMissing.setup),
           ioff.m || invalidMissing.m || Code(intervalLocal := interval, intervalLocal.load().isNull),
-          emitInterval(r, interval, rt)
+          PValue(rt, emitInterval(r, interval, rt))
         )
     }
 
@@ -338,7 +338,7 @@ object LocusFunctions extends RegistryFunctions {
         EmitTriplet(
           Code(locoff.setup, pos1.setup, pos2.setup, include1.setup, include2.setup, invalidMissing.setup),
           locoff.m || pos1.m || pos2.m || include1.m || include2.m || invalidMissing.m || Code(intervalLocal := interval, intervalLocal.load().isNull),
-          emitInterval(r, interval, rt)
+          PValue(rt, emitInterval(r, interval, rt))
         )
     }
 
@@ -365,7 +365,7 @@ object LocusFunctions extends RegistryFunctions {
         EmitTriplet(
           Code(loc.setup, minMatch.setup, tlocal := Code._null),
           loc.m || minMatch.m || Code(tlocal := lifted, tlocal.isNull),
-          emitLiftoverLocus(r, tlocal, rt)
+          PValue(rt, emitLiftoverLocus(r, tlocal, rt))
         )
     }
 
@@ -380,7 +380,7 @@ object LocusFunctions extends RegistryFunctions {
         EmitTriplet(
           Code(i.setup, minMatch.setup, tlocal := Code._null),
           i.m || minMatch.m || Code(tlocal := lifted, tlocal.isNull),
-          emitLiftoverLocusInterval(r, tlocal, rt)
+          PValue(rt, emitLiftoverLocusInterval(r, tlocal, rt))
         )
     }
   }

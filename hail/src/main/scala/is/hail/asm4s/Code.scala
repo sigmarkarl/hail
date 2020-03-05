@@ -1,12 +1,8 @@
 package is.hail.asm4s
 
 import java.io.PrintStream
-import java.lang.reflect.{Constructor, Field, Method, Modifier}
-import java.util
+import java.lang.reflect
 
-import is.hail.annotations.Region
-import is.hail.expr.types.physical.PTuple
-import is.hail.utils._
 import org.objectweb.asm.Opcodes._
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree._
@@ -21,16 +17,50 @@ object Code {
     }
   }
 
-  def apply[S1, S2](c1: Code[S1], c2: Code[S2]): Code[S2] =
-    new Code[S2] {
+  def concat[T](c: Code[_]*): Code[T] =
+    new Code[T] {
+      def emit(il: Growable[AbstractInsnNode]): Unit = {
+        c.foreach(_.emit(il))
+      }
+    }
+
+  def apply[T](c: Code[_], insn: => AbstractInsnNode): Code[T] =
+    new Code[T] {
+      def emit(il: Growable[AbstractInsnNode]): Unit = {
+        c.emit(il)
+        il += insn
+      }
+    }
+
+  def apply[T](c1: Code[_], c2: Code[_], insn: => AbstractInsnNode): Code[T] =
+    new Code[T] {
+      def emit(il: Growable[AbstractInsnNode]): Unit = {
+        c1.emit(il)
+        c2.emit(il)
+        il += insn
+      }
+    }
+
+  def apply[T](c1: Code[_], c2: Code[_], c3: Code[_], insn: => AbstractInsnNode): Code[T] =
+    new Code[T] {
+      def emit(il: Growable[AbstractInsnNode]): Unit = {
+        c1.emit(il)
+        c2.emit(il)
+        c3.emit(il)
+        il += insn
+      }
+    }
+
+  def apply[T](c1: Code[Unit], c2: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
       }
     }
 
-  def apply[S1, S2, S3](c1: Code[S1], c2: Code[S2], c3: Code[S3]): Code[S3] =
-    new Code[S3] {
+  def apply[T](c1: Code[Unit], c2: Code[Unit], c3: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
@@ -38,8 +68,8 @@ object Code {
       }
     }
 
-  def apply[S1, S2, S3, S4](c1: Code[S1], c2: Code[S2], c3: Code[S3], c4: Code[S4]): Code[S4] =
-    new Code[S4] {
+  def apply[T](c1: Code[Unit], c2: Code[Unit], c3: Code[Unit], c4: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
@@ -48,8 +78,8 @@ object Code {
       }
     }
 
-  def apply[S1, S2, S3, S4, S5](c1: Code[S1], c2: Code[S2], c3: Code[S3], c4: Code[S4], c5: Code[S5]): Code[S5] =
-    new Code[S5] {
+  def apply[T](c1: Code[Unit], c2: Code[Unit], c3: Code[Unit], c4: Code[Unit], c5: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
@@ -59,8 +89,8 @@ object Code {
       }
     }
 
-  def apply[S1, S2, S3, S4, S5, S6](c1: Code[S1], c2: Code[S2], c3: Code[S3], c4: Code[S4], c5: Code[S5], c6: Code[S6]): Code[S6] =
-    new Code[S6] {
+  def apply[T](c1: Code[Unit], c2: Code[Unit], c3: Code[Unit], c4: Code[Unit], c5: Code[Unit], c6: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
@@ -71,8 +101,8 @@ object Code {
       }
     }
 
-  def apply[S1, S2, S3, S4, S5, S6, S7](c1: Code[S1], c2: Code[S2], c3: Code[S3], c4: Code[S4], c5: Code[S5], c6: Code[S6], c7: Code[S7]): Code[S7] =
-    new Code[S7] {
+  def apply[T](c1: Code[Unit], c2: Code[Unit], c3: Code[Unit], c4: Code[Unit], c5: Code[Unit], c6: Code[Unit], c7: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
@@ -84,8 +114,8 @@ object Code {
       }
     }
 
-  def apply[S1, S2, S3, S4, S5, S6, S7, S8](c1: Code[S1], c2: Code[S2], c3: Code[S3], c4: Code[S4], c5: Code[S5], c6: Code[S6], c7: Code[S7], c8: Code[S8]): Code[S8] =
-    new Code[S8] {
+  def apply[T](c1: Code[Unit], c2: Code[Unit], c3: Code[Unit], c4: Code[Unit], c5: Code[Unit], c6: Code[Unit], c7: Code[Unit], c8: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
@@ -98,8 +128,8 @@ object Code {
       }
     }
 
-  def apply[S1, S2, S3, S4, S5, S6, S7, S8, S9](c1: Code[S1], c2: Code[S2], c3: Code[S3], c4: Code[S4], c5: Code[S5], c6: Code[S6], c7: Code[S7], c8: Code[S8], c9: Code[S9]): Code[S9] =
-    new Code[S9] {
+  def apply[T](c1: Code[Unit], c2: Code[Unit], c3: Code[Unit], c4: Code[Unit], c5: Code[Unit], c6: Code[Unit], c7: Code[Unit], c8: Code[Unit], c9: Code[T]): Code[T] =
+    new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         c1.emit(il)
         c2.emit(il)
@@ -113,7 +143,7 @@ object Code {
       }
     }
 
-  def apply(cs: Code[_]*): Code[_] =
+  def apply(cs: Seq[Code[Unit]]): Code[Unit] =
     new Code[Unit] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         cs.foreach(_.emit(il))
@@ -162,15 +192,15 @@ object Code {
     }
   }
 
-  def whileLoop(cond: Code[Boolean], body: Code[_]*): Code[Unit] = {
-    import is.hail.asm4s.joinpoint._
-    JoinPoint.CallCC[Unit] { (jb, break) =>
-      val continue = jb.joinPoint()
-      val loopBody = jb.joinPoint()
-      continue.define { _ => JoinPoint.mux(cond, loopBody, break) }
-      loopBody.define { _ => Code(Code(body: _*), continue(())) }
-      continue(())
-    }
+  def whileLoop(cond: Code[Boolean], body: Code[Unit]*): Code[Unit] = {
+    val L = new CodeLabel()
+    Code(
+      L,
+      cond.mux(
+        Code(
+          Code(body),
+          L.goto),
+        Code._empty))
   }
 
   def forLoop(init: Code[Unit], cond: Code[Boolean], increment: Code[Unit], body: Code[Unit]): Code[Unit] = {
@@ -183,24 +213,10 @@ object Code {
     )
   }
 
-  def switch[T: TypeInfo](target: Code[Int], dflt: Code[T], cases: Seq[Code[T]]): Code[T] = {
-    import is.hail.asm4s.joinpoint._
-    JoinPoint.CallCC[Code[T]] { (jb, ret) =>
-      def thenReturn(c: Code[T]): JoinPoint[Unit] = {
-        val j = jb.joinPoint()
-        j.define { _ => ret(c) }
-        j
-      }
-      JoinPoint.switch(target,
-        thenReturn(dflt),
-        cases.map(thenReturn))
-    }
-  }
-
   def invokeScalaObject[S](cls: Class[_], method: String, parameterTypes: Array[Class[_]], args: Array[Code[_]])(implicit sct: ClassTag[S]): Code[S] = {
     val m = Invokeable.lookupMethod(cls, method, parameterTypes)(sct)
     val staticObj = FieldRef("MODULE$")(ClassTag(cls), ClassTag(cls), classInfo(ClassTag(cls)))
-    m.invoke(staticObj.get(), args)
+    m.invoke(staticObj.getField(), args)
   }
 
   def invokeScalaObject[S](cls: Class[_], method: String)(implicit sct: ClassTag[S]): Code[S] =
@@ -306,7 +322,7 @@ object Code {
 
   // FIXME: code should really carry around the stack so this type can be correct
   // Currently, this is a huge potential place for errors.
-  def _empty[T]: Code[T] = new Code[T] {
+  def _empty: Code[Unit] = new Code[Unit] {
     def emit(il: Growable[AbstractInsnNode]): Unit = {
     }
   }
@@ -320,7 +336,7 @@ object Code {
       Code._null[Throwable]))
 
   def _return[T](c: Code[T])(implicit tti: TypeInfo[T]): Code[Unit] =
-    Code(c, Code(new InsnNode(tti.returnOp)))
+    Code(c, new InsnNode(tti.returnOp))
 
   def _println(c: Code[AnyRef]): Code[Unit] =
     Code.invokeScalaObject[AnyRef, Unit](scala.Console.getClass, "println", c)
@@ -352,7 +368,7 @@ object Code {
   def getStatic[T: ClassTag, S: ClassTag : TypeInfo](field: String): Code[S] = {
     val f = FieldRef[T, S](field)
     assert(f.isStatic)
-    f.get(null)
+    f.getField(null)
   }
 
   def putStatic[T: ClassTag, S: ClassTag : TypeInfo](field: String, rhs: Code[S]): Code[Unit] = {
@@ -361,7 +377,7 @@ object Code {
     f.put(null, rhs)
   }
 
-  def foreach[A](it: Seq[A])(f: A => Code[_]): Code[Unit] = Code(it.map(f): _*).asInstanceOf[Code[Unit]]
+  def foreach[A](it: Seq[A])(f: A => Code[Unit]): Code[Unit] = Code(it.map(f))
 
   def currentTimeMillis(): Code[Long] = Code.invokeStatic[java.lang.System, Long]("currentTimeMillis")
 }
@@ -643,17 +659,17 @@ class CodeFloat(val lhs: Code[Float]) extends AnyVal {
 
   def /(rhs: Code[Float]): Code[Float] = Code(lhs, rhs, new InsnNode(FDIV))
 
-  def >(rhs: Code[Float]): Code[Boolean] = Code[Float, Float, Int](lhs, rhs, new InsnNode(FCMPL)) > 0
+  def >(rhs: Code[Float]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(FCMPL)) > 0
 
-  def >=(rhs: Code[Float]): Code[Boolean] = Code[Float, Float, Int](lhs, rhs, new InsnNode(FCMPL)) >= 0
+  def >=(rhs: Code[Float]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(FCMPL)) >= 0
 
-  def <(rhs: Code[Float]): Code[Boolean] = Code[Float, Float, Int](lhs, rhs, new InsnNode(FCMPG)) < 0
+  def <(rhs: Code[Float]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(FCMPG)) < 0
 
-  def <=(rhs: Code[Float]): Code[Boolean] = Code[Float, Float, Int](lhs, rhs, new InsnNode(FCMPG)) <= 0
+  def <=(rhs: Code[Float]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(FCMPG)) <= 0
 
-  def ceq(rhs: Code[Float]): Code[Boolean] = Code[Float, Float, Int](lhs, rhs, new InsnNode(FCMPL)).ceq(0)
+  def ceq(rhs: Code[Float]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(FCMPL)).ceq(0)
 
-  def cne(rhs: Code[Float]): Code[Boolean] = Code[Float, Float, Int](lhs, rhs, new InsnNode(FCMPL)).cne(0)
+  def cne(rhs: Code[Float]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(FCMPL)).cne(0)
 
   def toI: Code[Int] = Code(lhs, new InsnNode(F2I))
 
@@ -677,17 +693,17 @@ class CodeDouble(val lhs: Code[Double]) extends AnyVal {
 
   def /(rhs: Code[Double]): Code[Double] = Code(lhs, rhs, new InsnNode(DDIV))
 
-  def >(rhs: Code[Double]): Code[Boolean] = Code[Double, Double, Int](lhs, rhs, new InsnNode(DCMPL)) > 0
+  def >(rhs: Code[Double]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(DCMPL)) > 0
 
-  def >=(rhs: Code[Double]): Code[Boolean] = Code[Double, Double, Int](lhs, rhs, new InsnNode(DCMPL)) >= 0
+  def >=(rhs: Code[Double]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(DCMPL)) >= 0
 
-  def <(rhs: Code[Double]): Code[Boolean] = Code[Double, Double, Int](lhs, rhs, new InsnNode(DCMPG)) < 0
+  def <(rhs: Code[Double]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(DCMPG)) < 0
 
-  def <=(rhs: Code[Double]): Code[Boolean] = Code[Double, Double, Int](lhs, rhs, new InsnNode(DCMPG)) <= 0
+  def <=(rhs: Code[Double]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(DCMPG)) <= 0
 
-  def ceq(rhs: Code[Double]): Code[Boolean] = Code[Double, Double, Int](lhs, rhs, new InsnNode(DCMPL)).ceq(0)
+  def ceq(rhs: Code[Double]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(DCMPL)).ceq(0)
 
-  def cne(rhs: Code[Double]): Code[Boolean] = Code[Double, Double, Int](lhs, rhs, new InsnNode(DCMPL)).cne(0)
+  def cne(rhs: Code[Double]): Code[Boolean] = Code[Int](lhs, rhs, new InsnNode(DCMPL)).cne(0)
 
   def toI: Code[Int] = Code(lhs, new InsnNode(D2I))
 
@@ -757,7 +773,7 @@ class CodeLabel() extends Code[Unit] {
 }
 
 object Invokeable {
-  def apply[T](cls: Class[T], c: Constructor[_]): Invokeable[T, Unit] = new Invokeable[T, Unit](
+  def apply[T](cls: Class[T], c: reflect.Constructor[_]): Invokeable[T, Unit] = new Invokeable[T, Unit](
     cls,
     "<init>",
     isStatic = false,
@@ -766,9 +782,9 @@ object Invokeable {
     Type.getConstructorDescriptor(c),
     implicitly[ClassTag[Unit]].runtimeClass)
 
-  def apply[T, S](cls: Class[T], m: Method)(implicit sct: ClassTag[S]): Invokeable[T, S] = {
+  def apply[T, S](cls: Class[T], m: reflect.Method)(implicit sct: ClassTag[S]): Invokeable[T, S] = {
     val isInterface = m.getDeclaringClass.isInterface
-    val isStatic = Modifier.isStatic(m.getModifiers)
+    val isStatic = reflect.Modifier.isStatic(m.getModifiers)
     assert(!(isInterface && isStatic))
     new Invokeable[T, S](cls,
       m.getName,
@@ -843,45 +859,43 @@ object FieldRef {
   }
 }
 
-trait Settable[T] {
-  def load(): Code[T]
+trait Value[+T] { self =>
+  def get: Code[T]
+}
 
+trait Settable[T] extends Value[T] {
   def store(rhs: Code[T]): Code[Unit]
 
   def :=(rhs: Code[T]): Code[Unit] = store(rhs)
 
   def storeAny(rhs: Code[_]): Code[Unit] = store(coerce[T](rhs))
+
+  def load(): Code[T] = get
 }
 
 class LazyFieldRef[T: TypeInfo](fb: FunctionBuilder[_], name: String, setup: Code[T]) extends Settable[T] {
-
   private[this] val value: ClassFieldRef[T] = fb.newField[T](name)
   private[this] val present: ClassFieldRef[Boolean] = fb.newField[Boolean](s"${name}_present")
 
-  def load(): Code[T] =
-    Code(present.mux(Code._empty[Unit], Code(value := setup, present := true)), value)
+  def get: Code[T] =
+    Code(present.mux(Code._empty, Code(value := setup, present := true)), value.load())
 
   def store(rhs: Code[T]): Code[Unit] =
     throw new UnsupportedOperationException("cannot store new value into LazyFieldRef!")
 }
 
-class ClassFieldRef[T: TypeInfo](fb: FunctionBuilder[_], val name: String) extends Settable[T] {
-  val desc: String = typeInfo[T].name
-  val node: FieldNode = new FieldNode(ACC_PUBLIC, name, desc, null, null)
+class ClassFieldRef[T: TypeInfo](fb: FunctionBuilder[_], f: Field[T]) extends Settable[T] {
+  def name: String = f.name
 
-  fb.cn.fields.asInstanceOf[util.List[FieldNode]].add(node)
+  private def _loadClass: Value[java.lang.Object] = fb.getArg[java.lang.Object](0)
 
-  private def _loadClass: Code[java.lang.Object] = fb.getArg[java.lang.Object](0).load()
-  private def _loadInsn: Code[T] = Code(new FieldInsnNode(GETFIELD, fb.name, name, desc))
-  private def _storeInsn: Code[Unit] = Code(new FieldInsnNode(PUTFIELD, fb.name, name, desc))
+  def get: Code[T] = f.get(_loadClass)
 
-  def load(): Code[T] = Code(_loadClass, _loadInsn)
-
-  def store(rhs: Code[T]): Code[Unit] = Code(_loadClass, rhs, _storeInsn)
+  def store(rhs: Code[T]): Code[Unit] = f.put(_loadClass, rhs)
 }
 
 class LocalRef[T](val i: Int)(implicit tti: TypeInfo[T]) extends Settable[T] {
-  def load(): Code[T] =
+  def get: Code[T] =
     new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         il += new VarInsnNode(tti.loadOp, i)
@@ -911,16 +925,22 @@ class LocalRefInt(val v: LocalRef[Int]) extends AnyRef {
   def ++(): Code[Unit] = +=(1)
 }
 
-class FieldRef[T, S](f: Field)(implicit tct: ClassTag[T], sti: TypeInfo[S]) {
-  def isStatic: Boolean = Modifier.isStatic(f.getModifiers)
+class FieldRef[T, S](f: reflect.Field)(implicit tct: ClassTag[T], sti: TypeInfo[S]) {
+  self =>
+  def isStatic: Boolean = reflect.Modifier.isStatic(f.getModifiers)
 
   def getOp = if (isStatic) GETSTATIC else GETFIELD
 
   def putOp = if (isStatic) PUTSTATIC else PUTFIELD
 
-  def get(): Code[S] = get(Code._empty)
+  def getField(): Code[S] = getField(null: Value[T])
 
-  def get(lhs: Code[T]): Code[S] =
+  def getField(lhs: Value[T]): Value[S] =
+    new Value[S] {
+      def get: Code[S] = self.getField(if (lhs != null) lhs.get else null)
+    }
+
+  def getField(lhs: Code[T]): Code[S] =
     new Code[S] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
         if (!isStatic)
@@ -943,8 +963,8 @@ class FieldRef[T, S](f: Field)(implicit tct: ClassTag[T], sti: TypeInfo[S]) {
 }
 
 class CodeObject[T <: AnyRef : ClassTag](val lhs: Code[T]) {
-  def get[S](field: String)(implicit sct: ClassTag[S], sti: TypeInfo[S]): Code[S] =
-    FieldRef[T, S](field).get(lhs)
+  def getField[S](field: String)(implicit sct: ClassTag[S], sti: TypeInfo[S]): Code[S] =
+    FieldRef[T, S](field).getField(lhs)
 
   def put[S](field: String, rhs: Code[S])(implicit sct: ClassTag[S], sti: TypeInfo[S]): Code[Unit] =
     FieldRef[T, S](field).put(lhs, rhs)

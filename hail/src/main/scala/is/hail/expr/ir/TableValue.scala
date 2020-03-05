@@ -14,6 +14,7 @@ import is.hail.variant.ReferenceGenome
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.storage.StorageLevel
 import org.json4s.jackson.JsonMethods
 
 object TableValue {
@@ -24,8 +25,8 @@ object TableValue {
       RVD.coerce(RVDType(rowType, key), rdd, ctx))
   }
 
-  def apply(ctx: ExecuteContext, rowType:  TStruct, key: IndexedSeq[String], rdd: RDD[Row]): TableValue = {
-    val canonicalRowType = PStruct.canonical(rowType)
+  def apply(ctx: ExecuteContext, rowType:  TStruct, key: IndexedSeq[String], rdd: RDD[Row], rowPType: Option[PStruct] = None): TableValue = {
+    val canonicalRowType = rowPType.getOrElse(PStruct.canonical(rowType))
     val tt = TableType(rowType, key, TStruct.empty())
     TableValue(tt,
       BroadcastRow.empty(ctx),
@@ -37,15 +38,18 @@ object TableValue {
 }
 
 case class TableValue(typ: TableType, globals: BroadcastRow, rvd: RVD) {
-  if (typ.rowType != rvd.rowType)
+  if (!(typ.rowType.isOfType(rvd.rowType)))
     throw new RuntimeException(s"row mismatch:\n  typ: ${ typ.rowType.parsableString() }\n  rvd: ${ rvd.rowType.parsableString() }")
   if (!rvd.typ.key.startsWith(typ.key))
     throw new RuntimeException(s"key mismatch:\n  typ: ${ typ.key }\n  rvd: ${ rvd.typ.key }")
-  if (typ.globalType != globals.t.virtualType)
+  if (!(typ.globalType.isOfType(globals.t.virtualType)))
     throw new RuntimeException(s"globals mismatch:\n  typ: ${ typ.globalType.parsableString() }\n  val: ${ globals.t.virtualType.parsableString() }")
 
   def rdd: RDD[Row] =
     rvd.toRows
+
+  def persist(level: StorageLevel) =
+    TableValue(typ, globals, rvd.persist(level))
 
   def filterWithPartitionOp[P](partitionOp: (Int, Region) => P)(pred: (P, RegionValue, RegionValue) => Boolean): TableValue = {
     val localGlobals = globals.broadcast

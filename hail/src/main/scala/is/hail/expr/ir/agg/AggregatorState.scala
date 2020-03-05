@@ -98,7 +98,9 @@ class TypedRegionBackedAggState(val typ: PType, val fb: EmitFunctionBuilder[_]) 
     storageType.setFieldPresent(off, 0),
     StagedRegionValueBuilder.deepCopy(fb, region, typ, v, storageType.fieldOffset(off, 0)))
 
-  def get(): EmitTriplet = EmitTriplet(Code._empty, storageType.isFieldMissing(off, 0), Region.loadIRIntermediate(typ)(storageType.fieldOffset(off, 0)))
+  def get(): EmitTriplet = EmitTriplet(Code._empty,
+    storageType.isFieldMissing(off, 0),
+    PValue(typ, Region.loadIRIntermediate(typ)(storageType.fieldOffset(off, 0))))
 
   def copyFrom(src: Code[Long]): Code[Unit] =
     Code(newState(off), StagedRegionValueBuilder.deepCopy(fb, region, storageType, src, off))
@@ -128,7 +130,7 @@ class PrimitiveRVAState(val types: Array[PType], val fb: EmitFunctionBuilder[_])
   val storageType: PTuple = PTuple(types: _*)
 
   def foreachField(f: (Int, ValueField) => Code[Unit]): Code[Unit] =
-    coerce[Unit](Code(Array.tabulate(nFields)(i => f(i, fields(i))) :_*))
+    Code(Array.tabulate(nFields)(i => f(i, fields(i))))
 
   def newState(off: Code[Long]): Code[Unit] = Code._empty
   def createState: Code[Unit] = Code._empty
@@ -211,7 +213,7 @@ class TupleAggregatorState(val fb: EmitFunctionBuilder[_], val states: StateTupl
   private def getStateOffset(i: Int): Code[Long] = storageType.loadField(off, i)
 
   def toCode(f: (Int, AggregatorState) => Code[Unit]): Code[Unit] =
-    coerce[Unit](Code(Array.tabulate(states.nStates)(i => f(i, states(i))): _*))
+    Code(Array.tabulate(states.nStates)(i => f(i, states(i))))
 
   def newState(i: Int): Code[Unit] = states(i).newState(getStateOffset(i))
   def newState: Code[Unit] = states.toCode(fb, "new_state", (i, s) => s.newState(getStateOffset(i)))

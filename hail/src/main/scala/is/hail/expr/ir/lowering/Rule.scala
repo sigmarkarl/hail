@@ -1,6 +1,7 @@
 package is.hail.expr.ir.lowering
 
 import is.hail.expr.ir._
+import is.hail.expr.types.virtual.TStream
 
 trait Rule {
   def allows(ir: BaseIR): Boolean
@@ -24,6 +25,13 @@ case object NoRelationalLets extends Rule {
 case object CompilableValueIRs extends Rule {
   def allows(ir: BaseIR): Boolean = ir match {
     case x: IR => Compilable(x)
+    case _ => true
+  }
+}
+
+case object NoApplyIR extends Rule {
+  override def allows(ir: BaseIR): Boolean = ir match {
+    case x: ApplyIR => false
     case _ => true
   }
 }

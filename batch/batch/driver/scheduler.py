@@ -3,7 +3,7 @@ import asyncio
 import secrets
 import sortedcontainers
 
-from hailtop.utils import AsyncWorkerPool, WaitableSharedPool, retry_long_running, run_if_changed
+from hailtop.utils import AsyncWorkerPool, WaitableSharedPool, retry_long_running, run_if_changed, time_msecs
 
 from ..batch import schedule_job, unschedule_job, mark_job_complete
 
@@ -161,7 +161,7 @@ WHERE user = %s AND `state` = 'running';
                     async for record in self.db.select_and_fetchall(
                             '''
 SELECT jobs.job_id
-FROM jobs
+FROM jobs FORCE INDEX(jobs_batch_id_state_always_run_cancelled)
 WHERE batch_id = %s AND state = 'Ready' AND always_run = 0
 LIMIT %s;
 ''',
@@ -173,7 +173,7 @@ LIMIT %s;
                     async for record in self.db.select_and_fetchall(
                             '''
 SELECT jobs.job_id
-FROM jobs
+FROM jobs FORCE INDEX(jobs_batch_id_state_always_run_cancelled)
 WHERE batch_id = %s AND state = 'Ready' AND always_run = 0 AND cancelled = 1
 LIMIT %s;
 ''',
@@ -249,7 +249,7 @@ WHERE user = %s AND `state` = 'running' AND cancelled = 1;
                 async for record in self.db.select_and_fetchall(
                         '''
 SELECT jobs.job_id, attempts.attempt_id, attempts.instance_name
-FROM jobs
+FROM jobs FORCE INDEX(jobs_batch_id_state_always_run_cancelled)
 STRAIGHT_JOIN attempts
   ON attempts.batch_id = jobs.batch_id AND attempts.job_id = jobs.job_id
 WHERE jobs.batch_id = %s AND state = 'Running' AND always_run = 0 AND cancelled = 0
@@ -288,11 +288,16 @@ LIMIT %s;
         return should_wait
 
     async def schedule_loop_body(self):
+        log.info('schedule: starting')
+        start = time_msecs()
+        n_scheduled = 0
+
         user_resources = await self.compute_fair_share()
 
         total = sum(resources['allocated_cores_mcpu']
                     for resources in user_resources.values())
         if not total:
+            log.info('schedule: no allocated cores')
             should_wait = True
             return should_wait
         user_share = {
@@ -312,7 +317,7 @@ WHERE user = %s AND `state` = 'running';
                 async for record in self.db.select_and_fetchall(
                         '''
 SELECT job_id, spec, cores_mcpu
-FROM jobs
+FROM jobs FORCE INDEX(jobs_batch_id_state_always_run_cancelled)
 WHERE batch_id = %s AND state = 'Ready' AND always_run = 1
 LIMIT %s;
 ''',
@@ -327,7 +332,7 @@ LIMIT %s;
                     async for record in self.db.select_and_fetchall(
                             '''
 SELECT job_id, spec, cores_mcpu
-FROM jobs
+FROM jobs FORCE INDEX(jobs_batch_id_state_always_run_cancelled)
 WHERE batch_id = %s AND state = 'Ready' AND always_run = 0 AND cancelled = 0
 LIMIT %s;
 ''',
@@ -340,6 +345,16 @@ LIMIT %s;
                         yield record
 
         waitable_pool = WaitableSharedPool(self.async_worker_pool)
+
+        def get_instance(user, cores_mcpu):
+            i = self.inst_pool.healthy_instances_by_free_cores.bisect_key_left(cores_mcpu)
+            while i < len(self.inst_pool.healthy_instances_by_free_cores):
+                instance = self.inst_pool.healthy_instances_by_free_cores[i]
+                assert cores_mcpu <= instance.free_cores_mcpu
+                if user != 'ci' or (user == 'ci' and instance.zone.startswith('us-central1')):
+                    return instance
+                i += 1
+            return None
 
         should_wait = True
         for user, resources in user_resources.items():
@@ -358,14 +373,15 @@ LIMIT %s;
                 attempt_id = ''.join([secrets.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(6)])
                 record['attempt_id'] = attempt_id
 
-                i = self.inst_pool.healthy_instances_by_free_cores.bisect_key_left(record['cores_mcpu'])
-                if i < len(self.inst_pool.healthy_instances_by_free_cores):
-                    instance = self.inst_pool.healthy_instances_by_free_cores[i]
+                if scheduled_cores_mcpu + record['cores_mcpu'] > allocated_cores_mcpu:
+                    break
 
-                    assert record['cores_mcpu'] <= instance.free_cores_mcpu
-
+                instance = get_instance(user, record['cores_mcpu'])
+                if instance:
                     instance.adjust_free_cores_in_memory(-record['cores_mcpu'])
                     scheduled_cores_mcpu += record['cores_mcpu']
+                    n_scheduled += 1
+                    should_wait = False
 
                     async def schedule_with_error_handling(app, record, id, instance):
                         try:
@@ -377,12 +393,11 @@ LIMIT %s;
 
                 remaining.value -= 1
                 if remaining.value <= 0:
-                    should_wait = False
-                    break
-                if scheduled_cores_mcpu + record['cores_mcpu'] > allocated_cores_mcpu:
-                    should_wait = False
                     break
 
         await waitable_pool.wait()
+
+        end = time_msecs()
+        log.info(f'schedule: scheduled {n_scheduled} jobs in {end - start}ms')
 
         return should_wait

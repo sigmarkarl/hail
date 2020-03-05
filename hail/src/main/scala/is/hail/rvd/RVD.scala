@@ -13,7 +13,7 @@ import is.hail.io.index.IndexWriter
 import is.hail.io.{AbstractTypedCodecSpec, BufferSpec, RichContextRDDRegionValue, TypedCodecSpec}
 import is.hail.sparkextras._
 import is.hail.utils._
-import is.hail.expr.ir.ExecuteContext
+import is.hail.expr.ir.{ExecuteContext, InferPType}
 import is.hail.utils.PartitionCounts.{PCSubsetOffset, getPCSubsetOffset, incrementalPCSubsetOffset}
 import org.apache.commons.lang3.StringUtils
 import org.apache.spark.TaskContext
@@ -1416,6 +1416,22 @@ object RVD {
       new RVD(typ, partitioner, crdd).checkKeyOrdering()
   }
 
+  private def copyFromType(destPType: PType, srcPType: PType, srcRegionValue: RegionValue): RegionValue =
+    RegionValue(srcRegionValue.region, destPType.copyFromType(srcRegionValue.region, srcPType, srcRegionValue.offset, false))
+
+  def unify(rvds: Seq[RVD]): Seq[RVD] = {
+    if (rvds.length == 1 || rvds.forall(_.rowPType == rvds.head.rowPType))
+      return rvds
+
+    val unifiedRowPType = InferPType.getNestedElementPTypesOfSameType(rvds.map(_.rowPType)).asInstanceOf[PStruct]
+
+    rvds.map(rvd => {
+      val srcRowPType = rvd.rowPType
+      val newRVDType = rvd.typ.copy(rowType = unifiedRowPType)
+      rvd.map(newRVDType)(copyFromType(unifiedRowPType, srcRowPType, _))
+    })
+  }
+
   def union(
     rvds: Seq[RVD],
     joinKey: Int,
@@ -1424,6 +1440,7 @@ object RVD {
     case Seq(x) => x
     case first +: _ =>
       assert(rvds.forall(_.rowPType == first.rowPType))
+
       if (joinKey == 0) {
         val sc = first.sparkContext
         RVD.unkeyed(first.rowPType, ContextRDD.union(sc, rvds.map(_.crdd)))

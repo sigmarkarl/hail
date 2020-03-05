@@ -47,7 +47,7 @@ abstract sealed class TableIR extends BaseIR {
     // FIXME: store table literal in cache, return ID
     ExecuteContext.scoped { ctx =>
       val tv = Interpret(this, ctx, optimize = true)
-      TableLiteral(tv, ctx)
+      TableLiteral(tv.persist(storageLevel), ctx)
     }
   }
 
@@ -79,9 +79,9 @@ abstract sealed class TableIR extends BaseIR {
 
 object TableLiteral {
   def apply(value: TableValue, ctx: ExecuteContext): TableLiteral = {
-    val globalPType = PType.canonical(value.typ.globalType)
+    val globalPType = PType.canonical(value.globals.t)
     val enc = TypedCodecSpec(globalPType, BufferSpec.wireSpec) // use wireSpec to save memory
-    using(new ByteArrayEncoder(enc.buildEncoder(globalPType))) { encoder =>
+    using(new ByteArrayEncoder(enc.buildEncoder(value.globals.t))) { encoder =>
       TableLiteral(value.typ, value.rvd, enc,
         encoder.regionValueToBytes(value.globals.value.region, value.globals.value.offset))
     }
@@ -442,7 +442,7 @@ case class TableFilter(child: TableIR, pred: IR) extends TableIR {
       "row", tv.rvd.rowPType,
       "global", tv.globals.t,
       pred)
-    assert(rTyp.virtualType == TBoolean())
+    assert(rTyp.virtualType isOfType TBoolean())
 
     tv.filterWithPartitionOp(f)((rowF, rv, globalRV) => rowF(rv.region, rv.offset, false, globalRV.offset, false))
   }
@@ -811,7 +811,7 @@ case class TableZipUnchecked(left: TableIR, right: TableIR) extends TableIR {
       "right", tv2.rvd.typ.rowType,
       inserter)
 
-    assert(t2.virtualType == typ.rowType)
+    assert(t2.virtualType isOfType typ.rowType)
     assert(t2 == rvdType.rowType)
 
     val rvd = tv1.rvd.zipPartitionsWithIndex(rvdType, tv2.rvd) { (i, ctx, it1, it2) =>
@@ -870,7 +870,8 @@ case class TableMultiWayZipJoin(children: IndexedSeq[TableIR], fieldName: String
     assert(childValues.map(_.rvd.typ).toSet.size == 1) // same physical types
 
 
-    val childRVDs = childValues.map(_.rvd)
+    val childRVDs = RVD.unify(childValues.map(_.rvd)).toFastIndexedSeq
+
     val repartitionedRVDs =
       if (childRVDs(0).partitioner.satisfiesAllowedOverlap(typ.key.length - 1) &&
         childRVDs.forall(rvd => rvd.partitioner == childRVDs(0).partitioner))
@@ -985,7 +986,7 @@ case class TableMapRows(child: TableIR, newRow: IR) extends TableIR {
 
     val scanRef = genUID()
     val extracted = agg.Extract.apply(agg.Extract.liftScan(newRow), scanRef)
-    val nAggs = extracted.nAggs
+
 
     if (extracted.aggs.isEmpty) {
       val (rTyp, f) = ir.Compile[Long, Long, Long](
@@ -1021,6 +1022,12 @@ case class TableMapRows(child: TableIR, newRow: IR) extends TableIR {
         rvd = tv.rvd.mapPartitionsWithIndex(RVDType(rTyp.asInstanceOf[PStruct], typ.key), itF))
     }
 
+    val physicalAggs = extracted.getPhysicalAggs(
+      ctx,
+      Env("global" -> tv.globals.t),
+      Env("global" -> tv.globals.t, "row" -> tv.rvd.rowPType)
+    )
+
     val scanInitNeedsGlobals = Mentions(extracted.init, "global")
     val scanSeqNeedsGlobals = Mentions(extracted.seqPerElt, "global")
     val rowIterationNeedsGlobals = Mentions(extracted.postAggIR, "global")
@@ -1040,26 +1047,26 @@ case class TableMapRows(child: TableIR, newRow: IR) extends TableIR {
     // 4. load in partStarts, calculate newRow based on those results.
 
     val (_, initF) = ir.CompileWithAggregators2[Long, Unit](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", tv.globals.t,
       Begin(FastIndexedSeq(extracted.init, extracted.serializeSet(0, 0, spec))))
 
     val (_, eltSeqF) = ir.CompileWithAggregators2[Long, Long, Unit](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", Option(globalsBc).map(_.value.t).getOrElse(PStruct()),
       "row", tv.rvd.rowPType,
       extracted.eltOp(ctx))
 
-    val read = extracted.deserialize(ctx, spec)
-    val write = extracted.serialize(ctx, spec)
-    val combOpF = extracted.combOpF(ctx, spec)
+    val read = extracted.deserialize(ctx, spec, physicalAggs)
+    val write = extracted.serialize(ctx, spec, physicalAggs)
+    val combOpF = extracted.combOpF(ctx, spec, physicalAggs)
 
     val (rTyp, f) = ir.CompileWithAggregators2[Long, Long, Long](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", Option(globalsBc).map(_.value.t).getOrElse(PStruct()),
       "row", tv.rvd.rowPType,
       Let(scanRef, extracted.results, extracted.postAggIR))
-    assert(rTyp.virtualType == newRow.typ)
+    assert(rTyp.virtualType isOfType newRow.typ)
 
     // 1. init op on all aggs and write out to initPath
     val initAgg = Region.scoped { aggRegion =>
@@ -1192,7 +1199,7 @@ case class TableExplode(child: TableIR, path: IndexedSeq[String]) extends TableI
   private val length: IR = {
     val lenUID = genUID()
     Let(lenUID,
-      ArrayLen(ToArray(
+      ArrayLen(CastToArray(
         path.foldLeft[IR](Ref("row", childRowType))((struct, field) =>
           GetField(struct, field)))),
       If(IsNA(Ref(lenUID, TInt32())), 0, Ref(lenUID, TInt32())))
@@ -1207,7 +1214,7 @@ case class TableExplode(child: TableIR, path: IndexedSeq[String]) extends TableI
       case (((field, ref), i), arg) =>
         InsertFields(ref, FastIndexedSeq(field ->
           (if (i == refs.length - 1)
-            ArrayRef(ToArray(GetField(ref, field)), arg)
+            ArrayRef(CastToArray(GetField(ref, field)), arg)
           else
             Let(refs(i + 1).name, GetField(ref, field), arg))))
     }.asInstanceOf[InsertFields]
@@ -1223,16 +1230,16 @@ case class TableExplode(child: TableIR, path: IndexedSeq[String]) extends TableI
   protected[ir] override def execute(ctx: ExecuteContext): TableValue = {
     val prev = child.execute(ctx)
 
-    val (_, l) = Compile[Long, Int](ctx, "row", prev.rvd.rowPType, length)
-    val (t, f) = Compile[Long, Int, Long](
+    val (len, l) = Compile[Long, Int](ctx, "row", prev.rvd.rowPType, length)
+    val (newRowType: PStruct, f) = Compile[Long, Int, Long](
       ctx,
       "row", prev.rvd.rowPType,
-      idx.name, PInt32(),
+      idx.name, PInt32(true),
       newRow)
-    assert(t.virtualType == typ.rowType)
+    assert(newRowType.virtualType isOfType typ.rowType)
 
     val rvdType: RVDType = RVDType(
-      newRow.pType,
+      newRowType,
       prev.rvd.typ.key.takeWhile(_ != path.head)
     )
     TableValue(typ,
@@ -1283,7 +1290,7 @@ case class TableUnion(children: IndexedSeq[TableIR]) extends TableIR {
   protected[ir] override def execute(ctx: ExecuteContext): TableValue = {
     val tvs = children.map(_.execute(ctx))
     tvs(0).copy(
-      rvd = RVD.union(tvs.map(_.rvd), tvs(0).typ.key.length, ctx))
+      rvd = RVD.union(RVD.unify(tvs.map(_.rvd)), tvs(0).typ.key.length, ctx))
   }
 }
 
@@ -1387,26 +1394,32 @@ case class TableKeyByAndAggregate(
     val res = genUID()
     val extracted = agg.Extract(expr, res)
 
+    val physicalAggs = extracted.getPhysicalAggs(
+      ctx,
+      Env("global" -> prev.globals.t),
+      Env("global" -> prev.globals.t, "row" -> prev.rvd.rowPType)
+    )
+
     val (_, makeInit) = ir.CompileWithAggregators2[Long, Unit](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", prev.globals.t,
       extracted.init)
 
     val (_, makeSeq) = ir.CompileWithAggregators2[Long, Long, Unit](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", prev.globals.t,
       "row", prev.rvd.rowPType,
       extracted.seqPerElt)
 
     val (rTyp: PStruct, makeAnnotate) = ir.CompileWithAggregators2[Long, Long](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", prev.globals.t,
       Let(res, extracted.results, extracted.postAggIR))
-    assert(rTyp.virtualType == typ.valueType, s"$rTyp, ${ typ.valueType }")
+    assert(rTyp.virtualType isOfType typ.valueType, s"$rTyp, ${ typ.valueType }")
 
-    val serialize = extracted.serialize(ctx, spec)
-    val deserialize = extracted.deserialize(ctx, spec)
-    val combOp = extracted.combOpF(ctx, spec)
+    val serialize = extracted.serialize(ctx, spec, physicalAggs)
+    val deserialize = extracted.deserialize(ctx, spec, physicalAggs)
+    val combOp = extracted.combOpF(ctx, spec, physicalAggs)
 
     val initF = makeInit(0, ctx.r)
     val globalsOffset = prev.globals.value.offset
@@ -1517,13 +1530,19 @@ case class TableAggregateByKey(child: TableIR, expr: IR) extends TableIR {
     val res = genUID()
     val extracted = agg.Extract(expr, res)
 
+    val physicalAggs = extracted.getPhysicalAggs(
+      ctx,
+      Env("global" -> prev.globals.t),
+      Env("global" -> prev.globals.t, "row" -> prev.rvd.rowPType)
+    )
+
     val (_, makeInit) = ir.CompileWithAggregators2[Long, Unit](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", prev.globals.t,
       extracted.init)
 
     val (_, makeSeq) = ir.CompileWithAggregators2[Long, Long, Unit](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", prev.globals.t,
       "row", prev.rvd.rowPType,
       extracted.seqPerElt)
@@ -1533,12 +1552,12 @@ case class TableAggregateByKey(child: TableIR, expr: IR) extends TableIR {
     val key = Ref(genUID(), keyType.virtualType)
     val value = Ref(genUID(), valueIR.typ)
     val (rowType: PStruct, makeRow) = ir.CompileWithAggregators2[Long, Long, Long](ctx,
-      extracted.aggs,
+      physicalAggs,
       "global", prev.globals.t,
       key.name, keyType,
       Let(value.name, valueIR,
         InsertFields(key, typ.valueType.fieldNames.map(n => n -> GetField(value, n)))))
-    assert(rowType.virtualType == typ.rowType, s"$rowType, ${ typ.rowType }")
+    assert(rowType.virtualType isOfType typ.rowType, s"$rowType, ${ typ.rowType }")
 
     val localChildRowType = prevRVD.rowPType
     val keyIndices = prev.typ.keyFieldIdx

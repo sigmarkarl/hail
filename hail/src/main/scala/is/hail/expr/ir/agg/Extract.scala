@@ -4,6 +4,7 @@ import is.hail.HailContext
 import is.hail.annotations.{Region, RegionValue}
 import is.hail.expr.ir
 import is.hail.expr.ir._
+import is.hail.expr.ir.lowering.LoweringPipeline
 import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
 import is.hail.io.BufferSpec
@@ -43,9 +44,9 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggStateSign
 
   def eltOp(ctx: ExecuteContext): IR = seqPerElt
 
-  def deserialize(ctx: ExecuteContext, spec: BufferSpec): ((Region, Array[Byte]) => Long) = {
+  def deserialize(ctx: ExecuteContext, spec: BufferSpec, physicalAggs: Array[AggStatePhysicalSignature]): ((Region, Array[Byte]) => Long) = {
     val (_, f) = ir.CompileWithAggregators2[Unit](ctx,
-      aggs, ir.DeserializeAggs(0, 0, spec, aggs))
+      physicalAggs, ir.DeserializeAggs(0, 0, spec, aggs))
 
     { (aggRegion: Region, bytes: Array[Byte]) =>
       val f2 = f(0, aggRegion);
@@ -56,9 +57,9 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggStateSign
     }
   }
 
-  def serialize(ctx: ExecuteContext, spec: BufferSpec): (Region, Long) => Array[Byte] = {
+  def serialize(ctx: ExecuteContext, spec: BufferSpec, physicalAggs: Array[AggStatePhysicalSignature]): (Region, Long) => Array[Byte] = {
     val (_, f) = ir.CompileWithAggregators2[Unit](ctx,
-      aggs, ir.SerializeAggs(0, 0, spec, aggs))
+      physicalAggs, ir.SerializeAggs(0, 0, spec, aggs))
 
     { (aggRegion: Region, off: Long) =>
       val f2 = f(0, aggRegion);
@@ -68,9 +69,9 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggStateSign
     }
   }
 
-  def combOpF(ctx: ExecuteContext, spec: BufferSpec): (Array[Byte], Array[Byte]) => Array[Byte] = {
+  def combOpF(ctx: ExecuteContext, spec: BufferSpec, physicalAggs: Array[AggStatePhysicalSignature]): (Array[Byte], Array[Byte]) => Array[Byte] = {
     val (_, f) = ir.CompileWithAggregators2[Unit](ctx,
-      aggs ++ aggs,
+      physicalAggs ++ physicalAggs,
       Begin(
         deserializeSet(0, 0, spec) +:
           deserializeSet(1, 1, spec) +:
@@ -90,6 +91,24 @@ case class Aggs(postAggIR: IR, init: IR, seqPerElt: IR, aggs: Array[AggStateSign
   }
 
   def results: IR = ResultOp(0, aggs)
+
+  def getPhysicalAggs(ctx: ExecuteContext, initBindings: Env[PType], seqBindings: Env[PType]): Array[AggStatePhysicalSignature] = {
+    val initsAB = InferPType.newBuilder[InitOp](aggs.length)
+    val seqsAB = InferPType.newBuilder[SeqOp](aggs.length)
+    val init2 = LoweringPipeline.compileLowerer.apply(ctx, init, false).asInstanceOf[IR].noSharing
+    val seq2 = LoweringPipeline.compileLowerer.apply(ctx, seqPerElt, false).asInstanceOf[IR].noSharing
+    InferPType(init2, initBindings, null, inits = initsAB, null)
+    InferPType(seq2, seqBindings, null, null, seqs = seqsAB)
+
+    val pSigs = aggs.indices.map { i => InferPType.computePhysicalAgg(aggs(i), initsAB(i), seqsAB(i)) }.toArray
+
+    if (init2 eq init)
+      InferPType.clearPTypes(init2)
+    if (seq2 eq seqPerElt)
+      InferPType.clearPTypes(seq2)
+
+    pSigs
+  }
 }
 
 object Extract {
@@ -225,7 +244,7 @@ object Extract {
 
         val (dependent, independent) = partitionDependentLets(newLet.result(), name)
         letBuilder ++= independent
-        seqBuilder += ArrayFor(array, name, addLets(Begin(newSeq.result()), dependent))
+        seqBuilder += StreamFor(array, name, addLets(Begin(newSeq.result()), dependent))
         transformed
 
       case AggGroupBy(key, aggIR, _) =>
@@ -246,7 +265,7 @@ object Extract {
         ab += InitOp(i, FastIndexedSeq(Begin(initOps)), aggSig, Group())
         seqBuilder += SeqOp(i, FastIndexedSeq(key, Begin(newSeq.result().toFastIndexedSeq)), aggSig, Group())
 
-        ToDict(ArrayMap(ToArray(GetTupleElement(result, i)), newRef.name, MakeTuple.ordered(FastSeq(GetField(newRef, "key"), transformed))))
+        ToDict(StreamMap(ToStream(GetTupleElement(result, i)), newRef.name, MakeTuple.ordered(FastSeq(GetField(newRef, "key"), transformed))))
 
 
       case AggArrayPerElement(a, elementName, indexName, aggBody, knownLength, _) =>
@@ -283,8 +302,8 @@ object Extract {
             aRef.name, a,
             Begin(FastIndexedSeq(
               SeqOp(i, FastIndexedSeq(ArrayLen(aRef)), state, AggElementsLengthCheck()),
-              ArrayFor(
-                ArrayRange(I32(0), ArrayLen(aRef), I32(1)),
+              StreamFor(
+                StreamRange(I32(0), ArrayLen(aRef), I32(1)),
                 iRef.name,
                 Let(
                   elementName,
@@ -297,18 +316,18 @@ object Extract {
         Let(
           rUID.name,
           GetTupleElement(result, i),
-          ArrayMap(
-            ArrayRange(0, ArrayLen(rUID), 1),
+          ToArray(StreamMap(
+            StreamRange(0, ArrayLen(rUID), 1),
             indexName,
             Let(
               newRef.name,
               ArrayRef(rUID, Ref(indexName, TInt32())),
-              transformed)))
+              transformed))))
 
-      case x: ArrayAgg =>
+      case x: StreamAgg =>
         assert(!ContainsScan(x))
         x
-      case x: ArrayAggScan =>
+      case x: StreamAggScan =>
         assert(!ContainsAgg(x))
         x
       case _ => MapIR(extract)(ir)
