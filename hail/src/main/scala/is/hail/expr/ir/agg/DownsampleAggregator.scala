@@ -2,7 +2,7 @@ package is.hail.expr.ir.agg
 
 import is.hail.annotations.{CodeOrdering, Region, StagedRegionValueBuilder}
 import is.hail.asm4s._
-import is.hail.expr.ir.{EmitFunctionBuilder, EmitRegion, EmitTriplet}
+import is.hail.expr.ir.{EmitFunctionBuilder, EmitRegion, EmitCode}
 import is.hail.expr.types.encoded.EType
 import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
@@ -27,7 +27,7 @@ class DownsampleBTreeKey(binType: PBaseStruct, pointType: PBaseStruct, fb: EmitF
 
   def deepCopy(er: EmitRegion, src: Code[Long], dest: Code[Long]): Code[Unit] =
     Code(
-      Region.loadBoolean(storageType.loadField(src, "empty")).orEmpty(Code._fatal("key empty!!")),
+      Region.loadBoolean(storageType.loadField(src, "empty")).orEmpty(Code._fatal[Unit]("key empty!!")),
       StagedRegionValueBuilder.deepCopy(er, storageType, src, dest)
     )
 
@@ -43,7 +43,7 @@ object DownsampleState {
 
 class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBufferSize: Int = 256) extends AggregatorState {
   val r: ClassFieldRef[Region] = fb.newField[Region]("region")
-  val region: Code[Region] = r.load()
+  val region: Value[Region] = r
 
   val oldRegion: ClassFieldRef[Region] = fb.newField[Region]("old_region")
 
@@ -104,7 +104,7 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
     mb.emit(Code(FastIndexedSeq(
       allocateSpace(),
       this.nDivisions := mb.getArg[Int](1),
-      (this.nDivisions < 4).orEmpty(Code._fatal(const("downsample: require n_divisions >= 4, found ").concat(this.nDivisions.toS))),
+      (this.nDivisions < 4).orEmpty(Code._fatal[Unit](const("downsample: require n_divisions >= 4, found ").concat(this.nDivisions.toS))),
       left := 0d,
       right := 0d,
       bottom := 0d,
@@ -115,7 +115,7 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
     mb.invoke(nDivisions)
   }
 
-  override def load(regionLoader: Code[Region] => Code[Unit], src: Code[Long]): Code[Unit] = {
+  override def load(regionLoader: Value[Region] => Code[Unit], src: Code[Long]): Code[Unit] = {
     val mb = fb.newMethod("downsample_load", Array[TypeInfo[_]](), UnitInfo)
     mb.emit(
       Code(FastIndexedSeq(
@@ -136,7 +136,7 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
     Code(regionLoader(r), mb.invoke())
   }
 
-  override def store(regionStorer: Code[Region] => Code[Unit], dest: Code[Long]): Code[Unit] = {
+  override def store(regionStorer: Value[Region] => Code[Unit], dest: Code[Long]): Code[Unit] = {
     val mb = fb.newMethod("downsample_store", Array[TypeInfo[_]](), UnitInfo)
     mb.emit(Code(FastIndexedSeq(
       off := dest,
@@ -172,16 +172,16 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
       bottom := Region.loadDouble(storageType.loadField(src, "top")),
       top := Region.loadDouble(storageType.loadField(src, "bottom")),
       treeSize := Region.loadInt(storageType.loadField(src, "treeSize")),
-      tree.deepCopy(src),
+      tree.deepCopy(Region.loadAddress(storageType.loadField(src, "tree"))),
       buffer.copyFrom(storageType.loadField(src, "buffer")))))
     mb.invoke(_src)
   }
 
-  def serialize(codec: BufferSpec): Code[OutputBuffer] => Code[Unit] = {
+  def serialize(codec: BufferSpec): Value[OutputBuffer] => Code[Unit] = {
     val binEnc = binET.buildEncoderMethod(binType, fb)
     val pointEnc = pointET.buildEncoderMethod(pointType, fb)
 
-    { _ob: Code[OutputBuffer] =>
+    { _ob: Value[OutputBuffer] =>
       val mb = fb.newMethod("downsample_serialize", Array[TypeInfo[_]](typeInfo[OutputBuffer]), UnitInfo)
       val ob = mb.getArg[OutputBuffer](1).load()
 
@@ -196,7 +196,7 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
         ob.writeInt(treeSize),
         tree.bulkStore(ob) { (ob, src) =>
           Code(
-            Region.loadBoolean(key.storageType.loadField(src, "empty")).orEmpty(Code._fatal("bad")),
+            Region.loadBoolean(key.storageType.loadField(src, "empty")).orEmpty(Code._fatal[Unit]("bad")),
             binEnc.invoke(key.storageType.loadField(src, "bin"), ob),
             pointEnc.invoke(key.storageType.loadField(src, "point"), ob))
         },
@@ -206,11 +206,11 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
     }
   }
 
-  def deserialize(codec: BufferSpec): Code[InputBuffer] => Code[Unit] = {
+  def deserialize(codec: BufferSpec): Value[InputBuffer] => Code[Unit] = {
     val binDec = binET.buildInplaceDecoderMethod(binType, fb)
     val pointDec = pointET.buildInplaceDecoderMethod(pointType, fb)
 
-    { _ib: Code[InputBuffer] =>
+    { _ib: Value[InputBuffer] =>
       val mb = fb.newMethod("downsample_deserialize", Array[TypeInfo[_]](typeInfo[InputBuffer]), UnitInfo)
       val ib = mb.getArg[InputBuffer](1).load()
       val serializationEndTag = mb.newLocal[Int]
@@ -237,7 +237,7 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
           },
           buffer.initialize(),
           serializationEndTag := ib.readInt(),
-          serializationEndTag.cne(DownsampleState.serializationEndMarker).orEmpty(Code._fatal("downsample aggregator failed to serialize!"))
+          serializationEndTag.cne(DownsampleState.serializationEndMarker).orEmpty(Code._fatal[Unit]("downsample aggregator failed to serialize!"))
         )))
       mb.invoke(_ib)
     }
@@ -509,7 +509,7 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
                   srvb.addDouble(Region.loadDouble(pointType.loadField(point, "y"))),
                   srvb.advance(),
                   pointType.isFieldDefined(point, "label").mux(
-                    srvb.addIRIntermediate(labelType)(pointType.loadField(point, "label")),
+                    srvb.addWithDeepCopy(labelType, pointType.loadField(point, "label")),
                     srvb.setMissing()
                   )
                 )
@@ -524,7 +524,7 @@ class DownsampleState(val fb: EmitFunctionBuilder[_], labelType: PArray, maxBuff
 }
 
 object DownsampleAggregator {
-  val resultType: TArray = TArray(TTuple(TFloat64(), TFloat64(), TArray(TString())))
+  val resultType: TArray = TArray(TTuple(TFloat64, TFloat64, TArray(TString)))
 }
 
 class DownsampleAggregator(arrayType: PArray) extends StagedAggregator {
@@ -534,18 +534,18 @@ class DownsampleAggregator(arrayType: PArray) extends StagedAggregator {
 
   def createState(fb: EmitFunctionBuilder[_]): State = new DownsampleState(fb, arrayType)
 
-  def initOp(state: State, init: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
+  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
     val Array(nDivisions) = init
     Code(
       nDivisions.setup,
       nDivisions.m.mux(
-        Code._fatal("downsample: n_divisions may not be missing"),
+        Code._fatal[Unit]("downsample: n_divisions may not be missing"),
         state.init(coerce[Int](nDivisions.v))
       )
     )
   }
 
-  def seqOp(state: State, seq: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
+  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
     val Array(x, y, label) = seq
 
     Code(

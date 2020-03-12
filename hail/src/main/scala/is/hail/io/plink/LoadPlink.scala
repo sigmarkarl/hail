@@ -180,16 +180,16 @@ case class MatrixPLINKReader(
   val partitionCounts: Option[IndexedSeq[Long]] = None
 
   val fullMatrixType: MatrixType = MatrixType(
-    globalType = TStruct.empty(),
+    globalType = TStruct.empty,
     colKey = Array("s"),
     colType = saSignature.virtualType,
     rowType = TStruct(
       "locus" -> TLocus.schemaFromRG(referenceGenome),
-      "alleles" -> TArray(TString()),
-      "rsid" -> TString(),
-      "cm_position" -> TFloat64()),
+      "alleles" -> TArray(TString),
+      "rsid" -> TString,
+      "cm_position" -> TFloat64),
     rowKey = Array("locus", "alleles"),
-    entryType = TStruct("GT" -> TCall()))
+    entryType = TStruct("GT" -> TCall))
 
   def apply(tr: TableRead, ctx: ExecuteContext): TableValue = {
     val requestedType = tr.typ
@@ -202,7 +202,7 @@ case class MatrixPLINKReader(
       sc.hadoopConfiguration.setInt("nSamples", nSamples)
       sc.hadoopConfiguration.setBoolean("a2Reference", a2Reference)
 
-      val crdd = ContextRDD.weaken[RVDContext](
+      val crdd = ContextRDD.weaken(
         sc.hadoopFile(
           bed,
           classOf[PlinkInputFormat],

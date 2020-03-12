@@ -9,7 +9,7 @@ case object PFloat32Optional extends PFloat32(false)
 case object PFloat32Required extends PFloat32(true)
 
 class PFloat32(override val required: Boolean) extends PNumeric with PPrimitive {
-  lazy val virtualType: TFloat32 = TFloat32(required)
+  lazy val virtualType: TFloat32.type = TFloat32
 
   override type NType = PFloat32
 
@@ -18,7 +18,7 @@ class PFloat32(override val required: Boolean) extends PNumeric with PPrimitive 
   override def _pretty(sb: StringBuilder, indent: Int, compact: Boolean): Unit = sb.append("PFloat32")
 
   override def unsafeOrdering(): UnsafeOrdering = new UnsafeOrdering {
-    def compare(r1: Region, o1: Long, r2: Region, o2: Long): Int = {
+    def compare(o1: Long, o2: Long): Int = {
       java.lang.Float.compare(Region.loadFloat(o1), Region.loadFloat(o2))
     }
   }

@@ -327,9 +327,9 @@ object Code {
     }
   }
 
-  def _throw[T <: java.lang.Throwable, U](cerr: Code[T]): Code[U] = Code(cerr, new InsnNode(ATHROW))
+  def _throw[T <: java.lang.Throwable, U](cerr: Code[T])(implicit uti: TypeInfo[U]): Code[U] = Code(cerr, new InsnNode(ATHROW))
 
-  def _fatal[U](msg: Code[String]): Code[U] =
+  def _fatal[U](msg: Code[String])(implicit uti: TypeInfo[U]): Code[U] =
     Code._throw[is.hail.utils.HailException, U](Code.newInstance[is.hail.utils.HailException, String, Option[String], Throwable](
       msg,
       Code.invokeStatic[scala.Option[String], scala.Option[String]]("empty"),
@@ -380,6 +380,19 @@ object Code {
   def foreach[A](it: Seq[A])(f: A => Code[Unit]): Code[Unit] = Code(it.map(f))
 
   def currentTimeMillis(): Code[Long] = Code.invokeStatic[java.lang.System, Long]("currentTimeMillis")
+
+  def memoize[T, U](c: Code[T], name: String)(f: (Value[T]) => Code[U])(implicit tti: TypeInfo[T]): Code[U] = {
+    val lr = new LocalRef[T](null, name)
+    Code(lr := c, f(lr))
+  }
+
+  def memoize[T1, T2, U](c1: Code[T1], name1: String,
+    c2: Code[T2], name2: String
+  )(f: (Value[T1], Value[T2]) => Code[U])(implicit t1ti: TypeInfo[T1], t2ti: TypeInfo[T2]): Code[U] = {
+    val lr1 = new LocalRef[T1](null, name1)
+    val lr2 = new LocalRef[T2](null, name2)
+    Code(lr1 := c1, lr2 := c2, f(lr1, lr2))
+  }
 }
 
 trait Code[+T] {
@@ -873,15 +886,15 @@ trait Settable[T] extends Value[T] {
   def load(): Code[T] = get
 }
 
-class LazyFieldRef[T: TypeInfo](fb: FunctionBuilder[_], name: String, setup: Code[T]) extends Settable[T] {
+class LazyFieldRef[T: TypeInfo](fb: FunctionBuilder[_], name: String, setup: Code[T]) extends Value[T] {
   private[this] val value: ClassFieldRef[T] = fb.newField[T](name)
   private[this] val present: ClassFieldRef[Boolean] = fb.newField[Boolean](s"${name}_present")
 
-  def get: Code[T] =
-    Code(present.mux(Code._empty, Code(value := setup, present := true)), value.load())
+  private[this] val setm = fb.newMethod[Unit]
+  setm.emit(Code(value := setup, present := true))
 
-  def store(rhs: Code[T]): Code[Unit] =
-    throw new UnsupportedOperationException("cannot store new value into LazyFieldRef!")
+  def get: Code[T] =
+    Code(present.mux(Code._empty, setm.invoke()), value.load())
 }
 
 class ClassFieldRef[T: TypeInfo](fb: FunctionBuilder[_], f: Field[T]) extends Settable[T] {
@@ -894,7 +907,9 @@ class ClassFieldRef[T: TypeInfo](fb: FunctionBuilder[_], f: Field[T]) extends Se
   def store(rhs: Code[T]): Code[Unit] = f.put(_loadClass, rhs)
 }
 
-class LocalRef[T](val i: Int)(implicit tti: TypeInfo[T]) extends Settable[T] {
+class ArgRef[T](i: Int)(implicit tti: TypeInfo[T]) extends Settable[T] {
+  assert(i >= 0)
+
   def get: Code[T] =
     new Code[T] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
@@ -909,15 +924,76 @@ class LocalRef[T](val i: Int)(implicit tti: TypeInfo[T]) extends Settable[T] {
         il += new VarInsnNode(tti.storeOp, i)
       }
     }
+}
 
-  def storeInsn: Code[Unit] = Code(new VarInsnNode(tti.storeOp, i))
+class LocalRef[T](var mb: MethodBuilder, val name: String)(implicit tti: TypeInfo[T]) extends Settable[T] { self =>
+  // for debugging locals reference in the wrong method
+  // val stack = Thread.currentThread().getStackTrace
+
+  private var i: Int = -1
+
+  def allocate(newMB: MethodBuilder): Unit = {
+    if (mb == null)
+      mb = newMB
+    else {
+      /*
+      if (mb ne newMB)
+        println(stack.mkString("\n"))
+       */
+      assert(mb eq newMB)
+    }
+
+    if (i == -1)
+      i = mb.allocateLocal(name)(tti)
+  }
+
+  def allocate(newMB: MethodBuilder, x: VarInsnNode): Unit = {
+    allocate(newMB)
+    assert(x.`var` == -1)
+    assert(i >= 0)
+    x.`var` = i
+  }
+
+  def allocate(newMB: MethodBuilder, x: IincInsnNode): Unit = {
+    allocate(newMB)
+    assert(x.`var` == -1)
+    assert(i >= 0)
+    x.`var` = i
+  }
+
+  def get: Code[T] =
+    new Code[T] {
+      def emit(il: Growable[AbstractInsnNode]): Unit = {
+        val x = new VarInsnNode(tti.loadOp, -1)
+        MethodBuilder.registerLocalInsn(x, self)
+        il += x
+      }
+    }
+
+  def store(rhs: Code[T]): Code[Unit] =
+    new Code[Unit] {
+      def emit(il: Growable[AbstractInsnNode]): Unit = {
+        rhs.emit(il)
+        val x = new VarInsnNode(tti.storeOp, -1)
+        MethodBuilder.registerLocalInsn(x, self)
+        il += x
+      }
+    }
+
+  def storeInsn: Code[Unit] = {
+    val x = new VarInsnNode(tti.storeOp, -1)
+    MethodBuilder.registerLocalInsn(x, self)
+    Code(x)
+  }
 }
 
 class LocalRefInt(val v: LocalRef[Int]) extends AnyRef {
   def +=(i: Int): Code[Unit] = {
     new Code[Unit] {
       def emit(il: Growable[AbstractInsnNode]): Unit = {
-        il += new IincInsnNode(v.i, i)
+        val x = new IincInsnNode(-1, i)
+        MethodBuilder.registerLocalInsn(x, v)
+        il += x
       }
     }
   }

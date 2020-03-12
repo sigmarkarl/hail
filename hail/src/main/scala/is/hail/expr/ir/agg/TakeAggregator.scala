@@ -2,14 +2,14 @@ package is.hail.expr.ir.agg
 
 import is.hail.annotations.{Region, StagedRegionValueBuilder}
 import is.hail.asm4s.{Code, _}
-import is.hail.expr.ir.{EmitFunctionBuilder, EmitTriplet}
+import is.hail.expr.ir.{EmitFunctionBuilder, EmitCode}
 import is.hail.expr.types.physical._
 import is.hail.io.{BufferSpec, InputBuffer, OutputBuffer}
 import is.hail.utils._
 
 class TakeRVAS(val eltType: PType, val resultType: PArray, val fb: EmitFunctionBuilder[_]) extends AggregatorState {
   private val r: ClassFieldRef[Region] = fb.newField[Region]
-  val region: Code[Region] = r.load()
+  val region: Value[Region] = r
 
   val builder = new StagedArrayBuilder(eltType, fb, region)
   val storageType: PTuple = PTuple(true, PInt32Required, builder.stateType)
@@ -21,13 +21,13 @@ class TakeRVAS(val eltType: PType, val resultType: PArray, val fb: EmitFunctionB
 
   def createState: Code[Unit] = region.isNull.mux(r := Region.stagedCreate(regionSize), Code._empty)
 
-  override def load(regionLoader: Code[Region] => Code[Unit], src: Code[Long]): Code[Unit] =
+  override def load(regionLoader: Value[Region] => Code[Unit], src: Code[Long]): Code[Unit] =
     Code(
       regionLoader(r),
       maxSize := Region.loadInt(maxSizeOffset(src)),
       builder.loadFrom(builderStateOffset(src)))
 
-  override def store(regionStorer: Code[Region] => Code[Unit], dest: Code[Long]): Code[Unit] =
+  override def store(regionStorer: Value[Region] => Code[Unit], dest: Code[Long]): Code[Unit] =
     region.isValid.orEmpty(
       Code(
         regionStorer(region),
@@ -35,16 +35,16 @@ class TakeRVAS(val eltType: PType, val resultType: PArray, val fb: EmitFunctionB
         Region.storeInt(maxSizeOffset(dest), maxSize),
         builder.storeTo(builderStateOffset(dest))))
 
-  def serialize(codec: BufferSpec): Code[OutputBuffer] => Code[Unit] = {
-    { ob: Code[OutputBuffer] =>
+  def serialize(codec: BufferSpec): Value[OutputBuffer] => Code[Unit] = {
+    { ob: Value[OutputBuffer] =>
       Code(
         ob.writeInt(maxSize),
         builder.serialize(codec)(ob))
     }
   }
 
-  def deserialize(codec: BufferSpec): Code[InputBuffer] => Code[Unit] = {
-    { ib: Code[InputBuffer] =>
+  def deserialize(codec: BufferSpec): Value[InputBuffer] => Code[Unit] = {
+    { ib: Value[InputBuffer] =>
 
       Code(
         maxSize := ib.readInt(),
@@ -59,7 +59,7 @@ class TakeRVAS(val eltType: PType, val resultType: PArray, val fb: EmitFunctionB
     )
   }
 
-  def seqOp(elt: EmitTriplet): Code[Unit] = {
+  def seqOp(elt: EmitCode): Code[Unit] = {
     Code(
       elt.setup,
       (builder.size < maxSize)
@@ -118,18 +118,18 @@ class TakeAggregator(typ: PType) extends StagedAggregator {
   def createState(fb: EmitFunctionBuilder[_]): State =
     new TakeRVAS(typ, resultType, fb)
 
-  def initOp(state: State, init: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
+  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
     assert(init.length == 1)
     val Array(sizeTriplet) = init
     Code(
       sizeTriplet.setup,
-      sizeTriplet.m.orEmpty(Code._fatal(s"argument 'n' for 'hl.agg.take' may not be missing")),
+      sizeTriplet.m.orEmpty(Code._fatal[Unit](s"argument 'n' for 'hl.agg.take' may not be missing")),
       state.init(coerce[Int](sizeTriplet.v))
     )
   }
 
-  def seqOp(state: State, seq: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
-    val Array(elt: EmitTriplet) = seq
+  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
+    val Array(elt: EmitCode) = seq
     state.seqOp(elt)
   }
 

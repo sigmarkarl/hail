@@ -171,8 +171,8 @@ object RichContextRDDRegionValue {
   }
 }
 
-class RichContextRDDRegionValue(val crdd: ContextRDD[RVDContext, RegionValue]) extends AnyVal {
-  def boundary: ContextRDD[RVDContext, RegionValue] =
+class RichContextRDDRegionValue(val crdd: ContextRDD[RegionValue]) extends AnyVal {
+  def boundary: ContextRDD[RegionValue] =
     crdd.cmapPartitionsAndContext { (consumerCtx, part) =>
       val producerCtx = consumerCtx.freshContext
       val it = part.flatMap(_ (producerCtx))
@@ -216,6 +216,6 @@ class RichContextRDDRegionValue(val crdd: ContextRDD[RVDContext, RegionValue]) e
   }
 
   def toRows(rowType: PStruct): RDD[Row] = {
-    crdd.run.map(rv => SafeRow(rowType, rv.region, rv.offset))
+    crdd.run.map(rv => SafeRow(rowType, rv.offset))
   }
 }

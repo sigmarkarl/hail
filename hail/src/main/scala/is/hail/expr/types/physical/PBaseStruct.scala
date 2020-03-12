@@ -2,6 +2,7 @@ package is.hail.expr.types.physical
 
 import is.hail.annotations._
 import is.hail.asm4s.{Code, _}
+import is.hail.check.Gen
 import is.hail.expr.ir.{EmitMethodBuilder, SortOrder}
 import is.hail.utils._
 
@@ -115,14 +116,14 @@ abstract class PBaseStruct extends PType {
       types.zip(right.types).map { case (l, r) => l.unsafeOrdering(r)}
 
     new UnsafeOrdering {
-      def compare(r1: Region, o1: Long, r2: Region, o2: Long): Int = {
+      def compare(o1: Long, o2: Long): Int = {
         var i = 0
         while (i < types.length) {
           val leftDefined = isFieldDefined(o1, i)
           val rightDefined = right.isFieldDefined(o2, i)
 
           if (leftDefined && rightDefined) {
-            val c = fieldOrderings(i).compare(r1, loadField(o1, i), r2, right.loadField(o2, i))
+            val c = fieldOrderings(i).compare(loadField(o1, i), right.loadField(o2, i))
             if (c != 0)
               return c
           } else if (leftDefined != rightDefined) {
@@ -174,4 +175,11 @@ abstract class PBaseStruct extends PType {
   def loadField(offset: Code[Long], fieldIdx: Int): Code[Long]
 
   override def containsPointers: Boolean = types.exists(_.containsPointers)
+
+  override def genNonmissingValue: Gen[Annotation] = {
+    if (types.isEmpty) {
+      Gen.const(Annotation.empty)
+    } else
+      Gen.uniformSequence(types.map(t => t.genValue)).map(a => Annotation(a: _*))
+  }
 }

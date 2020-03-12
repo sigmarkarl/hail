@@ -40,7 +40,7 @@ object StagedRegionValueBuilder {
     deepCopy(er.mb.fb, er.region, typ, value, dest)
 }
 
-class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, var region: Code[Region], val pOffset: Code[Long]) {
+class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, var region: Value[Region], val pOffset: Value[Long]) {
   def this(mb: MethodBuilder, typ: PType, parent: StagedRegionValueBuilder) = {
     this(mb, typ, parent.region, parent.currentOffset)
   }
@@ -49,7 +49,7 @@ class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, va
     this(fb.apply_method, rowType, fb.apply_method.getArg[Region](1), null)
   }
 
-  def this(fb: FunctionBuilder[_], rowType: PType, pOffset: Code[Long]) = {
+  def this(fb: FunctionBuilder[_], rowType: PType, pOffset: Value[Long]) = {
     this(fb.apply_method, rowType, fb.apply_method.getArg[Region](1), pOffset)
   }
 
@@ -57,7 +57,7 @@ class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, va
     this(mb, rowType, mb.getArg[Region](1), null)
   }
 
-  def this(mb: MethodBuilder, rowType: PType, r: Code[Region]) = {
+  def this(mb: MethodBuilder, rowType: PType, r: Value[Region]) = {
     this(mb, rowType, r, null)
   }
 
@@ -80,11 +80,11 @@ class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, va
     case _ =>
   }
 
-  def offset: Code[Long] = startOffset
+  def offset: Value[Long] = startOffset
 
-  def arrayIdx: Code[Int] = idx
+  def arrayIdx: Value[Int] = idx
 
-  def currentOffset: Code[Long] = {
+  def currentOffset: Value[Long] = {
     ftype match {
       case _: PBaseStruct => elementsOffset
       case _: PArray => elementsOffset
@@ -110,17 +110,18 @@ class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, va
     }
   }
 
-  def start(length: Code[Int], init: Boolean = true): Code[Unit] = {
-    val t = ftype.asInstanceOf[PArray]
-    var c = startOffset.store(t.allocate(region, length))
-    if (pOffset != null) {
-      c = Code(c, Region.storeAddress(pOffset, startOffset))
+  def start(length: Code[Int], init: Boolean = true): Code[Unit] =
+    Code.memoize(length, "srvb_start_length") { length =>
+      val t = ftype.asInstanceOf[PArray]
+      var c = startOffset.store(t.allocate(region, length))
+      if (pOffset != null) {
+        c = Code(c, Region.storeAddress(pOffset, startOffset))
+      }
+      if (init)
+        c = Code(c, t.stagedInitialize(startOffset, length))
+      c = Code(c, elementsOffset.store(startOffset + t.elementsOffset(length)))
+      Code(c, idx.store(0))
     }
-    if (init)
-      c = Code(c, t.stagedInitialize(startOffset, length))
-    c = Code(c, elementsOffset.store(startOffset + t.elementsOffset(length)))
-    Code(c, idx.store(0))
-  }
 
   def start(init: Boolean): Code[Unit] = {
     val t = ftype.asInstanceOf[PCanonicalBaseStruct]
@@ -141,7 +142,7 @@ class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, va
       case t: PArray => t.setElementMissing(startOffset, idx)
       case t: PCanonicalBaseStruct =>
         if (t.fieldRequired(staticIdx))
-          Code._fatal(s"Required field cannot be missing: $t, $staticIdx")
+          Code._fatal[Unit](s"Required field cannot be missing: $t, $staticIdx")
         else
           t.setFieldMissing(startOffset, staticIdx)
     }
@@ -158,32 +159,32 @@ class StagedRegionValueBuilder private(val mb: MethodBuilder, val typ: PType, va
 
   def checkType(knownType: Type): Unit = {
     val current = currentPType().virtualType
-    if (!current.isOfType(knownType))
+    if (current != knownType)
       throw new RuntimeException(s"bad SRVB addition: expected $current, tried to add $knownType")
   }
 
   def addBoolean(v: Code[Boolean]): Code[Unit] = {
-    checkType(TBoolean())
+    checkType(TBoolean)
     Region.storeByte(currentOffset, v.toI.toB)
   }
 
   def addInt(v: Code[Int]): Code[Unit] = {
-    checkType(TInt32())
+    checkType(TInt32)
     Region.storeInt(currentOffset, v)
   }
 
   def addLong(v: Code[Long]): Code[Unit] = {
-    checkType(TInt64())
+    checkType(TInt64)
     Region.storeLong(currentOffset, v)
   }
 
   def addFloat(v: Code[Float]): Code[Unit] = {
-    checkType(TFloat32())
+    checkType(TFloat32)
     Region.storeFloat(currentOffset, v)
   }
 
   def addDouble(v: Code[Double]): Code[Unit] = {
-    checkType(TFloat64())
+    checkType(TFloat64)
     Region.storeDouble(currentOffset, v)
   }
 

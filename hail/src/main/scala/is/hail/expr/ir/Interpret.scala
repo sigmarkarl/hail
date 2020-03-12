@@ -78,23 +78,23 @@ object Interpret {
           null
         else
           (v.typ, t) match {
-            case (_: TInt32, _: TInt32) => vValue
-            case (_: TInt32, _: TInt64) => vValue.asInstanceOf[Int].toLong
-            case (_: TInt32, _: TFloat32) => vValue.asInstanceOf[Int].toFloat
-            case (_: TInt32, _: TFloat64) => vValue.asInstanceOf[Int].toDouble
-            case (_: TInt64, _: TInt64) => vValue
-            case (_: TInt64, _: TInt32) => vValue.asInstanceOf[Long].toInt
-            case (_: TInt64, _: TFloat32) => vValue.asInstanceOf[Long].toFloat
-            case (_: TInt64, _: TFloat64) => vValue.asInstanceOf[Long].toDouble
-            case (_: TFloat32, _: TFloat32) => vValue
-            case (_: TFloat32, _: TInt32) => vValue.asInstanceOf[Float].toInt
-            case (_: TFloat32, _: TInt64) => vValue.asInstanceOf[Float].toLong
-            case (_: TFloat32, _: TFloat64) => vValue.asInstanceOf[Float].toDouble
-            case (_: TFloat64, _: TFloat64) => vValue
-            case (_: TFloat64, _: TInt32) => vValue.asInstanceOf[Double].toInt
-            case (_: TFloat64, _: TInt64) => vValue.asInstanceOf[Double].toLong
-            case (_: TFloat64, _: TFloat32) => vValue.asInstanceOf[Double].toFloat
-            case (_: TInt32, _: TCall) => vValue
+            case (TInt32, TInt32) => vValue
+            case (TInt32, TInt64) => vValue.asInstanceOf[Int].toLong
+            case (TInt32, TFloat32) => vValue.asInstanceOf[Int].toFloat
+            case (TInt32, TFloat64) => vValue.asInstanceOf[Int].toDouble
+            case (TInt64, TInt64) => vValue
+            case (TInt64, TInt32) => vValue.asInstanceOf[Long].toInt
+            case (TInt64, TFloat32) => vValue.asInstanceOf[Long].toFloat
+            case (TInt64, TFloat64) => vValue.asInstanceOf[Long].toDouble
+            case (TFloat32, TFloat32) => vValue
+            case (TFloat32, TInt32) => vValue.asInstanceOf[Float].toInt
+            case (TFloat32, TInt64) => vValue.asInstanceOf[Float].toLong
+            case (TFloat32, TFloat64) => vValue.asInstanceOf[Float].toDouble
+            case (TFloat64, TFloat64) => vValue
+            case (TFloat64, TInt32) => vValue.asInstanceOf[Double].toInt
+            case (TFloat64, TInt64) => vValue.asInstanceOf[Double].toLong
+            case (TFloat64, TFloat32) => vValue.asInstanceOf[Double].toFloat
+            case (TInt32, TCall) => vValue
           }
       case CastRename(v, _) => interpret(v)
       case NA(_) => null
@@ -105,7 +105,7 @@ object Interpret {
           .headOption
           .orNull
       case If(cond, cnsq, altr) =>
-        assert(cnsq.typ isOfType altr.typ)
+        assert(cnsq.typ == altr.typ)
         val condValue = interpret(cond, env, args)
         if (condValue == null)
           null
@@ -124,7 +124,7 @@ object Interpret {
           null
         else
           (l.typ, r.typ) match {
-            case (_: TInt32, _: TInt32) =>
+            case (TInt32, TInt32) =>
               val ll = lValue.asInstanceOf[Int]
               val rr = rValue.asInstanceOf[Int]
               (op: @unchecked) match {
@@ -140,7 +140,7 @@ object Interpret {
                 case RightShift() => ll >> rr
                 case LogicalRightShift() => ll >>> rr
               }
-            case (_: TInt64, _: TInt32) =>
+            case (TInt64, TInt32) =>
               val ll = lValue.asInstanceOf[Long]
               val rr = rValue.asInstanceOf[Int]
               (op: @unchecked) match {
@@ -148,7 +148,7 @@ object Interpret {
                 case RightShift() => ll >> rr
                 case LogicalRightShift() => ll >>> rr
               }
-            case (_: TInt64, _: TInt64) =>
+            case (TInt64, TInt64) =>
               val ll = lValue.asInstanceOf[Long]
               val rr = rValue.asInstanceOf[Long]
               (op: @unchecked) match {
@@ -163,7 +163,7 @@ object Interpret {
                 case LeftShift() => ll << rr
                 case RightShift() => ll >> rr
               }
-            case (_: TFloat32, _: TFloat32) =>
+            case (TFloat32, TFloat32) =>
               val ll = lValue.asInstanceOf[Float]
               val rr = rValue.asInstanceOf[Float]
               (op: @unchecked) match {
@@ -173,7 +173,7 @@ object Interpret {
                 case FloatingPointDivide() => ll / rr
                 case RoundToNegInfDivide() => math.floor(ll / rr).toFloat
               }
-            case (_: TFloat64, _: TFloat64) =>
+            case (TFloat64, TFloat64) =>
               val ll = lValue.asInstanceOf[Double]
               val rr = rValue.asInstanceOf[Double]
               (op: @unchecked) match {
@@ -190,20 +190,20 @@ object Interpret {
           null
         else op match {
           case Bang() =>
-            assert(x.typ.isOfType(TBoolean()))
+            assert(x.typ == TBoolean)
             !xValue.asInstanceOf[Boolean]
           case Negate() =>
             assert(x.typ.isInstanceOf[TNumeric])
             x.typ match {
-              case TInt32(_) => -xValue.asInstanceOf[Int]
-              case TInt64(_) => -xValue.asInstanceOf[Long]
-              case TFloat32(_) => -xValue.asInstanceOf[Float]
-              case TFloat64(_) => -xValue.asInstanceOf[Double]
+              case TInt32 => -xValue.asInstanceOf[Int]
+              case TInt64 => -xValue.asInstanceOf[Long]
+              case TFloat32 => -xValue.asInstanceOf[Float]
+              case TFloat64 => -xValue.asInstanceOf[Double]
             }
           case BitNot() =>
             x.typ match {
-              case _: TInt32 => ~xValue.asInstanceOf[Int]
-              case _: TInt64 => ~xValue.asInstanceOf[Long]
+              case TInt32 => ~xValue.asInstanceOf[Int]
+              case TInt64 => ~xValue.asInstanceOf[Long]
             }
         }
       case ApplyComparisonOp(op, l, r) =>
@@ -564,7 +564,7 @@ object Interpret {
 
           try {
             val resultOffset = f(region, offset, false)
-            SafeRow(rt.asInstanceOf[PTuple], region, resultOffset).get(0)
+            SafeRow(rt.asInstanceOf[PTuple], resultOffset).get(0)
           } catch {
             case e: Exception =>
               fatal(s"error while calling '${ ir.implementation.name }'", e)
@@ -611,7 +611,7 @@ object Interpret {
             MakeTuple.ordered(FastSeq(extracted.postAggIR)))
 
           Region.scoped { region =>
-            SafeRow(rt, region, f(0, region)(region, globalsOffset, false))
+            SafeRow(rt, f(0, region)(region, globalsOffset, false))
           }
         } else {
           val spec = BufferSpec.defaultUncompressed
@@ -641,7 +641,7 @@ object Interpret {
             physicalAggs,
             "global", value.globals.t,
             Let(res, extracted.results, MakeTuple.ordered(FastSeq(extracted.postAggIR))))
-          assert(rTyp.types(0).virtualType isOfType query.typ)
+          assert(rTyp.types(0).virtualType == query.typ)
 
           val useTreeAggregate = extracted.shouldTreeAggregate
           val isCommutative = extracted.isCommutative
@@ -658,7 +658,7 @@ object Interpret {
               }
             },
             { (i: Int, ctx: RVDContext, it: Iterator[RegionValue]) =>
-              val partRegion = ctx.freshRegion
+              val partRegion = ctx.partitionRegion
               val globalsOffset = globalsBc.value.readRegionValue(partRegion)
               val init = initOp(i, partRegion)
               val seqOps = partitionOpSeq(i, partRegion)
@@ -679,7 +679,7 @@ object Interpret {
             val resF = f(0, r)
             Region.smallScoped { aggRegion =>
               resF.setAggState(aggRegion, read(aggRegion, aggResults))
-              SafeRow(rTyp, r, resF(r, globalsOffset, false))
+              SafeRow(rTyp, resF(r, globalsOffset, false))
             }
           }
         }
@@ -688,7 +688,7 @@ object Interpret {
       case LiftMeOut(child) =>
         val (rt, makeFunction) = Compile[Long](ctx, MakeTuple.ordered(FastSeq(child)), None, false)
         Region.scoped { r =>
-          SafeRow.read(rt, r, makeFunction(0, r)(r)).asInstanceOf[Row](0)
+          SafeRow.read(rt, makeFunction(0, r)(r)).asInstanceOf[Row](0)
         }
 
     }

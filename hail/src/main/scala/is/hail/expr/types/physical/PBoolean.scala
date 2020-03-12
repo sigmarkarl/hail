@@ -9,14 +9,14 @@ case object PBooleanOptional extends PBoolean(false)
 case object PBooleanRequired extends PBoolean(true)
 
 class PBoolean(override val required: Boolean) extends PType with PPrimitive {
-  lazy val virtualType: TBoolean = TBoolean(required)
+  lazy val virtualType: TBoolean.type  = TBoolean
 
   def _asIdent = "bool"
 
   override def _pretty(sb: StringBuilder, indent: Int, compact: Boolean): Unit = sb.append("PBoolean")
 
   override def unsafeOrdering(): UnsafeOrdering = new UnsafeOrdering {
-    def compare(r1: Region, o1: Long, r2: Region, o2: Long): Int = {
+    def compare(o1: Long, o2: Long): Int = {
       java.lang.Boolean.compare(Region.loadBoolean(o1), Region.loadBoolean(o2))
     }
   }

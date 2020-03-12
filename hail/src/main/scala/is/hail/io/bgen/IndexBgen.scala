@@ -71,11 +71,11 @@ object IndexBgen {
       0, // nSamples not used if there are no entries
       TableType(rowType = TStruct(
         "locus" -> TLocus.schemaFromRG(referenceGenome),
-        "alleles" -> TArray(TString()),
-        "offset" -> TInt64(),
-        "file_idx" -> TInt32()),
+        "alleles" -> TArray(TString),
+        "offset" -> TInt64,
+        "file_idx" -> TInt32),
         key = Array("locus", "alleles"),
-        globalType = TStruct()),
+        globalType = TStruct.empty),
       referenceGenome.map(_.broadcast),
       annotationType.virtualType
     )

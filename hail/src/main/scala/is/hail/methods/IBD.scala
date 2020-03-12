@@ -204,7 +204,7 @@ object IBD {
     min: Option[Double],
     max: Option[Double],
     sampleIds: IndexedSeq[String],
-    bounded: Boolean): ContextRDD[RVDContext, RegionValue] = {
+    bounded: Boolean): ContextRDD[RegionValue] = {
 
     val nSamples = input.nCols
 
@@ -251,7 +251,7 @@ object IBD {
       })
       .map { case ((s, v), gs) => (v, (s, IBSFFI.pack(chunkSize, chunkSize, gs))) }
 
-    val joined = ContextRDD.weaken[RVDContext](chunkedGenotypeMatrix.join(chunkedGenotypeMatrix)
+    val joined = ContextRDD.weaken(chunkedGenotypeMatrix.join(chunkedGenotypeMatrix)
       // optimization: Ignore chunks below the diagonal
       .filter { case (_, ((i, _), (j, _))) => j >= i }
       .map { case (_, ((s1, gs1), (s2, gs2))) =>
@@ -301,7 +301,7 @@ object IBD {
     val rvRowType = input.rvRowType
     val rvRowPType = input.rvRowPType
     val field = rvRowType.field(fieldName)
-    assert(field.typ.isOfType(TFloat64()))
+    assert(field.typ == TFloat64)
     val rowKeysF = input.typ.extractRowKey
     val entriesIdx = input.entriesIdx
 
@@ -341,7 +341,7 @@ case class IBD(
   def preservesPartitionCounts: Boolean = false
 
   def typ(childType: MatrixType): TableType =
-    TableType(IBD.ibdPType.virtualType, IBD.ibdKey, TStruct.empty())
+    TableType(IBD.ibdPType.virtualType, IBD.ibdKey, TStruct.empty)
 
   def execute(ctx: ExecuteContext, input: MatrixValue): TableValue = {
     input.requireUniqueSamples("ibd")

@@ -4,7 +4,7 @@ import is.hail.annotations._
 import is.hail.asm4s._
 import is.hail.check.{Arbitrary, Gen}
 import is.hail.expr.ir
-import is.hail.expr.ir.{Ascending, Descending, EmitMethodBuilder, IRParser, PValue, SortOrder}
+import is.hail.expr.ir._
 import is.hail.expr.types.virtual._
 import is.hail.expr.types.{BaseType, Requiredness}
 import is.hail.utils._
@@ -106,14 +106,14 @@ object PType {
 
   def canonical(t: Type, required: Boolean): PType = {
     t match {
-      case _: TInt32 => PInt32(required)
-      case _: TInt64 => PInt64(required)
-      case _: TFloat32 => PFloat32(required)
-      case _: TFloat64 => PFloat64(required)
-      case _: TBoolean => PBoolean(required)
-      case _: TBinary => PBinary(required)
-      case _: TString => PString(required)
-      case _: TCall => PCall(required)
+      case TInt32 => PInt32(required)
+      case TInt64 => PInt64(required)
+      case TFloat32 => PFloat32(required)
+      case TFloat64 => PFloat64(required)
+      case TBoolean => PBoolean(required)
+      case TBinary => PBinary(required)
+      case TString => PString(required)
+      case TCall => PCall(required)
       case t: TLocus => PLocus(t.rg, required)
       case t: TInterval => PInterval(canonical(t.pointType), required)
       case t: TStream => PStream(canonical(t.elementType), required)
@@ -157,6 +157,11 @@ object PType {
 abstract class PType extends Serializable with Requiredness {
   self =>
 
+  def genValue: Gen[Annotation] =
+    if (required) genNonmissingValue else Gen.nextCoin(0.05).flatMap(isEmpty => if (isEmpty) Gen.const(null) else genNonmissingValue)
+
+  def genNonmissingValue: Gen[Annotation] = virtualType.genNonmissingValue
+
   def virtualType: Type
 
   override def toString: String = {
@@ -170,7 +175,7 @@ abstract class PType extends Serializable with Requiredness {
   def isCanonical: Boolean = PType.canonical(this) == this // will recons, may need to rewrite this method
 
   def unsafeOrdering(rightType: PType): UnsafeOrdering = {
-    require(virtualType isOfType rightType.virtualType, s"$this, $rightType")
+    require(virtualType == rightType.virtualType, s"$this, $rightType")
     unsafeOrdering()
   }
 
@@ -214,31 +219,7 @@ abstract class PType extends Serializable with Requiredness {
 
   def setRequired(required: Boolean): PType
 
-  final def isOfType(t: PType): Boolean = {
-    this match {
-      case PBinary(_) => t == PCanonicalBinaryOptional || t == PCanonicalBinaryRequired
-      case PBoolean(_) => t == PBooleanOptional || t == PBooleanRequired
-      case PInt32(_) => t == PInt32Optional || t == PInt32Required
-      case PInt64(_) => t == PInt64Optional || t == PInt64Required
-      case PFloat32(_) => t == PFloat32Optional || t == PFloat32Required
-      case PFloat64(_) => t == PFloat64Optional || t == PFloat64Required
-      case _: PString => t.isInstanceOf[PString]
-      case _: PCall => t.isInstanceOf[PCall]
-      case t2: PLocus => t.isInstanceOf[PLocus] && t.asInstanceOf[PLocus].rg == t2.rg
-      case t2: PInterval => t.isInstanceOf[PInterval] && t.asInstanceOf[PInterval].pointType.isOfType(t2.pointType)
-      case t2: PStruct =>
-        t.isInstanceOf[PStruct] &&
-          t.asInstanceOf[PStruct].size == t2.size &&
-          t.asInstanceOf[PStruct].fields.zip(t2.fields).forall { case (f1: PField, f2: PField) => f1.typ.isOfType(f2.typ) && f1.name == f2.name }
-      case t2: PTuple =>
-        t.isInstanceOf[PTuple] &&
-          t.asInstanceOf[PTuple].size == t2.size &&
-          t.asInstanceOf[PTuple].types.zip(t2.types).forall { case (typ1, typ2) => typ1.isOfType(typ2) }
-      case t2: PArray => t.isInstanceOf[PArray] && t.asInstanceOf[PArray].elementType.isOfType(t2.elementType)
-      case t2: PSet => t.isInstanceOf[PSet] && t.asInstanceOf[PSet].elementType.isOfType(t2.elementType)
-      case t2: PDict => t.isInstanceOf[PDict] && t.asInstanceOf[PDict].keyType.isOfType(t2.keyType) && t.asInstanceOf[PDict].valueType.isOfType(t2.valueType)
-    }
-  }
+  final def isOfType(t: PType): Boolean = this.virtualType == t.virtualType
 
   final def isPrimitive: Boolean =
     fundamentalType.isInstanceOf[PBoolean] || isNumeric
@@ -272,7 +253,7 @@ abstract class PType extends Serializable with Requiredness {
         val ti = t.asInstanceOf[TInterval]
         PCanonicalInterval(p.subsetTo(ti.pointType), r)
       case _ =>
-        assert(virtualType isOfType t)
+        assert(virtualType == t)
         this
     }
   }
@@ -310,8 +291,14 @@ abstract class PType extends Serializable with Requiredness {
 
   def deepRename(t: Type) = this
 
-  def defaultValue: PValue = PValue(this, ir.defaultValue(this))
+  def defaultValue: PCode = PCode(this, ir.defaultValue(this))
 
-  def copyFromPValue(mb: MethodBuilder, region: Code[Region], pv: PValue): PValue =
-    PValue(this, copyFromTypeAndStackValue(mb, region, pv.pt, pv.code))
+  def copyFromPValue(mb: MethodBuilder, region: Code[Region], pv: PCode): PCode =
+    PCode(this, copyFromTypeAndStackValue(mb, region, pv.pt, pv.code))
+
+  final def typeCheck(a: Any): Boolean = a == null || _typeCheck(a)
+
+  def _typeCheck(a: Any): Boolean = virtualType._typeCheck(a)
+
+  def load(src: Code[Long]): PCode = PCode(this, Region.loadIRIntermediate(this)(src))
 }

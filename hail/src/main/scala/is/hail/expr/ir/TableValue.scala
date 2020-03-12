@@ -18,8 +18,8 @@ import org.apache.spark.storage.StorageLevel
 import org.json4s.jackson.JsonMethods
 
 object TableValue {
-  def apply(ctx: ExecuteContext, rowType: PStruct, key: IndexedSeq[String], rdd: ContextRDD[RVDContext, RegionValue]): TableValue = {
-    val tt = TableType(rowType.virtualType, key, TStruct.empty())
+  def apply(ctx: ExecuteContext, rowType: PStruct, key: IndexedSeq[String], rdd: ContextRDD[RegionValue]): TableValue = {
+    val tt = TableType(rowType.virtualType, key, TStruct.empty)
     TableValue(tt,
       BroadcastRow.empty(ctx),
       RVD.coerce(RVDType(rowType, key), rdd, ctx))
@@ -27,22 +27,22 @@ object TableValue {
 
   def apply(ctx: ExecuteContext, rowType:  TStruct, key: IndexedSeq[String], rdd: RDD[Row], rowPType: Option[PStruct] = None): TableValue = {
     val canonicalRowType = rowPType.getOrElse(PStruct.canonical(rowType))
-    val tt = TableType(rowType, key, TStruct.empty())
+    val tt = TableType(rowType, key, TStruct.empty)
     TableValue(tt,
       BroadcastRow.empty(ctx),
       RVD.coerce(
         RVDType(canonicalRowType, key),
-        ContextRDD.weaken[RVDContext](rdd).toRegionValues(canonicalRowType),
+        ContextRDD.weaken(rdd).toRegionValues(canonicalRowType),
         ctx))
   }
 }
 
 case class TableValue(typ: TableType, globals: BroadcastRow, rvd: RVD) {
-  if (!(typ.rowType.isOfType(rvd.rowType)))
+  if (typ.rowType != rvd.rowType)
     throw new RuntimeException(s"row mismatch:\n  typ: ${ typ.rowType.parsableString() }\n  rvd: ${ rvd.rowType.parsableString() }")
   if (!rvd.typ.key.startsWith(typ.key))
     throw new RuntimeException(s"key mismatch:\n  typ: ${ typ.key }\n  rvd: ${ rvd.typ.key }")
-  if (!(typ.globalType.isOfType(globals.t.virtualType)))
+  if (typ.globalType != globals.t.virtualType)
     throw new RuntimeException(s"globals mismatch:\n  typ: ${ typ.globalType.parsableString() }\n  val: ${ globals.t.virtualType.parsableString() }")
 
   def rdd: RDD[Row] =
@@ -55,7 +55,7 @@ case class TableValue(typ: TableType, globals: BroadcastRow, rvd: RVD) {
     val localGlobals = globals.broadcast
     copy(rvd = rvd.filterWithContext[(P, RegionValue)](
       { (partitionIdx, ctx) =>
-        val globalRegion = ctx.freshRegion
+        val globalRegion = ctx.partitionRegion
         (partitionOp(partitionIdx, globalRegion), RegionValue(globalRegion, localGlobals.value.readRegionValue(globalRegion)))
       }, { case ((p, glob), rv) => pred(p, rv, glob) }))
   }
@@ -158,7 +158,7 @@ case class TableValue(typ: TableType, globals: BroadcastRow, rvd: RVD) {
     entriesFieldName: String = LowerMatrixIR.entriesFieldName): MatrixValue = {
 
     val (colType, colsFieldIdx) = typ.globalType.field(colsFieldName) match {
-      case Field(_, TArray(t@TStruct(_, _), _), idx) => (t, idx)
+      case Field(_, TArray(t@TStruct(_)), idx) => (t, idx)
       case Field(_, t, _) => fatal(s"expected cols field to be an array of structs, found $t")
     }
 

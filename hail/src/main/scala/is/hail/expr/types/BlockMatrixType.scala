@@ -13,9 +13,9 @@ object BlockMatrixSparsity {
 
   def apply(nRows: Int, nCols: Int)(exists: (Int, Int) => Boolean): BlockMatrixSparsity = {
     var i = 0
-    var j = 0
     builder.clear()
     while (i < nRows) {
+      var j = 0
       while (j < nCols) {
         if (exists(i, j))
           builder += i -> j
@@ -40,12 +40,26 @@ case class BlockMatrixSparsity(definedBlocks: Option[IndexedSeq[(Int, Int)]]) {
   def hasBlock(idx: (Int, Int)): Boolean = definedBlocks.isEmpty || blockSet.contains(idx)
   def condense(blockOverlaps: => (Array[Array[Int]], Array[Array[Int]])): BlockMatrixSparsity = {
     definedBlocks.map { _ =>
-      val defined = new ArrayBuilder[(Int, Int)]()
       val (ro, co) = blockOverlaps
       BlockMatrixSparsity(ro.length, co.length) { (i, j) =>
         ro(i).exists(ii => co(j).exists(jj => hasBlock(ii -> jj)))
       }
     }.getOrElse(BlockMatrixSparsity.dense)
+  }
+  def allBlocks(nRowBlocks: Int, nColBlocks: Int): IndexedSeq[(Int, Int)] = {
+    definedBlocks.getOrElse {
+      val foo = Array.fill[(Int, Int)](nRowBlocks * nColBlocks)(null)
+      var i = 0
+      while (i < nRowBlocks) {
+        var j = 0
+        while (j < nColBlocks) {
+          foo(i * nColBlocks + j) = i -> j
+          j += 1
+        }
+        i += 1
+      }
+      foo
+    }
   }
   override def toString: String =
     definedBlocks.map { blocks =>
@@ -84,7 +98,7 @@ object BlockMatrixType {
   def fromBlockMatrix(value: BlockMatrix): BlockMatrixType = {
     val sparsity = BlockMatrixSparsity.fromLinearBlocks(value.nRows, value.nCols, value.blockSize, value.gp.maybeBlocks)
     val (shape, isRowVector) = matrixToTensorShape(value.nRows, value.nCols)
-    BlockMatrixType(TFloat64(), shape, isRowVector, value.blockSize, sparsity)
+    BlockMatrixType(TFloat64, shape, isRowVector, value.blockSize, sparsity)
   }
 }
 
@@ -95,13 +109,6 @@ case class BlockMatrixType(
   blockSize: Int,
   sparsity: BlockMatrixSparsity
 ) extends BaseType {
-
-  override def isOfType(other: BaseType): Boolean = other match {
-    case bt: BlockMatrixType => elementType.isOfType(bt.elementType) && shape == bt.shape && isRowVector == bt.isRowVector &&
-      blockSize == bt.blockSize && sparsity == bt.sparsity
-    case _ => false
-  }
-
   lazy val (nRows: Long, nCols: Long) = BlockMatrixType.tensorToMatrixShape(shape, isRowVector)
 
   def matrixShape: (Long, Long) = nRows -> nCols
@@ -112,8 +119,17 @@ case class BlockMatrixType(
 
   def getBlockIdx(i: Long): Int = java.lang.Math.floorDiv(i, blockSize).toInt
   def isSparse: Boolean = sparsity.isSparse
+  def nDefinedBlocks: Int =
+    if (isSparse) sparsity.definedBlocks.get.length else nRowBlocks * nColBlocks
   def hasBlock(idx: (Int, Int)): Boolean = {
     if (isSparse) sparsity.hasBlock(idx) else true
+  }
+  def allBlocks: IndexedSeq[(Int, Int)] = sparsity.allBlocks(nRowBlocks, nColBlocks)
+
+  def blockShape(i: Int, j: Int): (Long, Long) = {
+    val r = if (i == nRowBlocks - 1) nRows - (i * blockSize) else blockSize
+    val c = if (i == nColBlocks - 1) nCols - (i * blockSize) else blockSize
+    r -> c
   }
 
   override def pretty(sb: StringBuilder, indent0: Int, compact: Boolean): Unit = {

@@ -2,7 +2,7 @@ package is.hail.expr.ir.agg
 
 import is.hail.annotations.{CodeOrdering, Region, StagedRegionValueBuilder}
 import is.hail.asm4s._
-import is.hail.expr.ir.{EmitFunctionBuilder, EmitRegion, EmitTriplet, defaultValue, typeToTypeInfo}
+import is.hail.expr.ir.{EmitFunctionBuilder, EmitRegion, EmitCode, defaultValue, typeToTypeInfo}
 import is.hail.expr.types.encoded.EType
 import is.hail.expr.types.physical._
 import is.hail.io._
@@ -66,7 +66,7 @@ class AppendOnlySetState(val fb: EmitFunctionBuilder[_], t: PType) extends Point
     "size" -> PInt32(true),
     "tree" -> PInt64(true))
 
-  override def load(regionLoader: Code[Region] => Code[Unit], src: Code[Long]): Code[Unit] = {
+  override def load(regionLoader: Value[Region] => Code[Unit], src: Code[Long]): Code[Unit] = {
     Code(super.load(regionLoader, src),
       off.ceq(0L).mux(Code._empty,
         Code(
@@ -74,7 +74,7 @@ class AppendOnlySetState(val fb: EmitFunctionBuilder[_], t: PType) extends Point
           root := Region.loadAddress(typ.loadField(off, 1)))))
   }
 
-  override def store(regionStorer: Code[Region] => Code[Unit], dest: Code[Long]): Code[Unit] = {
+  override def store(regionStorer: Value[Region] => Code[Unit], dest: Code[Long]): Code[Unit] = {
     Code(
       Region.storeInt(typ.fieldOffset(off, 0), size),
       Region.storeAddress(typ.fieldOffset(off, 1), root),
@@ -109,10 +109,10 @@ class AppendOnlySetState(val fb: EmitFunctionBuilder[_], t: PType) extends Point
     tree.init,
     tree.deepCopy(Region.loadAddress(typ.loadField(src, 1))))
 
-  def serialize(codec: BufferSpec): Code[OutputBuffer] => Code[Unit] = {
+  def serialize(codec: BufferSpec): Value[OutputBuffer] => Code[Unit] = {
     val kEnc = et.buildEncoderMethod(t, fb)
 
-    { ob: Code[OutputBuffer] =>
+    { ob: Value[OutputBuffer] =>
       tree.bulkStore(ob) { (ob, src) =>
         Code(
           ob.writeBoolean(key.isKeyMissing(src)),
@@ -122,12 +122,12 @@ class AppendOnlySetState(val fb: EmitFunctionBuilder[_], t: PType) extends Point
     }
   }
 
-  def deserialize(codec: BufferSpec): Code[InputBuffer] => Code[Unit] = {
+  def deserialize(codec: BufferSpec): Value[InputBuffer] => Code[Unit] = {
     val kDec = et.buildDecoderMethod(t, fb)
     val km = fb.newField[Boolean]("km")
     val kv = fb.newField("kv")(typeToTypeInfo(t))
 
-    { ib: Code[InputBuffer] =>
+    { ib: Value[InputBuffer] =>
       Code(
         init,
         tree.bulkLoad(ib) { (ib, dest) =>
@@ -148,12 +148,12 @@ class CollectAsSetAggregator(t: PType) extends StagedAggregator {
 
   def createState(fb: EmitFunctionBuilder[_]): State = new AppendOnlySetState(fb, t)
 
-  def initOp(state: State, init: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
+  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
     assert(init.length == 0)
     state.init
   }
 
-  def seqOp(state: State, seq: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
+  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
     val Array(elt) = seq
     Code(elt.setup, state.insert(elt.m, elt.v))
   }

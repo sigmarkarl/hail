@@ -27,12 +27,12 @@ package object ir {
   def typeToTypeInfo(t: PType): TypeInfo[_] = typeToTypeInfo(t.virtualType)
 
   def typeToTypeInfo(t: Type): TypeInfo[_] = t.fundamentalType match {
-    case _: TInt32 => typeInfo[Int]
-    case _: TInt64 => typeInfo[Long]
-    case _: TFloat32 => typeInfo[Float]
-    case _: TFloat64 => typeInfo[Double]
-    case _: TBoolean => typeInfo[Boolean]
-    case _: TBinary => typeInfo[Long]
+    case TInt32 => typeInfo[Int]
+    case TInt64 => typeInfo[Long]
+    case TFloat32 => typeInfo[Float]
+    case TFloat64 => typeInfo[Double]
+    case TBoolean => typeInfo[Boolean]
+    case TBinary => typeInfo[Long]
     case _: TArray => typeInfo[Long]
     case _: TBaseStruct => typeInfo[Long]
     case _: TStream => classInfo[Iterator[RegionValue]]
@@ -61,12 +61,14 @@ package object ir {
     val pred = genUID()
     ir.Let(pred,
       if (keep) irPred else ir.ApplyUnaryPrimOp(ir.Bang(), irPred),
-      ir.If(ir.IsNA(ir.Ref(pred, TBoolean())),
+      ir.If(ir.IsNA(ir.Ref(pred, TBoolean)),
         ir.False(),
-        ir.Ref(pred, TBoolean())))
+        ir.Ref(pred, TBoolean)))
   }
 
   private[ir] def coerce[T](c: Code[_]): Code[T] = asm4s.coerce(c)
+
+  private[ir] def coerce[T](c: Value[_]): Value[T] = asm4s.coerce(c)
 
   private[ir] def coerce[T](lr: Settable[_]): Settable[T] = lr.asInstanceOf[Settable[T]]
 
@@ -91,9 +93,17 @@ package object ir {
   implicit def booleanToIR(b: Boolean): IR = if (b) True() else False()
 
   def zero(t: Type): IR = t match {
-    case _: TInt32 => I32(0)
-    case _: TInt64 => I64(0L)
-    case _: TFloat32 => F32(0f)
-    case _: TFloat64 => F64(0d)
+    case TInt32 => I32(0)
+    case TInt64 => I64(0L)
+    case TFloat32 => F32(0f)
+    case TFloat64 => F64(0d)
   }
+
+  def mapIR(stream: IR)(f: IR => IR): IR = {
+    val ref = Ref(genUID(), coerce[TStream](stream.typ).elementType)
+    StreamMap(stream, ref.name, f(ref))
+  }
+
+  def rangeIR(n: IR): IR = StreamRange(0, n, 1)
+  def rangeIR(start: IR, stop: IR): IR = StreamRange(start, stop, 1)
 }

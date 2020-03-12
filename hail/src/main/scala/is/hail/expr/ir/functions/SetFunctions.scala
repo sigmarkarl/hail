@@ -6,10 +6,10 @@ import is.hail.utils.FastSeq
 
 object SetFunctions extends RegistryFunctions {
   def contains(set: IR, elem: IR) = {
-    val i = Ref(genUID(), TInt32())
+    val i = Ref(genUID(), TInt32)
 
     If(IsNA(set),
-      NA(TBoolean()),
+      NA(TBoolean),
       Let(i.name,
         LowerBoundOnOrderedCollection(set, elem, onKey = false),
         If(i.ceq(ArrayLen(CastToArray(set))),
@@ -22,11 +22,11 @@ object SetFunctions extends RegistryFunctions {
       ToSet(ToStream(a))
     }
 
-    registerIR("isEmpty", TSet(tv("T")), TBoolean()) { s =>
+    registerIR("isEmpty", TSet(tv("T")), TBoolean) { s =>
       ArrayFunctions.isEmpty(CastToArray(s))
     }
 
-    registerIR("contains", TSet(tv("T")), tv("T"), TBoolean())(contains)
+    registerIR("contains", TSet(tv("T")), tv("T"), TBoolean)(contains)
 
     registerIR("remove", TSet(tv("T")), tv("T"), TSet(tv("T"))) { (s, v) =>
       val t = v.typ
@@ -49,7 +49,7 @@ object SetFunctions extends RegistryFunctions {
     }
 
     registerIR("union", TSet(tv("T")), TSet(tv("T")), TSet(tv("T"))) { (s1, s2) =>
-      val t = -s1.typ.asInstanceOf[TSet].elementType
+      val t = s1.typ.asInstanceOf[TSet].elementType
       val x = genUID()
       ToSet(
         StreamFlatMap(
@@ -59,7 +59,7 @@ object SetFunctions extends RegistryFunctions {
     }
 
     registerIR("intersection", TSet(tv("T")), TSet(tv("T")), TSet(tv("T"))) { (s1, s2) =>
-      val t = -s1.typ.asInstanceOf[TSet].elementType
+      val t = s1.typ.asInstanceOf[TSet].elementType
       val x = genUID()
       ToSet(
         StreamFilter(ToStream(s1), x,
@@ -67,27 +67,27 @@ object SetFunctions extends RegistryFunctions {
     }
 
     registerIR("difference", TSet(tv("T")), TSet(tv("T")), TSet(tv("T"))) { (s1, s2) =>
-      val t = -s1.typ.asInstanceOf[TSet].elementType
+      val t = s1.typ.asInstanceOf[TSet].elementType
       val x = genUID()
       ToSet(
         StreamFilter(ToStream(s1), x,
           ApplyUnaryPrimOp(Bang(), contains(s2, Ref(x, t)))))
     }
 
-    registerIR("isSubset", TSet(tv("T")), TSet(tv("T")), TBoolean()) { (s, w) =>
-      val t = -s.typ.asInstanceOf[TSet].elementType
+    registerIR("isSubset", TSet(tv("T")), TSet(tv("T")), TBoolean) { (s, w) =>
+      val t = s.typ.asInstanceOf[TSet].elementType
       val a = genUID()
       val x = genUID()
       StreamFold(ToStream(s), True(), a, x,
         // FIXME short circuit
         ApplySpecial("&&",
-          FastSeq(Ref(a, TBoolean()), contains(w, Ref(x, t))), TBoolean()))
+          FastSeq(Ref(a, TBoolean), contains(w, Ref(x, t))), TBoolean))
     }
 
     registerIR("median", TSet(tnum("T")), tv("T")) { s =>
-      val t = -s.typ.asInstanceOf[TSet].elementType
+      val t = s.typ.asInstanceOf[TSet].elementType
       val a = Ref(genUID(), TArray(t))
-      val size = Ref(genUID(), TInt32())
+      val size = Ref(genUID(), TInt32)
       val lastIdx = size - 1
       val midIdx = lastIdx.floorDiv(2)
       def ref(i: IR) = ArrayRef(a, i)
@@ -101,7 +101,7 @@ object SetFunctions extends RegistryFunctions {
             If(len.ceq(0), len, If(IsNA(ref(len - 1)), len - 1, len)),
             If(size.ceq(0),
               NA(t),
-              If(invoke("%", TInt32(), size, 2).cne(0),
+              If(invoke("%", TInt32, size, 2).cne(0),
                 ref(midIdx), // odd number of non-missing elements
                 div(ref(midIdx) + ref(midIdx + 1), Cast(2, t)))))))
     }

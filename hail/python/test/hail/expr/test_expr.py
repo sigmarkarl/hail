@@ -299,6 +299,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(hl.eval('\d+'), '\d+')
         string = hl.literal('12345')
         self.assertTrue(hl.eval(string.matches('\d+')))
+        self.assertTrue(hl.eval(string.matches(hl.str('\d+'))))
         self.assertFalse(hl.eval(string.matches(r'\\d+')))
 
     def test_string_reverse(self):
@@ -404,6 +405,12 @@ class Tests(unittest.TestCase):
         table = table.annotate(i=table.idx)
         table.aggregate(_error_from_cdf(hl.agg.approx_cdf(table.i), .001))
         table.aggregate(_error_from_cdf(hl.agg.approx_cdf(table.i), .001, all_quantiles=True))
+
+    def test_approx_cdf_array_agg(self):
+        mt = hl.utils.range_matrix_table(5, 5)
+        mt = mt.annotate_entries(x = mt.col_idx)
+        mt = mt.group_cols_by(mt.col_idx).aggregate(cdf = hl.agg.approx_cdf(mt.x))
+        mt._force_count_rows()
 
     def test_counter_ordering(self):
         ht = hl.utils.range_table(10)
@@ -1024,6 +1031,19 @@ class Tests(unittest.TestCase):
         ht = ht.annotate(y=ht.idx).filter(False)
         r = ht.aggregate(hl.agg.downsample(ht.idx, ht.y, n_divisions=10))
         self.assertTrue(len(r) == 0)
+
+    def test_downsample_in_array_agg(self):
+        mt = hl.utils.range_matrix_table(50, 50)
+        mt = mt.annotate_rows(y = hl.rand_unif(0, 1))
+        mt = mt.annotate_cols(
+            binned=hl.agg.downsample(
+                mt.row_idx,
+                mt.y,
+                label=hl.str(mt.y),
+                n_divisions=4
+            )
+        )
+        mt.cols()._force_count()
 
     def test_aggregator_info_score(self):
         gen_file = resource('infoScoreTest.gen')

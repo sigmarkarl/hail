@@ -904,12 +904,12 @@ final class VCFLine(val line: String, arrayElementsRequired: Boolean) {
         parseError(s"invalid INFO key/value expression found '${line(pos)}' instead of '='")
       pos += 1 // equals
       typ match {
-        case TInt32(_) => parseAddInfoInt(rvb)
-        case TString(_) => parseAddInfoString(rvb)
-        case TFloat64(_) => parseAddInfoDouble(rvb)
-        case TArray(TInt32(_), _) => parseAddInfoArrayInt(rvb)
-        case TArray(TFloat64(_), _) => parseAddInfoArrayDouble(rvb)
-        case TArray(TString(_), _) => parseAddInfoArrayString(rvb)
+        case TInt32 => parseAddInfoInt(rvb)
+        case TString => parseAddInfoString(rvb)
+        case TFloat64 => parseAddInfoDouble(rvb)
+        case TArray(TInt32) => parseAddInfoArrayInt(rvb)
+        case TArray(TFloat64) => parseAddInfoArrayDouble(rvb)
+        case TArray(TString) => parseAddInfoArrayString(rvb)
       }
     }
   }
@@ -990,23 +990,23 @@ class FormatParser(
     else {
       rvb.setFieldIndex(j)
       gType.types(j) match {
-        case TCall(_) =>
+        case TCall =>
           l.parseAddCall(rvb)
-        case TInt32(_) =>
+        case TInt32 =>
           l.parseAddFormatInt(rvb)
-        case TFloat32(_) =>
+        case TFloat32 =>
           l.parseAddFormatFloat(rvb)
-        case TFloat64(_) =>
+        case TFloat64 =>
           l.parseAddFormatDouble(rvb)
-        case TString(_) =>
+        case TString =>
           l.parseAddFormatString(rvb)
-        case TArray(TInt32(_), _) =>
+        case TArray(TInt32) =>
           l.parseAddFormatArrayInt(rvb)
-        case TArray(TFloat32(_), _) =>
+        case TArray(TFloat32) =>
           l.parseAddFormatArrayFloat(rvb)
-        case TArray(TFloat64(_), _) =>
+        case TArray(TFloat64) =>
           l.parseAddFormatArrayDouble(rvb)
-        case TArray(TString(_), _) =>
+        case TArray(TString) =>
           l.parseAddFormatArrayString(rvb)
       }
     }
@@ -1056,7 +1056,7 @@ class FormatParser(
 class ParseLineContext(typ: TableType, val infoFlagFieldNames: Set[String], val nSamples: Int) {
   val entryType: TStruct = typ.rowType.fieldOption(LowerMatrixIR.entriesFieldName) match {
     case Some(entriesArray) => entriesArray.typ.asInstanceOf[TArray].elementType.asInstanceOf[TStruct]
-    case None => TStruct()
+    case None => TStruct.empty
   }
   val infoSignature = typ.rowType.fieldOption("info").map(_.typ.asInstanceOf[TStruct]).orNull
   val hasQual = typ.rowType.hasField("qual")
@@ -1105,11 +1105,11 @@ object LoadVCF {
 
   def getEntryFloatType(entryFloatTypeName: String): TNumeric = {
     IRParser.parseType(entryFloatTypeName) match {
-      case t32: TFloat32 => t32
-      case t64: TFloat64 => t64
+      case TFloat32 => TFloat32
+      case TFloat64 => TFloat64
       case _ => fatal(
         s"""invalid floating point type:
-        |  expected ${TFloat32()._toPretty} or ${TFloat64()._toPretty}, got ${entryFloatTypeName}"""
+        |  expected ${TFloat32._toPretty} or ${TFloat64._toPretty}, got ${entryFloatTypeName}"""
       )
     }
   }
@@ -1203,7 +1203,7 @@ object LoadVCF {
       .toMap
 
     val infoHeader = header.getInfoHeaderLines
-    val (infoSignature, infoAttrs, infoFlagFields) = headerSignature(infoHeader, callFields, TFloat64())
+    val (infoSignature, infoAttrs, infoFlagFields) = headerSignature(infoHeader, callFields, TFloat64)
 
     val formatHeader = header.getFormatHeaderLines
     val (gSignature, formatAttrs, _) = headerSignature(formatHeader, callFields, floatType, arrayElementsRequired = arrayElementsRequired)
@@ -1247,13 +1247,13 @@ object LoadVCF {
   def parseLines[C](
     makeContext: () => C
   )(f: (C, VCFLine, RegionValueBuilder) => Unit
-  )(lines: ContextRDD[RVDContext, WithContext[String]],
+  )(lines: ContextRDD[WithContext[String]],
     rowPType: PStruct,
     rgBc: Option[BroadcastValue[ReferenceGenome]],
     contigRecoding: Map[String, String],
     arrayElementsRequired: Boolean,
     skipInvalidLoci: Boolean
-  ): ContextRDD[RVDContext, RegionValue] = {
+  ): ContextRDD[RegionValue] = {
     val hasRSID = rowPType.hasField("rsid")
     lines.cmapPartitions { (ctx, it) =>
       new Iterator[RegionValue] {
@@ -1539,11 +1539,11 @@ case class MatrixVCFReader(
   LoadVCF.warnDuplicates(sampleIDs)
 
   private val locusType = TLocus.schemaFromRG(referenceGenome)
-  private val kType = TStruct("locus" -> locusType, "alleles" -> TArray(TString()))
+  private val kType = TStruct("locus" -> locusType, "alleles" -> TArray(TString))
 
   val fullMatrixType: MatrixType = MatrixType(
-    TStruct.empty(),
-    colType = TStruct("s" -> TString()),
+    TStruct.empty,
+    colType = TStruct("s" -> TString),
     colKey = Array("s"),
     rowType = kType ++ vaSignature.virtualType,
     rowKey = Array("locus", "alleles"),
@@ -1559,7 +1559,7 @@ case class MatrixVCFReader(
 
   private lazy val lines = {
     HailContext.maybeGZipAsBGZip(gzAsBGZ) {
-      ContextRDD.textFilesLines[RVDContext](sc, inputs, minPartitions, filterAndReplace)
+      ContextRDD.textFilesLines(sc, inputs, minPartitions, filterAndReplace)
     }
   }
 
@@ -1685,11 +1685,11 @@ class VCFsReader(
   private val entryFloatType = LoadVCF.getEntryFloatType(entryFloatTypeName)
   private val header1 = parseHeader(callFields, entryFloatType, headerLines1, arrayElementsRequired = arrayElementsRequired)
 
-  private val kType = TStruct("locus" -> locusType, "alleles" -> TArray(TString()))
+  private val kType = TStruct("locus" -> locusType, "alleles" -> TArray(TString))
 
   val typ = MatrixType(
-    TStruct.empty(),
-    colType = TStruct("s" -> TString()),
+    TStruct.empty,
+    colType = TStruct("s" -> TString),
     colKey = Array("s"),
     rowType = kType ++ header1.vaSignature.virtualType,
     rowKey = Array("locus"),
@@ -1771,7 +1771,7 @@ class VCFsReader(
     val tt = localTyp.canonicalTableType
     val rvdType = fullRVDType
 
-    val lines = ContextRDD.weaken[RVDContext](
+    val lines = ContextRDD.weaken(
       new PartitionedVCFRDD(hc.sc, file, partitions)
         .map(l =>
           WithContext(l, Context(l, file, None))))

@@ -147,7 +147,7 @@ object Extract {
     case AggSignature(Product(), _, Seq(t)) => t
     case AggSignature(Min(), _, Seq(t)) => t
     case AggSignature(Max(), _, Seq(t)) => t
-    case AggSignature(Count(), _, _) => TInt64()
+    case AggSignature(Count(), _, _) => TInt64
     case AggSignature(Take(), _, Seq(t)) => TArray(t)
     case AggSignature(CallStats(), _, _) => CallStatsState.resultType.virtualType
     case AggSignature(TakeBy(), _, Seq(value, key)) => TArray(value)
@@ -257,7 +257,7 @@ object Extract {
         val initOps = newAggs.result()
 
         val rt = TDict(key.typ, TTuple(initOps.map(_.aggSig.resultType): _*))
-        newRef._typ = -rt.elementType
+        newRef._typ = rt.elementType
 
         // the void-typed init and seq args are side-effecting agg IRs (InitOp and SeqOp nodes for sub-aggs)
         val groupSig = AggSignature(Group(), Seq(TVoid), FastSeq(key.typ, TVoid))
@@ -282,19 +282,19 @@ object Extract {
         val initOps = newAggs.result()
 
         val rt = TArray(TTuple(initOps.map(_.aggSig.resultType): _*))
-        newRef._typ = -rt.elementType
+        newRef._typ = rt.elementType
 
         // the void-typed init and seq args are side-effecting agg IRs (InitOp and SeqOp nodes for sub-aggs)
         val aggSigCheck = AggSignature(
           AggElementsLengthCheck(),
           knownLength.map(l => FastSeq(l.typ)).getOrElse(FastSeq()) :+ TVoid,
-          FastSeq(TInt32()))
-        val aggSig = AggSignature(AggElements(), FastSeq(), FastSeq(TInt32(), TVoid))
+          FastSeq(TInt32))
+        val aggSig = AggSignature(AggElements(), FastSeq(), FastSeq(TInt32, TVoid))
         val state = AggStateSignature(Map(AggElementsLengthCheck() -> aggSigCheck, AggElements() -> aggSig),
           AggElementsLengthCheck(), Some(initOps.map(_.aggSig)))
 
         val aRef = Ref(genUID(), a.typ)
-        val iRef = Ref(genUID(), TInt32())
+        val iRef = Ref(genUID(), TInt32)
 
         ab += InitOp(i, knownLength.map(FastSeq(_)).getOrElse(FastSeq[IR]()) :+ Begin(initOps), state, AggElementsLengthCheck())
         seqBuilder +=
@@ -321,7 +321,7 @@ object Extract {
             indexName,
             Let(
               newRef.name,
-              ArrayRef(rUID, Ref(indexName, TInt32())),
+              ArrayRef(rUID, Ref(indexName, TInt32)),
               transformed))))
 
       case x: StreamAgg =>

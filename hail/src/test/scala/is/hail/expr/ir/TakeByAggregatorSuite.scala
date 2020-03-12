@@ -34,7 +34,7 @@ class TakeByAggregatorSuite extends HailSuite {
         ))
 
         val o = fb.resultWithIndex()(0, r)(r)
-        val result = SafeRow.read(rt, r, o)
+        val result = SafeRow.read(rt, o)
         assert(result == ((n - 1) to 0 by -1)
           .iterator
           .map(i => s"str$i")
@@ -67,7 +67,7 @@ class TakeByAggregatorSuite extends HailSuite {
       ))
 
       val o = fb.resultWithIndex()(0, r)(r)
-      val result = SafeRow.read(rt, r, o)
+      val result = SafeRow.read(rt, o)
       assert(result == FastIndexedSeq(0, 1, 2, 3, null, null, null))
     }
   }
@@ -78,7 +78,7 @@ class TakeByAggregatorSuite extends HailSuite {
       val fb = EmitFunctionBuilder[Region, Long]("take_by_test_random")
 
       Region.scoped { r =>
-        val argR = fb.getArg[Region](1).load()
+        val argR = fb.getArg[Region](1)
         val i = fb.newField[Int]
         val random = fb.newField[Int]
         val resultOff = fb.newField[Long]
@@ -101,7 +101,7 @@ class TakeByAggregatorSuite extends HailSuite {
             ab.append(random),
             i := i + 1
           ),
-          ab.size.cne(n).orEmpty(Code._fatal("bad size!")),
+          ab.size.cne(n).orEmpty(Code._fatal[Unit]("bad size!")),
           resultOff := argR.allocate(8L, 16L),
           Region.storeAddress(resultOff, tba.result(argR, rt)),
           Region.storeAddress(resultOff + 8L, ab.data))),
@@ -110,9 +110,9 @@ class TakeByAggregatorSuite extends HailSuite {
 
         val o = fb.resultWithIndex()(0, r)(r)
         val pqOffset = Region.loadAddress(o)
-        val pq = SafeRow.read(rt, r, pqOffset)
+        val pq = SafeRow.read(rt, pqOffset)
         val collOffset = Region.loadAddress(o + 8)
-        val collected = SafeRow.read(ab.eltArray, r, collOffset).asInstanceOf[IndexedSeq[Int]].take(n)
+        val collected = SafeRow.read(ab.eltArray, collOffset).asInstanceOf[IndexedSeq[Int]].take(n)
         val minValues = collected.sorted.take(nToTake)
         assert(pq == minValues, s"n=$n")
       }

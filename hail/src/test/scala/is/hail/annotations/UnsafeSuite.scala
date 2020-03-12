@@ -19,12 +19,12 @@ class UnsafeSuite extends HailSuite {
   def subsetType(t: Type): Type = {
     t match {
       case t: TStruct =>
-        TStruct(t.required,
+        TStruct(
           t.fields.filter(_ => Random.nextDouble() < 0.4)
             .map(f => f.name -> f.typ): _*)
 
       case t: TArray =>
-        TArray(subsetType(t.elementType), t.required)
+        TArray(subsetType(t.elementType))
 
       case _ => t
     }
@@ -161,7 +161,7 @@ class UnsafeSuite extends HailSuite {
           assert(decT == t)
           val res = dec((new ByteArrayInputStream(serialized))).readRegionValue(region)
 
-          assert(t.unsafeOrdering().equiv(RegionValue(region, res), RegionValue(region, off)))
+          assert(t.unsafeOrdering().equiv(res, off))
         }
       }
     }
@@ -332,7 +332,7 @@ class UnsafeSuite extends HailSuite {
     val rvb2 = new RegionValueBuilder(region2)
 
     val g = PType.genStruct
-      .flatMap(t => Gen.zip(Gen.const(t), Gen.zip(t.virtualType.genValue, t.virtualType.genValue)))
+      .flatMap(t => Gen.zip(Gen.const(t), Gen.zip(t.genValue, t.genValue)))
       .filter { case (t, (a1, a2)) => a1 != null && a2 != null }
       .resize(10)
     val p = Prop.forAll(g) { case (t, (a1, a2)) =>
@@ -363,7 +363,7 @@ class UnsafeSuite extends HailSuite {
 
       val c1 = ord.compare(a1, a2)
       val c2 = ord.compare(ur1, ur2)
-      val c3 = uord.compare(ur1.region, ur1.offset, ur2.region, ur2.offset)
+      val c3 = uord.compare(ur1.offset, ur2.offset)
 
       val p1 = math.signum(c1) == math.signum(c2)
       val p2 = math.signum(c2) == math.signum(c3)

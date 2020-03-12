@@ -187,7 +187,7 @@ object LoadBgen {
     headers.zip(indexFiles).map { case (h, indexFile) =>
       val (keyType, _) = IndexReader.readTypes(fs, indexFile)
       val rg = keyType.asInstanceOf[TStruct].field("locus").typ match {
-        case TLocus(rg, _) => Some(rg.value)
+        case TLocus(rg) => Some(rg.value)
         case _ => None
       }
       val indexReaderBuilder = {
@@ -310,21 +310,21 @@ class MatrixBGENReaderSerializer(env: IRParserEnvironment) extends CustomSeriali
 object MatrixBGENReader {
   def fullMatrixType(rg: Option[ReferenceGenome]): MatrixType = {
     MatrixType(
-      globalType = TStruct.empty(),
-      colType = TStruct("s" -> TString()),
+      globalType = TStruct.empty,
+      colType = TStruct("s" -> TString),
       colKey = Array("s"),
       rowType = TStruct(
         "locus" -> TLocus.schemaFromRG(rg),
-        "alleles" -> TArray(TString()),
-        "rsid" -> TString(),
-        "varid" -> TString(),
-        "offset" -> TInt64(),
-        "file_idx" -> TInt32()),
+        "alleles" -> TArray(TString),
+        "rsid" -> TString,
+        "varid" -> TString,
+        "offset" -> TInt64,
+        "file_idx" -> TInt32),
       rowKey = Array("locus", "alleles"),
       entryType = TStruct(
-        "GT" -> TCall(),
-        "GP" -> TArray(TFloat64Required, required = true),
-        "dosage" -> TFloat64Required
+        "GT" -> TCall,
+        "GP" -> TArray(TFloat64),
+        "dosage" -> TFloat64
       )
     )
   }

@@ -33,12 +33,12 @@ object PCRelate {
   val defaultStorageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK
 
   private val sig = TStruct(
-      ("i", TInt32()),
-      ("j", TInt32()),
-      ("kin", TFloat64()),
-      ("ibd0", TFloat64()),
-      ("ibd1", TFloat64()),
-      ("ibd2", TFloat64()))
+      ("i", TInt32),
+      ("j", TInt32),
+      ("kin", TFloat64),
+      ("ibd0", TFloat64),
+      ("ibd1", TFloat64),
+      ("ibd2", TFloat64))
 
   private val keys: IndexedSeq[String] = Array("i", "j")
 
@@ -139,7 +139,7 @@ case class PCRelate(
   def storageLevel: StorageLevel = PCRelate.defaultStorageLevel
 
   def typ(bmType: BlockMatrixType, auxType: Type): TableType =
-    TableType(sig, keys, TStruct())
+    TableType(sig, keys, TStruct.empty)
 
   def execute(ctx: ExecuteContext, g: M, value: Any): TableValue = {
     val pcs = rowsToBDM(value.asInstanceOf[IndexedSeq[IndexedSeq[java.lang.Double]]])

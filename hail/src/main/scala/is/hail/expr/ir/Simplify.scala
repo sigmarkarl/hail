@@ -158,7 +158,7 @@ object Simplify {
     case x@If(False(), _, altr) => altr
 
     case If(c, cnsq, altr) if cnsq == altr =>
-      if (cnsq.typ.required)
+      if (isDefinitelyDefined(c))
         cnsq
       else
         If(IsNA(c), NA(cnsq.typ), cnsq)
@@ -170,9 +170,9 @@ object Simplify {
     case If(c1, cnsq1, If(c2, _, altr2)) if c1 == c2 => If(c1, cnsq1, altr2)
 
     case Cast(x, t) if x.typ == t => x
-    case Cast(Cast(x, _), t) if x.typ.isOfType(t) =>x
+    case Cast(Cast(x, _), t) if x.typ == t =>x
 
-    case CastRename(x, t) if x.typ isOfType t => x
+    case CastRename(x, t) if x.typ == t => x
 
     case ApplyBinaryPrimOp(Add(), I32(0), x) => x
     case ApplyBinaryPrimOp(Add(), x, I32(0)) => x
@@ -182,12 +182,12 @@ object Simplify {
     case ApplyIR("indexArray", Seq(a, i@I32(v))) if v >= 0 =>
       ArrayRef(a, i)
 
-    case ApplyIR("contains", Seq(CastToArray(x), element)) if x.typ.isInstanceOf[TSet] => invoke("contains", TBoolean(), x, element)
+    case ApplyIR("contains", Seq(CastToArray(x), element)) if x.typ.isInstanceOf[TSet] => invoke("contains", TBoolean, x, element)
 
     case ApplyIR("contains", Seq(Literal(t, v), element)) if t.isInstanceOf[TArray] =>
-      invoke("contains", TBoolean(), Literal(TSet(t.asInstanceOf[TArray].elementType, t.required), v.asInstanceOf[IndexedSeq[_]].toSet), element)
+      invoke("contains", TBoolean, Literal(TSet(t.asInstanceOf[TArray].elementType), v.asInstanceOf[IndexedSeq[_]].toSet), element)
 
-    case ApplyIR("contains", Seq(ToSet(x), element)) if x.typ.isInstanceOf[TArray] => invoke("contains", TBoolean(), x, element)
+    case ApplyIR("contains", Seq(ToSet(x), element)) if x.typ.isInstanceOf[TArray] => invoke("contains", TBoolean, x, element)
 
     case x: ApplyIR if x.inline || x.body.size < 10 => x.explicitNode
 
@@ -345,7 +345,7 @@ object Simplify {
       val structSet = struct.typ.asInstanceOf[TStruct].fieldNames.toSet
       val selectFields2 = selectFields.filter(structSet.contains)
       val x2 = InsertFields(SelectFields(struct, selectFields2), insertFields2, Some(selectFields.toFastIndexedSeq))
-      assert(x2.typ isOfType x.typ)
+      assert(x2.typ == x.typ)
       x2
 
     case x@InsertFields(SelectFields(struct, selectFields), insertFields, _) if
@@ -373,7 +373,7 @@ object Simplify {
     case TableCount(TableLeftJoinRightDistinct(child, _, _)) => TableCount(child)
     case TableCount(TableIntervalJoin(child, _, _, _)) => TableCount(child)
     case TableCount(TableRange(n, _)) => I64(n)
-    case TableCount(TableParallelize(rowsAndGlobal, _)) => Cast(ArrayLen(GetField(rowsAndGlobal, "rows")), TInt64())
+    case TableCount(TableParallelize(rowsAndGlobal, _)) => Cast(ArrayLen(GetField(rowsAndGlobal, "rows")), TInt64)
     case TableCount(TableRename(child, _, _)) => TableCount(child)
     case TableCount(TableAggregateByKey(child, _)) => TableCount(TableDistinct(child))
     case TableCount(TableExplode(child, path)) =>
@@ -381,7 +381,7 @@ object Simplify {
         ApplyAggOp(
           FastIndexedSeq(),
           FastIndexedSeq(ArrayLen(CastToArray(path.foldLeft[IR](Ref("row", child.typ.rowType)) { case (comb, s) => GetField(comb, s)})).toL),
-          AggSignature(Sum(), FastSeq(), FastSeq(TInt64()))))
+          AggSignature(Sum(), FastSeq(), FastSeq(TInt64))))
 
     case MatrixCount(child) if child.partitionCounts.isDefined || child.columnCount.isDefined =>
       val rowCount = child.partitionCounts match {
@@ -405,7 +405,7 @@ object Simplify {
       I64(r.fileMetadata.map(_.nVariants).sum)
 
     // TableGetGlobals should simplify very aggressively
-    case TableGetGlobals(child) if child.typ.globalType == TStruct() => MakeStruct(FastSeq())
+    case TableGetGlobals(child) if child.typ.globalType == TStruct.empty => MakeStruct(FastSeq())
     case TableGetGlobals(TableKeyBy(child, _, _)) => TableGetGlobals(child)
     case TableGetGlobals(TableFilter(child, _)) => TableGetGlobals(child)
     case TableGetGlobals(TableHead(child, _)) => TableGetGlobals(child)
@@ -476,7 +476,7 @@ object Simplify {
             uid3,
             GetField(Ref(uid3, sorted.typ.asInstanceOf[TArray].elementType), "value")))),
           ("global", GetField(Ref(uid, x.typ), "global")))))
-    case ArrayLen(GetField(TableCollect(child), "rows")) => Cast(TableCount(child), TInt32())
+    case ArrayLen(GetField(TableCollect(child), "rows")) => Cast(TableCount(child), TInt32)
     case GetField(TableCollect(child), "global") => TableGetGlobals(child)
 
     case TableAggregate(child, query) if child.typ.key.nonEmpty && !ContainsNonCommutativeAgg(query) =>
@@ -569,7 +569,7 @@ object Simplify {
 
     case TableFilter(TableFilter(t, p1), p2) =>
       TableFilter(t,
-        ApplySpecial("&&", Array(p1, p2), TBoolean()))
+        ApplySpecial("&&", Array(p1, p2), TBoolean))
 
     case TableFilter(TableKeyBy(child, key, isSorted), p) if canRepartition => TableKeyBy(TableFilter(child, p), key, isSorted)
     case TableFilter(TableRepartition(child, n, strategy), p) => TableRepartition(TableFilter(child, p), n, strategy)
@@ -710,7 +710,7 @@ object Simplify {
       // n < 256 is arbitrary for memory concerns
       val row = Ref("row", child.typ.rowType)
       val keyStruct = MakeStruct(sortFields.map(f => f.field -> GetField(row, f.field)))
-      val aggSig = AggSignature(TakeBy(), FastSeq(TInt32()),  FastSeq(row.typ, keyStruct.typ))
+      val aggSig = AggSignature(TakeBy(), FastSeq(TInt32),  FastSeq(row.typ, keyStruct.typ))
       val te =
         TableExplode(
           TableKeyByAndAggregate(child,
@@ -784,7 +784,7 @@ object Simplify {
       //   val ord = k.typ.keyType.ordering.intervalEndpointOrdering
       //   val maybeFlip: IR => IR = if (keep) identity else !_
       //   val pred = maybeFlip(invoke("sortedNonOverlappingIntervalsContain",
-      //     TBoolean(),
+      //     TBoolean,
       //     Literal(TArray(TInterval(k.typ.keyType)), Interval.union(intervals.toArray, ord).toFastIndexedSeq),
       //     MakeStruct(k.typ.keyType.fieldNames.map { keyField =>
       //       (keyField, GetField(Ref("row", child.typ.rowType), keyField))
@@ -866,11 +866,11 @@ object Simplify {
 
     case MatrixFilterCols(m, True()) => m
 
-    case MatrixFilterRows(MatrixFilterRows(child, pred1), pred2) => MatrixFilterRows(child, ApplySpecial("&&", FastSeq(pred1, pred2), TBoolean()))
+    case MatrixFilterRows(MatrixFilterRows(child, pred1), pred2) => MatrixFilterRows(child, ApplySpecial("&&", FastSeq(pred1, pred2), TBoolean))
 
-    case MatrixFilterCols(MatrixFilterCols(child, pred1), pred2) => MatrixFilterCols(child, ApplySpecial("&&", FastSeq(pred1, pred2), TBoolean()))
+    case MatrixFilterCols(MatrixFilterCols(child, pred1), pred2) => MatrixFilterCols(child, ApplySpecial("&&", FastSeq(pred1, pred2), TBoolean))
 
-    case MatrixFilterEntries(MatrixFilterEntries(child, pred1), pred2) => MatrixFilterEntries(child, ApplySpecial("&&", FastSeq(pred1, pred2), TBoolean()))
+    case MatrixFilterEntries(MatrixFilterEntries(child, pred1), pred2) => MatrixFilterEntries(child, ApplySpecial("&&", FastSeq(pred1, pred2), TBoolean))
 
     case MatrixMapGlobals(MatrixMapGlobals(child, ng1), ng2) =>
       val uid = genUID()

@@ -10,7 +10,7 @@ class StagedArrayBuilder(val elt: PType, mb: MethodBuilder, len: Code[Int]) {
 
   val ti: TypeInfo[_] = typeToTypeInfo(elt)
 
-  val ref: Settable[Any] = coerce[Any](ti match {
+  val ref: Value[Any] = coerce[Any](ti match {
     case BooleanInfo => mb.newLazyField[BooleanArrayBuilder](Code.newInstance[BooleanArrayBuilder, Int](len), "zab")
     case IntInfo => mb.newLazyField[IntArrayBuilder](Code.newInstance[IntArrayBuilder, Int](len), "iab")
     case LongInfo => mb.newLazyField[LongArrayBuilder](Code.newInstance[LongArrayBuilder, Int](len), "jab")
@@ -75,6 +75,8 @@ class StagedArrayBuilder(val elt: PType, mb: MethodBuilder, len: Code[Int]) {
   def size: Code[Int] = coerce[MissingArrayBuilder](ref).invoke[Int]("size")
 
   def setSize(n: Code[Int]): Code[Unit] = coerce[MissingArrayBuilder](ref).invoke[Int, Unit]("setSize", n)
+
+  def ensureCapacity(n: Code[Int]): Code[Unit] = coerce[MissingArrayBuilder](ref).invoke[Int, Unit]("ensureCapacity", n)
 
   def clear: Code[Unit] = coerce[MissingArrayBuilder](ref).invoke[Unit]("clear")
 }

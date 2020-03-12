@@ -33,7 +33,7 @@ object LinearMixedModel {
       "chi_sq" -> PFloat64(),
       "p_value" -> PFloat64())
 
-  private val tableType = TableType(rowType.virtualType, FastIndexedSeq("idx"), TStruct())
+  private val tableType = TableType(rowType.virtualType, FastIndexedSeq("idx"), TStruct.empty)
 
   def toTableIR(rvd: RVD): TableIR = {
     ExecuteContext.scoped { ctx =>
@@ -120,7 +120,7 @@ class LinearMixedModel(hc: HailContext, lmmData: LMMData) {
     val rvd = RVD(
       RVDType(rowType, LinearMixedModel.tableType.key),
       pa_t.partitioner(),
-      ContextRDD.weaken[RVDContext](rdd)).persist(StorageLevel.MEMORY_AND_DISK)
+      ContextRDD.weaken(rdd)).persist(StorageLevel.MEMORY_AND_DISK)
 
     LinearMixedModel.toTableIR(rvd)
   }
@@ -186,7 +186,7 @@ class LinearMixedModel(hc: HailContext, lmmData: LMMData) {
     val rvd = RVD(
       RVDType(rowType, LinearMixedModel.tableType.key),
       pa_t.partitioner(),
-      ContextRDD.weaken[RVDContext](rdd)).persist(StorageLevel.MEMORY_AND_DISK)
+      ContextRDD.weaken(rdd)).persist(StorageLevel.MEMORY_AND_DISK)
 
     LinearMixedModel.toTableIR(rvd)
   }

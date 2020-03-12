@@ -19,16 +19,16 @@ class EInt32(override val required: Boolean) extends EType {
   def _buildDecoder(
     pt: PType,
     mb: MethodBuilder,
-    region: Code[Region],
-    in: Code[InputBuffer]
+    region: Value[Region],
+    in: Value[InputBuffer]
   ): Code[Int] = in.readInt()
 
-  def _buildSkip(mb: MethodBuilder, r: Code[Region], in: Code[InputBuffer]): Code[Unit] = in.skipInt()
+  def _buildSkip(mb: MethodBuilder, r: Value[Region], in: Value[InputBuffer]): Code[Unit] = in.skipInt()
 
   override def _compatible(pt: PType): Boolean = pt.isInstanceOf[PInt32]
 
   def _decodedPType(requestedType: Type): PType = requestedType match {
-    case t: TCall => PCall(required)
+    case TCall => PCall(required)
     case _ => PInt32(required)
   }
 

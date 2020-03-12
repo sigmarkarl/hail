@@ -3,8 +3,8 @@ package is.hail.io
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, InputStream, OutputStream}
 
 import is.hail.annotations.{Region, RegionValue}
-import is.hail.asm4s.Code
-import is.hail.expr.ir.EmitFunctionBuilder
+import is.hail.asm4s.{Code, Value, TypeInfo}
+import is.hail.expr.ir.{EmitFunctionBuilder, typeToTypeInfo}
 import is.hail.expr.types.encoded.EType
 import is.hail.expr.types.physical.PType
 import is.hail.expr.types.virtual.Type
@@ -17,8 +17,8 @@ trait AbstractTypedCodecSpec extends Spec {
   def encodedType: EType
   def encodedVirtualType: Type
 
-  type StagedEncoderF[T] = (Code[Region], Code[T], Code[OutputBuffer]) => Code[Unit]
-  type StagedDecoderF[T] = (Code[Region], Code[InputBuffer]) => Code[T]
+  type StagedEncoderF[T] = (Value[Region], Value[T], Value[OutputBuffer]) => Code[Unit]
+  type StagedDecoderF[T] = (Value[Region], Value[InputBuffer]) => Code[T]
 
   def buildEncoder(t: PType): (OutputStream) => Encoder
 
@@ -44,10 +44,21 @@ trait AbstractTypedCodecSpec extends Spec {
 
   def buildEmitEncoderF[T](t: PType, fb: EmitFunctionBuilder[_]): StagedEncoderF[T]
 
+  def buildEmitDecoderF[T](requestedType: Type, fb: EmitFunctionBuilder[_], ti: TypeInfo[T]): (PType, StagedDecoderF[T]) = {
+    val (ptype, dec) = buildEmitDecoderF[T](requestedType, fb)
+    assert(ti == typeToTypeInfo(requestedType))
+    ptype -> dec
+  }
+
+  def buildEmitEncoderF[T](t: PType, fb: EmitFunctionBuilder[_], ti: TypeInfo[T]): StagedEncoderF[T] = {
+    assert(ti == typeToTypeInfo(t))
+    buildEmitEncoderF[T](t, fb)
+  }
+
   // FIXME: is there a better place for this to live?
-  def decodeRDD(requestedType: Type, bytes: RDD[Array[Byte]]): (PType, ContextRDD[RVDContext, RegionValue]) = {
+  def decodeRDD(requestedType: Type, bytes: RDD[Array[Byte]]): (PType, ContextRDD[RegionValue]) = {
     val (pt, dec) = buildDecoder(requestedType)
-    (pt, ContextRDD.weaken[RVDContext](bytes).cmapPartitions { (ctx, it) =>
+    (pt, ContextRDD.weaken(bytes).cmapPartitions { (ctx, it) =>
       RegionValue.fromBytes(dec, ctx.region, it)
     })
   }

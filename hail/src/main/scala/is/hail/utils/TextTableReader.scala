@@ -155,7 +155,7 @@ object TextTableReader {
     delimiter: String, missing: Set[String], quote: java.lang.Character): Array[Option[Type]] = {
     val nFields = header.length
 
-    val matchTypes: Array[Type] = Array(TBoolean(), TInt32(), TInt64(), TFloat64())
+    val matchTypes: Array[Type] = Array(TBoolean, TInt32, TInt64, TFloat64)
     val matchers: Array[String => Boolean] = Array(
       booleanMatcher,
       int32Matcher,
@@ -208,7 +208,7 @@ object TextTableReader {
       someIf(!imputation(i, nMatchers),
         (0 until nMatchers).find(imputation(i, _))
           .map(matchTypes)
-          .getOrElse(TString()))
+          .getOrElse(TString))
     }.toArray
   }
 
@@ -298,7 +298,7 @@ object TextTableReader {
                 case None =>
                   sb.append(s"\n  Loading column '$name' as type 'str' (no non-missing values for imputation)")
                   categoryCounts.updateValue(s"str (no non-missing values for imputation)", 0, _ + 1)
-                  (name, TString())
+                  (name, TString)
               }
           }
         }
@@ -313,7 +313,7 @@ object TextTableReader {
             case None =>
               sb.append(s"  Loading column '$c' as type 'str' (type not specified)\n")
               categoryCounts.updateValue(s"str (type not specified)", 0, _ + 1)
-              (c, TString())
+              (c, TString)
           }
         }
       }
@@ -331,7 +331,7 @@ object TextTableReader {
       log.info(sb.result())
     }
 
-    val t = TableType(TStruct(namesAndTypes: _*), FastIndexedSeq(), TStruct())
+    val t = TableType(TStruct(namesAndTypes: _*), FastIndexedSeq(), TStruct.empty)
     TextTableReaderMetadata(globbedFiles, header, t)
   }
 }
@@ -358,7 +358,7 @@ case class TextTableReader(options: TextTableReaderOptions) extends TableReader 
 
     val useColIndices = rowTyp.fields.map(f => fullType.rowType.fieldIdx(f.name))
 
-    val crdd = ContextRDD.textFilesLines[RVDContext](hc.sc, metadata.globbedFiles, options.nPartitions, options.filterAndReplace)
+    val crdd = ContextRDD.textFilesLines(hc.sc, metadata.globbedFiles, options.nPartitions, options.filterAndReplace)
       .filter { line =>
         !options.isComment(line.value) &&
           (!options.hasHeader || metadata.header != line.value) &&

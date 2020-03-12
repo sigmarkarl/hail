@@ -156,16 +156,16 @@ case class MatrixGENReader(
   def partitionCounts: Option[IndexedSeq[Long]] = None
 
   def fullMatrixType: MatrixType = MatrixType(
-    globalType = TStruct.empty(),
+    globalType = TStruct.empty,
     colKey = Array("s"),
-    colType = TStruct("s" -> TString()),
+    colType = TStruct("s" -> TString),
     rowKey = Array("locus", "alleles"),
     rowType = TStruct(
       "locus" -> TLocus.schemaFromRG(referenceGenome),
-      "alleles" -> TArray(TString()),
-      "rsid" -> TString(), "varid" -> TString()),
-    entryType = TStruct("GT" -> TCall(),
-      "GP" -> TArray(TFloat64())))
+      "alleles" -> TArray(TString),
+      "rsid" -> TString, "varid" -> TString),
+    entryType = TStruct("GT" -> TCall,
+      "GP" -> TArray(TFloat64)))
 
   def apply(tr: TableRead, ctx: ExecuteContext): TableValue = {
     val rdd =
@@ -178,7 +178,7 @@ case class MatrixGENReader(
     val requestedRowType = requestedType.rowType
     val (requestedEntryType, dropCols) = requestedRowType.fieldOption(LowerMatrixIR.entriesFieldName) match {
       case Some(fd) => fd.typ.asInstanceOf[TArray].elementType.asInstanceOf[TStruct] -> false
-      case None => TStruct() -> true
+      case None => TStruct.empty -> true
     }
 
     val localNSamples = nSamples
@@ -194,7 +194,7 @@ case class MatrixGENReader(
     val localRVDType = tr.typ.canonicalRVDType
     val rvd = RVD.coerce(
       localRVDType,
-      ContextRDD.weaken[RVDContext](rdd).cmapPartitions { (ctx, it) =>
+      ContextRDD.weaken(rdd).cmapPartitions { (ctx, it) =>
         val region = ctx.region
         val rvb = new RegionValueBuilder(region)
         val rv = RegionValue(region)

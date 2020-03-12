@@ -52,6 +52,8 @@ case class IntervalEndpoint(point: Any, sign: Int) extends Serializable {
   * 't2' such that 't.isPrefixOf(t2)' without changing the behavior.
   */
 class Interval(val left: IntervalEndpoint, val right: IntervalEndpoint) extends Serializable {
+  require(left != null)
+  require(right != null)
   def start: Any = left.point
 
   def end: Any = right.point
@@ -100,8 +102,8 @@ class Interval(val left: IntervalEndpoint, val right: IntervalEndpoint) extends 
   def toJSON(f: (Any) => JValue): JValue =
     JObject("start" -> f(start),
       "end" -> f(end),
-      "includeStart" -> TBoolean().toJSON(includesStart),
-      "includeEnd" -> TBoolean().toJSON(includesEnd))
+      "includeStart" -> TBoolean.toJSON(includesStart),
+      "includeEnd" -> TBoolean.toJSON(includesEnd))
 
   def isBelow(pord: ExtendedOrdering, other: Interval): Boolean =
     ext(pord).compare(this.right, other.left) <= 0
@@ -218,11 +220,11 @@ object Interval {
       val yi = y.asInstanceOf[Interval]
 
       if (startPrimary) {
-        val c = pord.intervalEndpointOrdering.compare(xi.left, yi.left)
-        if (c != 0) c else pord.intervalEndpointOrdering.compare(xi.right, yi.right)
+        val c = pord.intervalEndpointOrdering.compareNonnull(xi.left, yi.left)
+        if (c != 0) c else pord.intervalEndpointOrdering.compareNonnull(xi.right, yi.right)
       } else {
-        val c = pord.intervalEndpointOrdering.compare(xi.right, yi.right)
-        if (c != 0) c else pord.intervalEndpointOrdering.compare(xi.left, yi.left)
+        val c = pord.intervalEndpointOrdering.compareNonnull(xi.right, yi.right)
+        if (c != 0) c else pord.intervalEndpointOrdering.compareNonnull(xi.left, yi.left)
       }
     }
   }

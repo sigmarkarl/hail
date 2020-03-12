@@ -1257,7 +1257,7 @@ class BlockMatrix(val blocks: RDD[((Int, Int), BDM[Double])],
   def entriesTable(ctx: ExecuteContext): TableValue = {
     val rowType = PStruct("i" -> PInt64Optional, "j" -> PInt64Optional, "entry" -> PFloat64Optional)
     
-    val entriesRDD = ContextRDD.weaken[RVDContext](blocks).cflatMap { case (ctx, ((blockRow, blockCol), block)) =>
+    val entriesRDD = ContextRDD.weaken(blocks).cflatMap { case (ctx, ((blockRow, blockCol), block)) =>
       val rowOffset = blockRow * blockSize.toLong
       val colOffset = blockCol * blockSize.toLong
 
@@ -1852,7 +1852,7 @@ class WriteBlocksRDD(path: String,
     val entryType = MatrixType.getEntryType(rvRowType)
     val fieldType = entryType.field(entryField).typ
 
-    assert(fieldType.virtualType.isOfType(TFloat64()))
+    assert(fieldType.virtualType == TFloat64)
 
     val entryArrayIdx = MatrixType.getEntriesIndex(rvRowType)
     val fieldIdx = entryType.fieldIdx(entryField)
@@ -1861,7 +1861,7 @@ class WriteBlocksRDD(path: String,
     val writeBlocksPart = split.asInstanceOf[WriteBlocksRDDPartition]
     val start = writeBlocksPart.start
     writeBlocksPart.range.zip(writeBlocksPart.parentPartitions).foreach { case (pi, pPart) =>
-      using(crdd.mkc()) { ctx =>
+      using(RVDContext.default) { ctx =>
         val it = crdd.iterator(pPart, context, ctx)
 
         if (pi == start) {

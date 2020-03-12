@@ -287,8 +287,8 @@ case class LocalLDPrune(
 
   override def typ(childType: MatrixType): TableType = {
     TableType(
-      rowType = childType.rowKeyStruct ++ TStruct("mean" -> TFloat64(), "centered_length_rec" -> TFloat64()),
-      key = childType.rowKey, globalType = TStruct.empty())
+      rowType = childType.rowKeyStruct ++ TStruct("mean" -> TFloat64, "centered_length_rec" -> TFloat64),
+      key = childType.rowKey, globalType = TStruct.empty)
   }
 
   def preservesPartitionCounts: Boolean = false

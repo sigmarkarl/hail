@@ -12,16 +12,13 @@ import is.hail.utils.{FastIndexedSeq, _}
 import scala.language.existentials
 
 sealed trait IR extends BaseIR {
-  protected[ir] var _pType2: PType = null
-  private var _pType: PType = null
+  protected[ir] var _pType: PType = null
   private var _typ: Type = null
 
-  def pType = pType2
+  def pType = {
+    assert(_pType != null)
 
-  def pType2 = {
-    assert(_pType2 != null)
-
-    _pType2
+    _pType
   }
 
   def typ: Type = {
@@ -45,8 +42,6 @@ sealed trait IR extends BaseIR {
     val cp = super.deepCopy()
     if (_typ != null)
       cp._typ = _typ
-    if (_pType != null)
-      cp._pType = _pType
     cp
   }
 
@@ -73,12 +68,12 @@ object Literal {
     if (x == null)
       return NA(t)
     t match {
-      case _: TInt32 => I32(x.asInstanceOf[Int])
-      case _: TInt64 => I64(x.asInstanceOf[Long])
-      case _: TFloat32 => F32(x.asInstanceOf[Float])
-      case _: TFloat64 => F64(x.asInstanceOf[Double])
-      case _: TBoolean => if (x.asInstanceOf[Boolean]) True() else False()
-      case _: TString => Str(x.asInstanceOf[String])
+      case TInt32 => I32(x.asInstanceOf[Int])
+      case TInt64 => I64(x.asInstanceOf[Long])
+      case TFloat32 => F32(x.asInstanceOf[Float])
+      case TFloat64 => F64(x.asInstanceOf[Double])
+      case TBoolean => if (x.asInstanceOf[Boolean]) True() else False()
+      case TString => Str(x.asInstanceOf[String])
       case _ => Literal(t, x)
     }
   }
@@ -131,19 +126,13 @@ object MakeArray {
   def unify(args: Seq[IR], requestedType: TArray = null): MakeArray = {
     assert(requestedType != null || args.nonEmpty)
 
-    if(args.nonEmpty) {
-      if (args.forall(_.typ == args.head.typ)) {
+    if(args.nonEmpty)
+      if (args.forall(_.typ == args.head.typ))
         return MakeArray(args, TArray(args.head.typ))
-      }
-
-      if (args.forall(_.typ isOfType args.head.typ)) {
-        return MakeArray(args, TArray(args.head.typ.deepOptional()))
-      }
-    }
 
     MakeArray(args.map { arg =>
       val upcast = PruneDeadFields.upcast(arg, requestedType.elementType)
-      assert(upcast.typ isOfType requestedType.elementType)
+      assert(upcast.typ == requestedType.elementType)
       upcast
     }, requestedType)
   }
@@ -155,17 +144,13 @@ object MakeStream {
   def unify(args: Seq[IR], requestedType: TStream = null): MakeStream = {
     assert(requestedType != null || args.nonEmpty)
 
-    if (args.nonEmpty) {
+    if (args.nonEmpty)
       if (args.forall(_.typ == args.head.typ))
         return MakeStream(args, TStream(args.head.typ))
 
-      if (args.forall(_.typ isOfType args.head.typ))
-        return MakeStream(args, TStream(args.head.typ.deepOptional()))
-    }
-
     MakeStream(args.map { arg =>
       val upcast = PruneDeadFields.upcast(arg, requestedType.elementType)
-      assert(upcast.typ isOfType requestedType.elementType)
+      assert(upcast.typ == requestedType.elementType)
       upcast
     }, requestedType)
   }
@@ -198,7 +183,7 @@ object ArraySort {
           ApplyComparisonOp(Compare(elt.types(0)), GetTupleElement(Ref(l, elt), elt.fields(0).index), GetTupleElement(Ref(r, atyp.elementType), elt.fields(0).index))
       }
     } else {
-      ApplyComparisonOp(Compare(atyp.elementType), Ref(l, -atyp.elementType), Ref(r, -atyp.elementType))
+      ApplyComparisonOp(Compare(atyp.elementType), Ref(l, atyp.elementType), Ref(r, atyp.elementType))
     }
 
     ArraySort(a, l, r, If(ascending, compare < 0, compare > 0))
@@ -262,9 +247,9 @@ final case class StreamAggScan(a: IR, name: String, query: IR) extends IR
 
 trait InferredPhysicalAggSignature {
   // will be filled in by InferPType in subsequent PR
+  var physicalSignatures: Array[AggStatePhysicalSignature] = _
+
   def signature: IndexedSeq[AggStateSignature]
-  var physicalSignatures2: Array[AggStatePhysicalSignature] = _
-  val physicalSignatures: Array[AggStatePhysicalSignature] = signature.map(_.toCanonicalPhysical).toArray
 }
 final case class RunAgg(body: IR, result: IR, signature: IndexedSeq[AggStateSignature]) extends IR with InferredPhysicalAggSignature
 final case class RunAggScan(array: IR, name: String, init: IR, seqs: IR, result: IR, signature: IndexedSeq[AggStateSignature]) extends IR with InferredPhysicalAggSignature
@@ -273,6 +258,13 @@ final case class StreamLeftJoinDistinct(left: IR, right: IR, l: String, r: Strin
 
 sealed trait NDArrayIR extends TypedIR[TNDArray, PNDArray] {
   def elementTyp: Type = typ.elementType
+}
+
+object MakeNDArray {
+  def fill(elt: IR, shape: IndexedSeq[Long], rowMajor: IR): MakeNDArray =
+    MakeNDArray(
+      ToArray(StreamMap(StreamRange(0, shape.product, 1), genUID(), elt)),
+      MakeTuple.ordered(shape.map(I64)), rowMajor)
 }
 
 final case class MakeNDArray(data: IR, shape: IR, rowMajor: IR) extends NDArrayIR
@@ -464,13 +456,13 @@ class PrimitiveIR(val self: IR) extends AnyVal {
   def /(other: IR): IR = ApplyBinaryPrimOp(FloatingPointDivide(), self, other)
   def floorDiv(other: IR): IR = ApplyBinaryPrimOp(RoundToNegInfDivide(), self, other)
 
-  def &&(other: IR): IR = invoke("&&", TBoolean(), self, other)
-  def ||(other: IR): IR = invoke("||", TBoolean(), self, other)
+  def &&(other: IR): IR = invoke("&&", TBoolean, self, other)
+  def ||(other: IR): IR = invoke("||", TBoolean, self, other)
 
-  def toI: IR = Cast(self, TInt32())
-  def toL: IR = Cast(self, TInt64())
-  def toF: IR = Cast(self, TFloat32())
-  def toD: IR = Cast(self, TFloat64())
+  def toI: IR = Cast(self, TInt32)
+  def toL: IR = Cast(self, TInt64)
+  def toF: IR = Cast(self, TFloat32)
+  def toD: IR = Cast(self, TFloat64)
 
   def unary_-(): IR = ApplyUnaryPrimOp(Negate(), self)
   def unary_!(): IR = ApplyUnaryPrimOp(Bang(), self)

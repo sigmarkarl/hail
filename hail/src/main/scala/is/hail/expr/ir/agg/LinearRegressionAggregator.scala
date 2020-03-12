@@ -3,7 +3,7 @@ package is.hail.expr.ir.agg
 import breeze.linalg.{DenseMatrix, DenseVector, diag, inv}
 import is.hail.annotations.{Region, RegionValueBuilder, StagedRegionValueBuilder, UnsafeRow}
 import is.hail.asm4s._
-import is.hail.expr.ir.{EmitFunctionBuilder, EmitTriplet}
+import is.hail.expr.ir.{EmitFunctionBuilder, EmitCode}
 import is.hail.expr.types.physical.{PArray, PFloat64, PInt32, PStruct, PTuple}
 import is.hail.utils.FastIndexedSeq
 
@@ -21,7 +21,7 @@ object LinearRegressionAggregator extends StagedAggregator {
 
   def initOpF(state: State)(mb: MethodBuilder, k: Code[Int], k0: Code[Int]): Code[Unit] = Code(
     (k0 < 0 | k0 > k).mux(
-      Code._fatal(const("linreg: `nested_dim` must be between 0 and the number (")
+      Code._fatal[Unit](const("linreg: `nested_dim` must be between 0 and the number (")
         .concat(k.toS)
         .concat(") of covariates, inclusive")),
       Code._empty),
@@ -37,11 +37,11 @@ object LinearRegressionAggregator extends StagedAggregator {
       k0)
   )
 
-  def initOp(state: State, init: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
+  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
     val _initOpF = state.fb.newMethod[Int, Int, Unit]("linregInitOp")(initOpF(state))
     val Array(kt, k0t) = init
     (Code(kt.setup, kt.m) || Code(k0t.setup, k0t.m)).mux(
-      Code._fatal("linreg: init args may not be missing"),
+      Code._fatal[Unit]("linreg: init args may not be missing"),
       _initOpF(coerce[Int](kt.v), coerce[Int](k0t.v)))
   }
 
@@ -88,7 +88,7 @@ object LinearRegressionAggregator extends StagedAggregator {
     nrVec.anyMissing(mb, x).mux(Code._empty, body)
   }
 
-  def seqOp(state: State, seq: Array[EmitTriplet], dummy: Boolean): Code[Unit] = {
+  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
     val _seqOpF = state.fb.newMethod[Double, Long, Unit]("linregSeqOp")(seqOpF(state))
     val Array(y, x) = seq
     (Code(y.setup, y.m) || Code(x.setup, x.m)).mux(

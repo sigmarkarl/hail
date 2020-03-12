@@ -166,8 +166,8 @@ abstract class RegistryFunctions {
     case _: PFloat32 => coerce[Float]
     case _: PFloat64 => coerce[Double]
     case _: PCall => coerce[Int]
-    case t: PString => c =>
-      t.loadString(coerce[Long](c))
+    case t: PString => c => t.loadString(coerce[Long](c))
+    case t: PLocus => c => LocusFunctions.getLocus(r, coerce[Long](c), t)
     case _ => c =>
       Code.invokeScalaObject[PType, Region, Long, Any](
         UnsafeRow.getClass, "read",
@@ -182,8 +182,8 @@ abstract class RegistryFunctions {
     case _: PFloat32 => c => Code.boxFloat(coerce[Float](c))
     case _: PFloat64 => c => Code.boxDouble(coerce[Double](c))
     case _: PCall => c => Code.boxInt(coerce[Int](c))
-    case t: PString => c =>
-      t.loadString(coerce[Long](c))
+    case t: PString => c => t.loadString(coerce[Long](c))
+    case t: PLocus => c => LocusFunctions.getLocus(r, coerce[Long](c), t)
     case _ => c =>
       Code.invokeScalaObject[PType, Region, Long, AnyRef](
         UnsafeRow.getClass, "readAnyRef",
@@ -192,15 +192,15 @@ abstract class RegistryFunctions {
   }
 
   def unwrapReturn(r: EmitRegion, pt: PType): Code[_] => Code[_] = pt.virtualType match {
-    case _: TBoolean => identity[Code[_]]
-    case _: TInt32 => identity[Code[_]]
-    case _: TInt64 => identity[Code[_]]
-    case _: TFloat32 => identity[Code[_]]
-    case _: TFloat64 => identity[Code[_]]
-    case _: TString => c =>
+    case TBoolean => identity[Code[_]]
+    case TInt32 => identity[Code[_]]
+    case TInt64 => identity[Code[_]]
+    case TFloat32 => identity[Code[_]]
+    case TFloat64 => identity[Code[_]]
+    case TString => c =>
       pt.asInstanceOf[PString].allocateAndStoreString(r.mb, r.region, coerce[String](c))
-    case _: TCall => coerce[Int]
-    case TArray(_: TInt32, _) => c =>
+    case TCall => coerce[Int]
+    case TArray(TInt32) => c =>
       val srvb = new StagedRegionValueBuilder(r, pt)
       val alocal = r.mb.newLocal[IndexedSeq[Int]]
       val len = r.mb.newLocal[Int]
@@ -216,7 +216,7 @@ abstract class RegistryFunctions {
             v.isNull.mux(srvb.setMissing(), srvb.addInt(v.invoke[Int]("intValue"))),
             srvb.advance())),
         srvb.offset)
-    case TArray(_: TFloat64, _) => c =>
+    case TArray(TFloat64) => c =>
       val srvb = new StagedRegionValueBuilder(r, pt)
       val alocal = r.mb.newLocal[IndexedSeq[Double]]
       val len = r.mb.newLocal[Int]
@@ -232,7 +232,7 @@ abstract class RegistryFunctions {
             v.isNull.mux(srvb.setMissing(), srvb.addDouble(v.invoke[Double]("doubleValue"))),
             srvb.advance())),
         srvb.offset)
-    case TArray(_: TString, _) => c =>
+    case TArray(TString) => c =>
       val srvb = new StagedRegionValueBuilder(r, pt)
       val alocal = r.mb.newLocal[IndexedSeq[String]]
       val len = r.mb.newLocal[Int]
@@ -269,7 +269,7 @@ abstract class RegistryFunctions {
   }
 
   def registerCodeWithMissingness(mname: String, aTypes: Array[Type], rType: Type, pt: Seq[PType] => PType)
-    (impl: (EmitRegion, PType, Array[(PType, EmitTriplet)]) => EmitTriplet) {
+    (impl: (EmitRegion, PType, Array[(PType, EmitCode)]) => EmitCode) {
     IRFunctionRegistry.addIRFunction(new IRFunctionWithMissingness {
       override val name: String = mname
 
@@ -279,7 +279,7 @@ abstract class RegistryFunctions {
 
       override def returnPType(argTypes: Seq[PType], returnType: Type): PType = if (pt == null) PType.canonical(returnType) else pt(argTypes)
 
-      override def apply(r: EmitRegion, rpt: PType, args: (PType, EmitTriplet)*): EmitTriplet = {
+      override def apply(r: EmitRegion, rpt: PType, args: (PType, EmitCode)*): EmitCode = {
         unify(args.map(_._1.virtualType))
         impl(r, rpt, args.toArray)
       }
@@ -295,12 +295,12 @@ abstract class RegistryFunctions {
 
   def registerWrappedScalaFunction(mname: String, argTypes: Array[Type], rType: Type, pt: Seq[PType] => PType)(cls: Class[_], method: String) {
     def ct(typ: Type): ClassTag[_] = typ match {
-      case _: TString => classTag[String]
-      case TArray(_: TInt32, _) => classTag[IndexedSeq[Int]]
-      case TArray(_: TFloat64, _) => classTag[IndexedSeq[Double]]
-      case TArray(_: TString, _) => classTag[IndexedSeq[String]]
-      case TSet(_: TString, _) => classTag[Set[String]]
-      case TDict(_: TString, _: TString, _) => classTag[Map[String, String]]
+      case TString => classTag[String]
+      case TArray(TInt32) => classTag[IndexedSeq[Int]]
+      case TArray(TFloat64) => classTag[IndexedSeq[Double]]
+      case TArray(TString) => classTag[IndexedSeq[String]]
+      case TSet(TString) => classTag[Set[String]]
+      case TDict(TString, TString) => classTag[Map[String, String]]
       case t => TypeToIRIntermediateClassTag(t)
     }
 
@@ -379,23 +379,23 @@ abstract class RegistryFunctions {
       a5: (PType, Code[A5]) @unchecked)) => impl(r, rt, a1, a2, a3, a4, a5)
     }
 
-  def registerCodeWithMissingness(mname: String, rt: Type, pt: PType)(impl: EmitRegion => EmitTriplet): Unit =
+  def registerCodeWithMissingness(mname: String, rt: Type, pt: PType)(impl: EmitRegion => EmitCode): Unit =
     registerCodeWithMissingness(mname, Array[Type](), rt, (_: Seq[PType]) => pt) { case (r, rt, Array()) => impl(r) }
 
   def registerCodeWithMissingness(mname: String, mt1: Type, rt: Type, pt: PType => PType)
-    (impl: (EmitRegion, PType, (PType, EmitTriplet)) => EmitTriplet): Unit =
+    (impl: (EmitRegion, PType, (PType, EmitCode)) => EmitCode): Unit =
     registerCodeWithMissingness(mname, Array(mt1), rt, unwrappedApply(pt)) { case (r, rt, Array(a1)) => impl(r, rt, a1) }
 
   def registerCodeWithMissingness(mname: String, mt1: Type, mt2: Type, rt: Type, pt: (PType, PType) => PType)
-    (impl: (EmitRegion, PType, (PType, EmitTriplet), (PType, EmitTriplet)) => EmitTriplet): Unit =
+    (impl: (EmitRegion, PType, (PType, EmitCode), (PType, EmitCode)) => EmitCode): Unit =
     registerCodeWithMissingness(mname, Array(mt1, mt2), rt, unwrappedApply(pt)) { case (r, rt, Array(a1, a2)) => impl(r, rt, a1, a2) }
 
   def registerCodeWithMissingness(mname: String, mt1: Type, mt2: Type, mt3: Type, mt4: Type, rt: Type, pt: (PType, PType, PType) => PType)
-    (impl: (EmitRegion, PType, (PType, EmitTriplet), (PType, EmitTriplet), (PType, EmitTriplet), (PType, EmitTriplet)) => EmitTriplet): Unit =
+    (impl: (EmitRegion, PType, (PType, EmitCode), (PType, EmitCode), (PType, EmitCode), (PType, EmitCode)) => EmitCode): Unit =
     registerCodeWithMissingness(mname, Array(mt1, mt2, mt3, mt4), rt, unwrappedApply(pt)) { case (r, rt, Array(a1, a2, a3, a4)) => impl(r, rt, a1, a2, a3, a4) }
 
   def registerCodeWithMissingness(mname: String, mt1: Type, mt2: Type, mt3: Type, mt4: Type, mt5: Type, mt6: Type, rt: Type, pt: (PType, PType, PType) => PType)
-    (impl: (EmitRegion, PType, (PType, EmitTriplet), (PType, EmitTriplet), (PType, EmitTriplet), (PType, EmitTriplet), (PType, EmitTriplet), (PType, EmitTriplet)) => EmitTriplet): Unit =
+    (impl: (EmitRegion, PType, (PType, EmitCode), (PType, EmitCode), (PType, EmitCode), (PType, EmitCode), (PType, EmitCode), (PType, EmitCode)) => EmitCode): Unit =
     registerCodeWithMissingness(mname, Array(mt1, mt2, mt3, mt4, mt5, mt6), rt, unwrappedApply(pt)) { case (r, rt, Array(a1, a2, a3, a4, a5, a6)) => impl(r, rt, a1, a2, a3, a4, a5, a6) }
 
   def registerIR(mname: String, retType: Type)(f: () => IR): Unit =
@@ -431,13 +431,13 @@ abstract class RegistryFunctions {
         impl(r, rpt, seed, args.toArray)
       }
 
-      def applySeeded(seed: Long, r: EmitRegion, rpt: PType, args: (PType, EmitTriplet)*): EmitTriplet = {
+      def applySeeded(seed: Long, r: EmitRegion, rpt: PType, args: (PType, EmitCode)*): EmitCode = {
         val setup = args.map(_._2.setup)
         val rpt = returnPType(args.map(_._1), returnType)
         val missing: Code[Boolean] = if (args.isEmpty) false else args.map(_._2.m).reduce(_ || _)
         val value = applySeeded(seed, r, rpt, args.map { case (t, a) => (t, a.v) }: _*)
 
-        EmitTriplet(setup, missing, PValue(rpt, value))
+        EmitCode(setup, missing, PCode(rpt, value))
       }
 
       override val isStrict: Boolean = true
@@ -475,7 +475,7 @@ sealed abstract class IRFunction {
 
   def argTypes: Seq[Type]
 
-  def apply(mb: EmitRegion, returnType: PType, args: (PType, EmitTriplet)*): EmitTriplet
+  def apply(mb: EmitRegion, returnType: PType, args: (PType, EmitCode)*): EmitCode
 
   def getAsMethod(fb: EmitFunctionBuilder[_], rpt: PType, args: PType*): EmitMethodBuilder = ???
 
@@ -501,12 +501,12 @@ abstract class IRFunctionWithoutMissingness extends IRFunction {
 
   def apply(r: EmitRegion, returnPType: PType, args: (PType, Code[_])*): Code[_]
 
-  def apply(r: EmitRegion, returnPType: PType, args: (PType, EmitTriplet)*): EmitTriplet = {
+  def apply(r: EmitRegion, returnPType: PType, args: (PType, EmitCode)*): EmitCode = {
     val setup = args.map(_._2.setup)
     val missing = args.map(_._2.m).reduce(_ || _)
     val value = apply(r, returnPType, args.map { case (t, a) => (t, a.v) }: _*)
 
-    EmitTriplet(setup, missing, PValue(returnPType, value))
+    EmitCode(setup, missing, PCode(returnPType, value))
   }
 
   override def getAsMethod(fb: EmitFunctionBuilder[_], rpt: PType, args: PType*): EmitMethodBuilder = {
@@ -526,7 +526,7 @@ abstract class IRFunctionWithMissingness extends IRFunction {
 
   def argTypes: Seq[Type]
 
-  def apply(r: EmitRegion, rpt: PType, args: (PType, EmitTriplet)*): EmitTriplet
+  def apply(r: EmitRegion, rpt: PType, args: (PType, EmitCode)*): EmitCode
 
   def returnType: Type
 }
@@ -540,9 +540,9 @@ abstract class SeededIRFunction extends IRFunction {
 
   def setSeed(s: Long): Unit = { seed = s }
 
-  def applySeeded(seed: Long, region: EmitRegion, rpt: PType, args: (PType, EmitTriplet)*): EmitTriplet
+  def applySeeded(seed: Long, region: EmitRegion, rpt: PType, args: (PType, EmitCode)*): EmitCode
 
-  def apply(region: EmitRegion, rpt: PType, args: (PType, EmitTriplet)*): EmitTriplet =
+  def apply(region: EmitRegion, rpt: PType, args: (PType, EmitCode)*): EmitCode =
     applySeeded(seed, region, rpt, args: _*)
 
   def returnType: Type

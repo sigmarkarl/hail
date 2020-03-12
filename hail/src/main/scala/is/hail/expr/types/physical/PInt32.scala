@@ -9,13 +9,13 @@ case object PInt32Optional extends PInt32(false)
 case object PInt32Required extends PInt32(true)
 
 class PInt32(override val required: Boolean) extends PNumeric with PPrimitive {
-  lazy val virtualType: TInt32 = TInt32(required)
+  lazy val virtualType: TInt32.type = TInt32
   def _asIdent = "int32"
   override def _pretty(sb: StringBuilder, indent: Int, compact: Boolean): Unit = sb.append("PInt32")
   override type NType = PInt32
 
   override def unsafeOrdering(): UnsafeOrdering = new UnsafeOrdering {
-    def compare(r1: Region, o1: Long, r2: Region, o2: Long): Int = {
+    def compare(o1: Long, o2: Long): Int = {
       Integer.compare(Region.loadInt(o1), Region.loadInt(o2))
     }
   }

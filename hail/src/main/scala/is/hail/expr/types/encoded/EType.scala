@@ -2,6 +2,7 @@ package is.hail.expr.types.encoded
 import java.util
 import java.util.Map.Entry
 
+import is.hail.HailContext
 import is.hail.annotations.{Region, StagedRegionValueBuilder}
 import is.hail.asm4s._
 import is.hail.expr.ir.{IRParser, PunctuationToken, TokenIterator, typeToTypeInfo}
@@ -57,8 +58,8 @@ abstract class EType extends BaseType with Serializable with Requiredness {
       Array[TypeInfo[_]](typeInfo[Region], classInfo[InputBuffer]),
       typeToTypeInfo(pt)) { mb =>
 
-      val region: Code[Region] = mb.getArg[Region](1)
-      val in: Code[InputBuffer] = mb.getArg[InputBuffer](2)
+      val region: Value[Region] = mb.getArg[Region](1)
+      val in: Value[InputBuffer] = mb.getArg[InputBuffer](2)
       val dec = _buildDecoder(pt.fundamentalType, mb, region, in)
       mb.emit(dec)
     }
@@ -76,9 +77,9 @@ abstract class EType extends BaseType with Serializable with Requiredness {
       Array[TypeInfo[_]](typeInfo[Region], typeInfo[Long], classInfo[InputBuffer]),
       UnitInfo)({ mb =>
 
-      val region: Code[Region] = mb.getArg[Region](1)
-      val addr: Code[Long] = mb.getArg[Long](2)
-      val in: Code[InputBuffer] = mb.getArg[InputBuffer](3)
+      val region: Value[Region] = mb.getArg[Region](1)
+      val addr: Value[Long] = mb.getArg[Long](2)
+      val in: Value[InputBuffer] = mb.getArg[InputBuffer](3)
       val dec = _buildInplaceDecoder(pt.fundamentalType, mb, region, addr, in)
       mb.emit(dec)
     })
@@ -90,8 +91,8 @@ abstract class EType extends BaseType with Serializable with Requiredness {
       Array[TypeInfo[_]](classInfo[Region], classInfo[InputBuffer]),
       UnitInfo)({ mb =>
 
-      val r: Code[Region] = mb.getArg[Region](1)
-      val in: Code[InputBuffer] = mb.getArg[InputBuffer](2)
+      val r: Value[Region] = mb.getArg[Region](1)
+      val in: Value[InputBuffer] = mb.getArg[InputBuffer](2)
       val skip = _buildSkip(mb, r, in)
       mb.emit(skip)
     }).invoke(_, _)
@@ -99,21 +100,21 @@ abstract class EType extends BaseType with Serializable with Requiredness {
 
   def _buildEncoder(pt: PType, mb: MethodBuilder, v: Value[_], out: Value[OutputBuffer]): Code[Unit]
 
-  def _buildDecoder(pt: PType, mb: MethodBuilder, region: Code[Region], in: Code[InputBuffer]): Code[_]
+  def _buildDecoder(pt: PType, mb: MethodBuilder, region: Value[Region], in: Value[InputBuffer]): Code[_]
 
   def _buildInplaceDecoder(
     pt: PType,
     mb: MethodBuilder,
-    region: Code[Region],
-    addr: Code[Long],
-    in: Code[InputBuffer]
+    region: Value[Region],
+    addr: Value[Long],
+    in: Value[InputBuffer]
   ): Code[_] = {
     assert(!pt.isInstanceOf[PBaseStruct]) // should be overridden for structs
     val decoded = _buildDecoder(pt, mb, region, in)
     Region.storeIRIntermediate(pt)(addr, decoded)
   }
 
-  def _buildSkip(mb: MethodBuilder, r: Code[Region], in: Code[InputBuffer]): Code[Unit]
+  def _buildSkip(mb: MethodBuilder, r: Value[Region], in: Value[InputBuffer]): Code[Unit]
 
   def _compatible(pt: PType): Boolean = fatal("EType subclasses must override either `_compatible` or both `_encodeCompatible` and `_decodeCompatible`")
 
@@ -154,8 +155,6 @@ abstract class EType extends BaseType with Serializable with Requiredness {
   }
 
   def _decodedPType(requestedType: Type): PType
-
-  override def isOfType(other: BaseType): Boolean = this == other
 }
 
 trait DecoderAsmFunction { def apply(r: Region, in: InputBuffer): Long }
@@ -256,6 +255,10 @@ object EType {
       case t: PFloat64 => EFloat64(t.required)
       case t: PBoolean => EBoolean(t.required)
       case t: PBinary => EBinary(t.required)
+      // FIXME(chrisvittal): turn this on when performance is adequate
+      case t: PArray if t.elementType.fundamentalType.isOfType(PInt32(t.elementType.required)) &&
+          HailContext.get.flags.get("use_packed_int_encoding") != null =>
+         EPackedIntArray(required, t.elementType.required)
       case t: PArray => EArray(defaultFromPType(t.elementType), t.required)
       case t: PBaseStruct => EBaseStruct(t.fields.map(f => EField(f.name, defaultFromPType(f.typ), f.index)), t.required)
     }
@@ -276,6 +279,11 @@ object EType {
       case "EFloat32" => EFloat32(req)
       case "EFloat64" => EFloat64(req)
       case "EBinary" => EBinary(req)
+      case "EPackedIntArray" =>
+        IRParser.punctuation(it, "[")
+        val elementsRequired = IRParser.boolean_literal(it)
+        IRParser.punctuation(it, "]")
+        EPackedIntArray(req, elementsRequired)
       case "EArray" =>
         IRParser.punctuation(it, "[")
         val elementType = eTypeParser(it)

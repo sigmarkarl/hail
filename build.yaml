@@ -479,13 +479,13 @@ steps:
      cd repo
      {{ code.checkout_script }}
      cd hail
-     make jars python-version-info wheel
-     (cd python && zip -r hail.zip hail hailtop)
-     tar czf test.tar.gz -C python test
-     tar czf resources.tar.gz -C src/test resources
-     tar czf data.tar.gz -C python/hail/docs data
-     tar czf www-src.tar.gz www
-     tar czf cluster-tests.tar.gz python/cluster-tests
+     time make jars python-version-info wheel
+     time (cd python && zip -r hail.zip hail hailtop)
+     time tar czf test.tar.gz -C python test
+     time tar czf resources.tar.gz -C src/test resources
+     time tar czf data.tar.gz -C python/hail/docs data
+     time tar czf www-src.tar.gz www
+     time tar czf cluster-tests.tar.gz python/cluster-tests
      (cd build/deploy/dist/ && tar -cvf wheel-container.tar hail-*-py3-none-any.whl)
    outputs:
      - from: /io/repo/hail/build/libs/hail-all-spark.jar
@@ -624,7 +624,7 @@ steps:
    dependsOn:
      - notebook_image
  - kind: runImage
-   name: test_hail_python
+   name: test_hail_python_0
    image:
      valueFrom: hail_run_image.image
    resources:
@@ -638,8 +638,10 @@ steps:
      tar xzf data.tar.gz
      export HAIL_TEST_RESOURCES_DIR=./resources
      export HAIL_DOCTEST_DATA_DIR=./data
-     export PYSPARK_SUBMIT_ARGS="--conf spark.driver.extraClassPath=./hail.jar --conf spark.executor.extraClassPath=./hail.jar pyspark-shell"
+     export PYSPARK_SUBMIT_ARGS="--conf spark.driver.extraClassPath=./hail.jar --conf spark.executor.extraClassPath=./hail.jar --driver-memory 6g pyspark-shell"
      export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}./hail.zip
+     export PYTEST_SPLITS=5
+     export PYTEST_SPLIT_INDEX=0
      python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
    inputs:
      - from: /hail.jar
@@ -655,6 +657,142 @@ steps:
    dependsOn:
     - hail_run_image
     - build_hail
+ - kind: runImage
+   name: test_hail_python_1
+   image:
+     valueFrom: hail_run_image.image
+   resources:
+     memory: "7.5G"
+     cpu: "2"
+   script: |
+     set -ex
+     cd /io
+     tar xzf test.tar.gz
+     tar xzf resources.tar.gz
+     tar xzf data.tar.gz
+     export HAIL_TEST_RESOURCES_DIR=./resources
+     export HAIL_DOCTEST_DATA_DIR=./data
+     export PYSPARK_SUBMIT_ARGS="--conf spark.driver.extraClassPath=./hail.jar --conf spark.executor.extraClassPath=./hail.jar --driver-memory 6g pyspark-shell"
+     export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}./hail.zip
+     export PYTEST_SPLITS=5
+     export PYTEST_SPLIT_INDEX=1
+     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+   inputs:
+     - from: /hail.jar
+       to: /io/hail.jar
+     - from: /hail.zip
+       to: /io/hail.zip
+     - from: /test.tar.gz
+       to: /io/test.tar.gz
+     - from: /resources.tar.gz
+       to: /io/resources.tar.gz
+     - from: /data.tar.gz
+       to: /io/data.tar.gz
+   dependsOn:
+     - hail_run_image
+     - build_hail
+ - kind: runImage
+   name: test_hail_python_2
+   image:
+     valueFrom: hail_run_image.image
+   resources:
+     memory: "7.5G"
+     cpu: "2"
+   script: |
+     set -ex
+     cd /io
+     tar xzf test.tar.gz
+     tar xzf resources.tar.gz
+     tar xzf data.tar.gz
+     export HAIL_TEST_RESOURCES_DIR=./resources
+     export HAIL_DOCTEST_DATA_DIR=./data
+     export PYSPARK_SUBMIT_ARGS="--conf spark.driver.extraClassPath=./hail.jar --conf spark.executor.extraClassPath=./hail.jar --driver-memory 6g pyspark-shell"
+     export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}./hail.zip
+     export PYTEST_SPLITS=5
+     export PYTEST_SPLIT_INDEX=2
+     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+   inputs:
+     - from: /hail.jar
+       to: /io/hail.jar
+     - from: /hail.zip
+       to: /io/hail.zip
+     - from: /test.tar.gz
+       to: /io/test.tar.gz
+     - from: /resources.tar.gz
+       to: /io/resources.tar.gz
+     - from: /data.tar.gz
+       to: /io/data.tar.gz
+   dependsOn:
+     - hail_run_image
+     - build_hail
+ - kind: runImage
+   name: test_hail_python_3
+   image:
+     valueFrom: hail_run_image.image
+   resources:
+     memory: "7.5G"
+     cpu: "2"
+   script: |
+     set -ex
+     cd /io
+     tar xzf test.tar.gz
+     tar xzf resources.tar.gz
+     tar xzf data.tar.gz
+     export HAIL_TEST_RESOURCES_DIR=./resources
+     export HAIL_DOCTEST_DATA_DIR=./data
+     export PYSPARK_SUBMIT_ARGS="--conf spark.driver.extraClassPath=./hail.jar --conf spark.executor.extraClassPath=./hail.jar --driver-memory 6g pyspark-shell"
+     export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}./hail.zip
+     export PYTEST_SPLITS=5
+     export PYTEST_SPLIT_INDEX=3
+     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+   inputs:
+     - from: /hail.jar
+       to: /io/hail.jar
+     - from: /hail.zip
+       to: /io/hail.zip
+     - from: /test.tar.gz
+       to: /io/test.tar.gz
+     - from: /resources.tar.gz
+       to: /io/resources.tar.gz
+     - from: /data.tar.gz
+       to: /io/data.tar.gz
+   dependsOn:
+     - hail_run_image
+     - build_hail
+ - kind: runImage
+   name: test_hail_python_4
+   image:
+     valueFrom: hail_run_image.image
+   resources:
+     memory: "7.5G"
+     cpu: "2"
+   script: |
+     set -ex
+     cd /io
+     tar xzf test.tar.gz
+     tar xzf resources.tar.gz
+     tar xzf data.tar.gz
+     export HAIL_TEST_RESOURCES_DIR=./resources
+     export HAIL_DOCTEST_DATA_DIR=./data
+     export PYSPARK_SUBMIT_ARGS="--conf spark.driver.extraClassPath=./hail.jar --conf spark.executor.extraClassPath=./hail.jar --driver-memory 6g pyspark-shell"
+     export PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}./hail.zip
+     export PYTEST_SPLITS=5
+     export PYTEST_SPLIT_INDEX=4
+     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+   inputs:
+     - from: /hail.jar
+       to: /io/hail.jar
+     - from: /hail.zip
+       to: /io/hail.zip
+     - from: /test.tar.gz
+       to: /io/test.tar.gz
+     - from: /resources.tar.gz
+       to: /io/resources.tar.gz
+     - from: /data.tar.gz
+       to: /io/data.tar.gz
+   dependsOn:
+     - hail_run_image
+     - build_hail
  - kind: runImage
    name: test_python_docs
    image:

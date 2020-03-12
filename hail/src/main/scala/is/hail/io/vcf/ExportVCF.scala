@@ -14,9 +14,9 @@ import scala.io.Source
 
 object ExportVCF {
   def infoNumber(t: Type): String = t match {
-    case TBoolean(_) => "0"
-    case TArray(_, _) => "."
-    case TSet(_, _) => "."
+    case TBoolean => "0"
+    case TArray(_) => "."
+    case TSet(_) => "."
     case _ => "1"
   }
 
@@ -72,7 +72,7 @@ object ExportVCF {
 
   def emitInfo(sb: StringBuilder, f: PField, m: Region, offset: Long, wroteLast: Boolean): Boolean = {
     f.typ match {
-      case it: PContainer if !it.elementType.virtualType.isOfType(TBoolean()) =>
+      case it: PContainer if it.elementType.virtualType != TBoolean =>
         val length = it.loadLength(offset)
         if (length == 0)
           wroteLast
@@ -103,18 +103,18 @@ object ExportVCF {
   }
 
   def infoType(t: Type): Option[String] = t match {
-    case _: TInt32 | _: TInt64 => Some("Integer")
-    case _: TFloat64 | _: TFloat32 => Some("Float")
-    case _: TString => Some("String")
-    case _: TBoolean => Some("Flag")
+    case TInt32 | TInt64 => Some("Integer")
+    case TFloat64 | TFloat32 => Some("Float")
+    case TString => Some("String")
+    case TBoolean => Some("Flag")
     case _ => None
   }
 
   def infoType(f: Field): String = {
     val tOption = f.typ match {
-      case TArray(TBoolean(_), _) | TSet(TBoolean(_), _) => None
-      case TArray(elt, _) => infoType(elt)
-      case TSet(elt, _) => infoType(elt)
+      case TArray(TBoolean) | TSet(TBoolean) => None
+      case TArray(elt) => infoType(elt)
+      case TSet(elt) => infoType(elt)
       case t => infoType(t)
     }
     tOption match {
@@ -124,17 +124,17 @@ object ExportVCF {
   }
 
   def formatType(t: Type): Option[String] = t match {
-    case _: TInt32 | _: TInt64 => Some("Integer")
-    case _: TFloat64 | _: TFloat32 => Some("Float")
-    case _: TString => Some("String")
-    case _: TCall => Some("String")
+    case TInt32 | TInt64 => Some("Integer")
+    case TFloat64 | TFloat32 => Some("Float")
+    case TString => Some("String")
+    case TCall => Some("String")
     case _ => None
   }
 
   def formatType(fieldName: String, t: Type): String = {
     val tOption = t match {
-      case TArray(elt, _) => formatType(elt)
-      case TSet(elt, _) => formatType(elt)
+      case TArray(elt) => formatType(elt)
+      case TSet(elt) => formatType(elt)
       case _ => formatType(t)
     }
 
@@ -146,12 +146,12 @@ object ExportVCF {
 
   def validFormatType(typ: Type): Boolean = {
     typ match {
-      case _: TString => true
-      case _: TFloat64 => true
-      case _: TFloat32 => true
-      case _: TInt32 => true
-      case _: TInt64 => true
-      case _: TCall => true
+      case TString => true
+      case TFloat64 => true
+      case TFloat32 => true
+      case TInt32 => true
+      case TInt64 => true
+      case TCall => true
       case _ => false
     }
   }
@@ -200,7 +200,7 @@ object ExportVCF {
           case t =>
             if (fIsDefined)
               strVCF(sb, t, m, fOffset)
-            else if (t.virtualType.isOfType(TCall()))
+            else if (t.virtualType == TCall)
               sb.append("./.")
             else
               sb += '.'
@@ -234,7 +234,7 @@ object ExportVCF {
     }
     val formatFieldString = formatFieldOrder.map(i => tg.fields(i).name).mkString(":")
 
-    val missingFormatStr = if (typ.entryType.size > 0 && typ.entryType.types(formatFieldOrder(0)).isInstanceOf[TCall])
+    val missingFormatStr = if (typ.entryType.size > 0 && typ.entryType.types(formatFieldOrder(0)) == TCall)
       "./."
     else "."
 
@@ -350,13 +350,13 @@ object ExportVCF {
         case None => (false, 0)
       }
     }
-    val filtersType = TSet(TString())
+    val filtersType = TSet(TString)
     val filtersPType = if (typ.rowType.hasField("filters"))
       mv.rvRowPType.field("filters").typ.asInstanceOf[PSet]
     else null
 
-    val (idExists, idIdx) = lookupVAField("rsid", "ID", Some(TString()))
-    val (qualExists, qualIdx) = lookupVAField("qual", "QUAL", Some(TFloat64()))
+    val (idExists, idIdx) = lookupVAField("rsid", "ID", Some(TString))
+    val (qualExists, qualIdx) = lookupVAField("qual", "QUAL", Some(TFloat64))
     val (filtersExists, filtersIdx) = lookupVAField("filters", "FILTERS", Some(filtersType))
     val (infoExists, infoIdx) = lookupVAField("info", "INFO", None)
 
