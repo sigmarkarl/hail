@@ -25,7 +25,7 @@ repositories {
     maven { url "http://repo.hortonworks.com/content/repositories/releases/" }
     maven { url "http://repo.spring.io/plugins-release/" }
 }
-String sparkVersion = System.getProperty("spark.version", "2.4.4")
+String sparkVersion = System.getProperty("spark.version", "2.4.5")
 String breezeVersion = System.getProperty("breeze.version")
 String py4jVersion = System.getProperty("py4j.version")
 
@@ -41,7 +41,7 @@ if (py4jVersion == null || py4jVersion == '') {
   else if (sparkVersion == '2.3.0')
     py4jVersion = '0.10.6'
   else
-    py4jVersion = '0.10.7'
+    py4jVersion = '0.10.9'
 }
 
 if (breezeVersion == null || breezeVersion == '') {
