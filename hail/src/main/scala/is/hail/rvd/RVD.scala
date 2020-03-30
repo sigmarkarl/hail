@@ -816,6 +816,8 @@ class RVD(
 
     val rowsCodecSpec = TypedCodecSpec(rowsRVType, bufferSpec)
     val entriesCodecSpec = TypedCodecSpec(entriesRVType, bufferSpec)
+    val rowsIndexSpec = IndexSpec.defaultAnnotation("../../index", typ.kType)
+    val entriesIndexSpec = IndexSpec.defaultAnnotation("../../index", typ.kType, withOffsetField = true)
     val makeRowsEnc = rowsCodecSpec.buildEncoder(fullRowType)
     val makeEntriesEnc = entriesCodecSpec.buildEncoder(fullRowType)
     val makeIndexWriter = IndexWriter.builder(typ.kType, +PStruct("entries_offset" -> PInt64()))
@@ -940,7 +942,9 @@ class RVD(
 
     val (partFiles, partitionCounts) = partFilePartitionCounts.unzip
 
-    RichContextRDDRegionValue.writeSplitSpecs(fs, path, rowsCodecSpec, entriesCodecSpec, typ, rowsRVType, entriesRVType, partFiles,
+    RichContextRDDRegionValue.writeSplitSpecs(fs, path,
+      rowsCodecSpec, entriesCodecSpec, rowsIndexSpec, entriesIndexSpec,
+      typ, rowsRVType, entriesRVType, partFiles,
       if (targetPartitioner != null) targetPartitioner else partitioner)
 
     partitionCounts
@@ -1500,6 +1504,8 @@ object RVD {
 
     val rowsCodecSpec = TypedCodecSpec(rowsRVType, bufferSpec)
     val entriesCodecSpec = TypedCodecSpec(entriesRVType, bufferSpec)
+    val rowsIndexSpec = IndexSpec.defaultAnnotation("../../index", localTyp.kType)
+    val entriesIndexSpec = IndexSpec.defaultAnnotation("../../index", localTyp.kType, withOffsetField = true)
     val makeRowsEnc = rowsCodecSpec.buildEncoder(fullRowType)
     val makeEntriesEnc = entriesCodecSpec.buildEncoder(fullRowType)
     val makeIndexWriter = IndexWriter.builder(localTyp.kType, +PStruct("entries_offset" -> PInt64()))
@@ -1554,7 +1560,9 @@ object RVD {
         val fs = bcFS.value
         val s = StringUtils.leftPad(i.toString, fileDigits, '0')
         val basePath = path + s + ".mt"
-        RichContextRDDRegionValue.writeSplitSpecs(fs, basePath, rowsCodecSpec, entriesCodecSpec, localTyp, rowsRVType, entriesRVType, partFiles, partitionerBc.value)
+        RichContextRDDRegionValue.writeSplitSpecs(fs, basePath,
+          rowsCodecSpec, entriesCodecSpec, rowsIndexSpec, entriesIndexSpec,
+          localTyp, rowsRVType, entriesRVType, partFiles, partitionerBc.value)
       }
 
     partCounts

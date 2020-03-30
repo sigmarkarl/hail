@@ -8,6 +8,7 @@ import is.hail.asm4s.coerce
 import is.hail.experimental.ExperimentalFunctions
 import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
+import is.hail.variant.Locus
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -27,10 +28,17 @@ object IRFunctionRegistry {
   val codeRegistry: mutable.MultiMap[String, IRFunction] =
     new mutable.HashMap[String, mutable.Set[IRFunction]] with mutable.MultiMap[String, IRFunction]
 
-  def addIRFunction(f: IRFunction): Unit =
+  def addIRFunction(f: IRFunction): Unit = {
+    if (!isJavaIdentifier(f.name))
+      throw new IllegalArgumentException(s"Illegal function name, not Java identifier: ${ f.name }")
+
     codeRegistry.addBinding(f.name, f)
+  }
 
   def addIR(name: String, argTypes: Seq[Type], retType: Type, alwaysInline: Boolean, f: Seq[IR] => IR): Unit = {
+    if (!isJavaIdentifier(name))
+      throw new IllegalArgumentException(s"Illegal function name, not Java identifier: $name")
+
     val m = irRegistry.getOrElseUpdate(name, new mutable.HashMap[(Seq[Type], Type, Boolean), Seq[IR] => IR]())
     m.update((argTypes, retType, alwaysInline), f)
   }
@@ -39,6 +47,9 @@ object IRFunctionRegistry {
     argNames: java.util.ArrayList[String],
     argTypeStrs: java.util.ArrayList[String], retType: String,
     body: IR): Unit = {
+    if (!isJavaIdentifier(mname))
+      throw new IllegalArgumentException(s"Illegal function name, not Java identifier: $mname")
+
     val argTypes = argTypeStrs.asScala.map(IRParser.parseType).toFastIndexedSeq
     userAddedFunctions += ((mname, (body.typ, argTypes)))
     addIR(mname,
@@ -175,6 +186,18 @@ abstract class RegistryFunctions {
         r.region, coerce[Long](c))
   }
 
+  def boxedTypeInfo(t: PType): TypeInfo[_ >: Null] = t match {
+    case _: PBoolean => classInfo[java.lang.Boolean]
+    case _: PInt32 => classInfo[java.lang.Integer]
+    case _: PInt64 => classInfo[java.lang.Long]
+    case _: PFloat32 => classInfo[java.lang.Float]
+    case _: PFloat64 => classInfo[java.lang.Double]
+    case _: PCall => classInfo[java.lang.Integer]
+    case t: PString => classInfo[java.lang.String]
+    case t: PLocus => classInfo[Locus]
+    case _ => classInfo[AnyRef]
+  }
+
   def boxArg(r: EmitRegion, t: PType): Code[_] => Code[AnyRef] = t match {
     case _: PBoolean => c => Code.boxBoolean(coerce[Boolean](c))
     case _: PInt32 => c => Code.boxInt(coerce[Int](c))
@@ -202,9 +225,9 @@ abstract class RegistryFunctions {
     case TCall => coerce[Int]
     case TArray(TInt32) => c =>
       val srvb = new StagedRegionValueBuilder(r, pt)
-      val alocal = r.mb.newLocal[IndexedSeq[Int]]
-      val len = r.mb.newLocal[Int]
-      val v = r.mb.newLocal[java.lang.Integer]
+      val alocal = r.mb.newLocal[IndexedSeq[Int]]()
+      val len = r.mb.newLocal[Int]()
+      val v = r.mb.newLocal[java.lang.Integer]()
 
       Code(
         alocal := coerce[IndexedSeq[Int]](c),
@@ -218,9 +241,9 @@ abstract class RegistryFunctions {
         srvb.offset)
     case TArray(TFloat64) => c =>
       val srvb = new StagedRegionValueBuilder(r, pt)
-      val alocal = r.mb.newLocal[IndexedSeq[Double]]
-      val len = r.mb.newLocal[Int]
-      val v = r.mb.newLocal[java.lang.Double]
+      val alocal = r.mb.newLocal[IndexedSeq[Double]]()
+      val len = r.mb.newLocal[Int]()
+      val v = r.mb.newLocal[java.lang.Double]()
 
       Code(
         alocal := coerce[IndexedSeq[Double]](c),
@@ -234,9 +257,9 @@ abstract class RegistryFunctions {
         srvb.offset)
     case TArray(TString) => c =>
       val srvb = new StagedRegionValueBuilder(r, pt)
-      val alocal = r.mb.newLocal[IndexedSeq[String]]
-      val len = r.mb.newLocal[Int]
-      val v = r.mb.newLocal[java.lang.String]
+      val alocal = r.mb.newLocal[IndexedSeq[String]]()
+      val len = r.mb.newLocal[Int]()
+      val v = r.mb.newLocal[java.lang.String]()
 
       Code(
         alocal := coerce[IndexedSeq[String]](c),
@@ -259,7 +282,12 @@ abstract class RegistryFunctions {
 
       override val returnType: Type = rType
 
-      override def returnPType(argTypes: Seq[PType], returnType: Type): PType = if (pt == null) PType.canonical(returnType) else pt(argTypes)
+      override def returnPType(argTypes: Seq[PType], returnType: Type): PType = {
+        val p = if (pt == null) PType.canonical(returnType) else pt(argTypes)
+
+        // IRFunctionWithoutMissingness returns missing if any arguments are missing
+        p.setRequired(argTypes.forall(_.required))
+      }
 
       override def apply(r: EmitRegion, returnPType: PType, args: (PType, Code[_])*): Code[_] = {
         unify(args.map(_._1.virtualType))
@@ -390,7 +418,7 @@ abstract class RegistryFunctions {
     (impl: (EmitRegion, PType, (PType, EmitCode), (PType, EmitCode)) => EmitCode): Unit =
     registerCodeWithMissingness(mname, Array(mt1, mt2), rt, unwrappedApply(pt)) { case (r, rt, Array(a1, a2)) => impl(r, rt, a1, a2) }
 
-  def registerCodeWithMissingness(mname: String, mt1: Type, mt2: Type, mt3: Type, mt4: Type, rt: Type, pt: (PType, PType, PType) => PType)
+  def registerCodeWithMissingness(mname: String, mt1: Type, mt2: Type, mt3: Type, mt4: Type, rt: Type, pt: (PType, PType, PType, PType) => PType)
     (impl: (EmitRegion, PType, (PType, EmitCode), (PType, EmitCode), (PType, EmitCode), (PType, EmitCode)) => EmitCode): Unit =
     registerCodeWithMissingness(mname, Array(mt1, mt2, mt3, mt4), rt, unwrappedApply(pt)) { case (r, rt, Array(a1, a2, a3, a4)) => impl(r, rt, a1, a2, a3, a4) }
 
@@ -415,6 +443,7 @@ abstract class RegistryFunctions {
 
   def registerSeeded(mname: String, aTypes: Array[Type], rType: Type, pt: Seq[PType] => PType)
     (impl: (EmitRegion, PType, Long, Array[(PType, Code[_])]) => Code[_]) {
+
     IRFunctionRegistry.addIRFunction(new SeededIRFunction {
       val isDeterministic: Boolean = false
 
@@ -432,7 +461,7 @@ abstract class RegistryFunctions {
       }
 
       def applySeeded(seed: Long, r: EmitRegion, rpt: PType, args: (PType, EmitCode)*): EmitCode = {
-        val setup = args.map(_._2.setup)
+        val setup = Code(args.map(_._2.setup))
         val rpt = returnPType(args.map(_._1), returnType)
         val missing: Code[Boolean] = if (args.isEmpty) false else args.map(_._2.m).reduce(_ || _)
         val value = applySeeded(seed, r, rpt, args.map { case (t, a) => (t, a.v) }: _*)
@@ -477,7 +506,7 @@ sealed abstract class IRFunction {
 
   def apply(mb: EmitRegion, returnType: PType, args: (PType, EmitCode)*): EmitCode
 
-  def getAsMethod(fb: EmitFunctionBuilder[_], rpt: PType, args: PType*): EmitMethodBuilder = ???
+  def getAsMethod[C](cb: EmitClassBuilder[C], rpt: PType, args: PType*): EmitMethodBuilder[C] = ???
 
   def returnType: Type
 
@@ -502,18 +531,18 @@ abstract class IRFunctionWithoutMissingness extends IRFunction {
   def apply(r: EmitRegion, returnPType: PType, args: (PType, Code[_])*): Code[_]
 
   def apply(r: EmitRegion, returnPType: PType, args: (PType, EmitCode)*): EmitCode = {
-    val setup = args.map(_._2.setup)
+    val setup = Code(args.map(_._2.setup))
     val missing = args.map(_._2.m).reduce(_ || _)
     val value = apply(r, returnPType, args.map { case (t, a) => (t, a.v) }: _*)
 
     EmitCode(setup, missing, PCode(returnPType, value))
   }
 
-  override def getAsMethod(fb: EmitFunctionBuilder[_], rpt: PType, args: PType*): EmitMethodBuilder = {
+  override def getAsMethod[C](cb: EmitClassBuilder[C], rpt: PType, args: PType*): EmitMethodBuilder[C] = {
     val unified = unify(args.map(_.virtualType) :+ rpt.virtualType)
     assert(unified)
     val ts = argTypes.map(t => typeToTypeInfo(t.subst()))
-    val methodbuilder = fb.newMethod((typeInfo[Region] +: ts).toArray, typeToTypeInfo(rpt))
+    val methodbuilder = cb.genEmitMethod(name, (typeInfo[Region] +: ts).toFastIndexedSeq, typeToTypeInfo(rpt))
     methodbuilder.emit(apply(EmitRegion.default(methodbuilder), rpt, args.zip(ts.zipWithIndex.map { case (a, i) => methodbuilder.getArg(i + 2)(a).load() }): _*))
     methodbuilder
   }

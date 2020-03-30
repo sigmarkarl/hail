@@ -35,17 +35,17 @@ object CodeOrdering {
   def rowOrdering(
     t1: PBaseStruct,
     t2: PBaseStruct,
-    mb: EmitMethodBuilder,
+    mb: EmitMethodBuilder[_],
     sortOrders: Array[SortOrder] = null
   ): CodeOrdering = new CodeOrdering {
     require(sortOrders == null || sortOrders.size == t1.size)
     type T = Long
 
-    val m1: LocalRef[Boolean] = mb.newLocal[Boolean]
-    val m2: LocalRef[Boolean] = mb.newLocal[Boolean]
+    val m1: LocalRef[Boolean] = mb.newLocal[Boolean]()
+    val m2: LocalRef[Boolean] = mb.newLocal[Boolean]()
 
-    val v1s: Array[LocalRef[_]] = t1.types.map(tf => mb.newLocal(ir.typeToTypeInfo(tf)))
-    val v2s: Array[LocalRef[_]] = t2.types.map(tf => mb.newLocal(ir.typeToTypeInfo(tf)))
+    val v1s: Array[LocalRef[_]] = t1.types.map(tf => mb.newLocal()(ir.typeToTypeInfo(tf)))
+    val v2s: Array[LocalRef[_]] = t2.types.map(tf => mb.newLocal()(ir.typeToTypeInfo(tf)))
 
     def setup(i: Int)(x: Value[Long], y: Value[Long]): Code[Unit] = {
       val tf1 = t1.types(i)
@@ -65,14 +65,14 @@ object CodeOrdering {
         op)
 
     override def compareNonnull(x: Code[Long], y: Code[Long]): Code[Int] = {
-      val cmp = mb.newLocal[Int]
+      val cmp = mb.newLocal[Int]()
 
       Code.memoize(x, "cord_row_comp_x", y, "cord_row_comp_y") { (x, y) =>
         val c = Array.tabulate(t1.size) { i =>
           val mbcmp = fieldOrdering(i, CodeOrdering.compare)
           Code(setup(i)(x, y),
             mbcmp((m1, v1s(i)), (m2, v2s(i))))
-        }.foldRight[Code[Int]](cmp.load()) { (ci, cont) => cmp.ceq(0).mux(Code(cmp := ci, cont), cmp) }
+        }.foldRight(cmp.get) { (ci, cont) => cmp.ceq(0).mux(Code(cmp := ci, cont), cmp) }
 
         Code(cmp := 0, c)
       }
@@ -132,19 +132,19 @@ object CodeOrdering {
       }
   }
 
-  def iterableOrdering(t1: PArray, t2: PArray, mb: EmitMethodBuilder): CodeOrdering = new CodeOrdering {
+  def iterableOrdering(t1: PArray, t2: PArray, mb: EmitMethodBuilder[_]): CodeOrdering = new CodeOrdering {
     type T = Long
     val lord: CodeOrdering = PInt32().codeOrdering(mb)
     val ord: CodeOrdering = t1.elementType.codeOrdering(mb, t2.elementType)
-    val len1: LocalRef[Int] = mb.newLocal[Int]
-    val len2: LocalRef[Int] = mb.newLocal[Int]
-    val lim: LocalRef[Int] = mb.newLocal[Int]
-    val i: LocalRef[Int] = mb.newLocal[Int]
-    val m1: LocalRef[Boolean] = mb.newLocal[Boolean]
-    val v1: LocalRef[ord.T] = mb.newLocal(ir.typeToTypeInfo(t1.elementType)).asInstanceOf[LocalRef[ord.T]]
-    val m2: LocalRef[Boolean] = mb.newLocal[Boolean]
-    val v2: LocalRef[ord.T] = mb.newLocal(ir.typeToTypeInfo(t2.elementType)).asInstanceOf[LocalRef[ord.T]]
-    val eq: LocalRef[Boolean] = mb.newLocal[Boolean]
+    val len1: LocalRef[Int] = mb.newLocal[Int]()
+    val len2: LocalRef[Int] = mb.newLocal[Int]()
+    val lim: LocalRef[Int] = mb.newLocal[Int]()
+    val i: LocalRef[Int] = mb.newLocal[Int]()
+    val m1: LocalRef[Boolean] = mb.newLocal[Boolean]()
+    val v1: LocalRef[ord.T] = mb.newLocal()(ir.typeToTypeInfo(t1.elementType)).asInstanceOf[LocalRef[ord.T]]
+    val m2: LocalRef[Boolean] = mb.newLocal[Boolean]()
+    val v2: LocalRef[ord.T] = mb.newLocal()(ir.typeToTypeInfo(t2.elementType)).asInstanceOf[LocalRef[ord.T]]
+    val eq: LocalRef[Boolean] = mb.newLocal[Boolean]()
 
     def loop(cmp: Code[Unit], loopCond: Code[Boolean])
       (x: Code[Long], y: Code[Long]): Code[Unit] = {
@@ -165,7 +165,7 @@ object CodeOrdering {
 
     override def compareNonnull(x: Code[Long], y: Code[Long]): Code[Int] = {
       val mbcmp = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.compare)
-      val cmp = mb.newLocal[Int]
+      val cmp = mb.newLocal[Int]()
 
       Code(cmp := 0,
         loop(cmp := mbcmp((m1, v1), (m2, v2)), cmp.ceq(0))(x, y),
@@ -177,7 +177,7 @@ object CodeOrdering {
     override def ltNonnull(x: Code[Long], y: Code[Long]): Code[Boolean] = {
       val mblt = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.lt)
       val mbequiv = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.equiv)
-      val lt = mb.newLocal[Boolean]
+      val lt = mb.newLocal[Boolean]()
       val lcmp = Code(
         lt := mblt((m1, v1), (m2, v2)),
         eq := mbequiv((m1, v1), (m2, v2)))
@@ -191,7 +191,7 @@ object CodeOrdering {
       val mblteq = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.lteq)
       val mbequiv = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.equiv)
 
-      val lteq = mb.newLocal[Boolean]
+      val lteq = mb.newLocal[Boolean]()
       val lcmp = Code(
         lteq := mblteq((m1, v1), (m2, v2)),
         eq := mbequiv((m1, v1), (m2, v2)))
@@ -204,7 +204,7 @@ object CodeOrdering {
     override def gtNonnull(x: Code[Long], y: Code[Long]): Code[Boolean] = {
       val mbgt = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.gt)
       val mbequiv = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.equiv)
-      val gt = mb.newLocal[Boolean]
+      val gt = mb.newLocal[Boolean]()
       val lcmp = Code(
         gt := mbgt((m1, v1), (m2, v2)),
         eq := !gt && mbequiv((m1, v1), (m2, v2)))
@@ -220,7 +220,7 @@ object CodeOrdering {
       val mbgteq = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.gteq)
       val mbequiv = mb.getCodeOrdering(t1.elementType, t2.elementType, CodeOrdering.equiv)
 
-      val gteq = mb.newLocal[Boolean]
+      val gteq = mb.newLocal[Boolean]()
       val lcmp = Code(
         gteq := mbgteq((m1, v1), (m2, v2)),
         eq := mbequiv((m1, v1), (m2, v2)))
@@ -240,12 +240,12 @@ object CodeOrdering {
     }
   }
 
-  def intervalOrdering(t1: PInterval, t2: PInterval, mb: EmitMethodBuilder): CodeOrdering = new CodeOrdering {
+  def intervalOrdering(t1: PInterval, t2: PInterval, mb: EmitMethodBuilder[_]): CodeOrdering = new CodeOrdering {
     type T = Long
-    val mp1: LocalRef[Boolean] = mb.newLocal[Boolean]
-    val mp2: LocalRef[Boolean] = mb.newLocal[Boolean]
-    val p1: LocalRef[_] = mb.newLocal(ir.typeToTypeInfo(t1.pointType))
-    val p2: LocalRef[_] = mb.newLocal(ir.typeToTypeInfo(t2.pointType))
+    val mp1: LocalRef[Boolean] = mb.newLocal[Boolean]()
+    val mp2: LocalRef[Boolean] = mb.newLocal[Boolean]()
+    val p1: LocalRef[_] = mb.newLocal()(ir.typeToTypeInfo(t1.pointType))
+    val p2: LocalRef[_] = mb.newLocal()(ir.typeToTypeInfo(t2.pointType))
 
     def loadStart(x: Value[T], y: Value[T]): Code[Unit] = {
       Code(
@@ -266,20 +266,20 @@ object CodeOrdering {
     override def compareNonnull(x: Code[T], y: Code[T]): Code[Int] = {
       val mbcmp = mb.getCodeOrdering(t1.pointType, t2.pointType, CodeOrdering.compare)
 
-      val cmp = mb.newLocal[Int]
+      val cmp = mb.newLocal[Int]()
       Code.memoize(x, "cord_int_comp_x", y, "cord_int_comp_y") { (x, y) =>
         Code(loadStart(x, y),
           cmp := mbcmp((mp1, p1), (mp2, p2)),
           cmp.ceq(0).mux(
-            Code(mp1 := t1.includeStart(x),
-              mp1.cne(t2.includeStart(y)).mux(
+            Code(mp1 := t1.includesStart(x),
+              mp1.cne(t2.includesStart(y)).mux(
                 mp1.mux(-1, 1),
                 Code(
                   loadEnd(x, y),
                   cmp := mbcmp((mp1, p1), (mp2, p2)),
                   cmp.ceq(0).mux(
-                    Code(mp1 := t1.includeEnd(x),
-                      mp1.cne(t2.includeEnd(y)).mux(mp1.mux(1, -1), 0)),
+                    Code(mp1 := t1.includesEnd(x),
+                      mp1.cne(t2.includesEnd(y)).mux(mp1.mux(1, -1), 0)),
                     cmp)))),
             cmp))
       }
@@ -290,9 +290,9 @@ object CodeOrdering {
 
       Code.memoize(x, "cord_int_equiv_x", y, "cord_int_equiv_y") { (x, y) =>
         Code(loadStart(x, y), mbeq((mp1, p1), (mp2, p2))) &&
-          t1.includeStart(x).ceq(t2.includeStart(y)) &&
+          t1.includesStart(x).ceq(t2.includesStart(y)) &&
           Code(loadEnd(x, y), mbeq((mp1, p1), (mp2, p2))) &&
-          t1.includeEnd(x).ceq(t2.includeEnd(y))
+          t1.includesEnd(x).ceq(t2.includesEnd(y))
       }
     }
 
@@ -303,10 +303,10 @@ object CodeOrdering {
       Code.memoize(x, "cord_int_lt_x", y, "cord_int_lt_y") { (x, y) =>
         Code(loadStart(x, y), mblt((mp1, p1), (mp2, p2))) || (
           mbeq((mp1, p1), (mp2, p2)) && (
-            Code(mp1 := t1.includeStart(x), mp2 := t2.includeStart(y), mp1 && !mp2) || (mp1.ceq(mp2) && (
+            Code(mp1 := t1.includesStart(x), mp2 := t2.includesStart(y), mp1 && !mp2) || (mp1.ceq(mp2) && (
               Code(loadEnd(x, y), mblt((mp1, p1), (mp2, p2))) || (
                 mbeq((mp1, p1), (mp2, p2)) &&
-                  !t1.includeEnd(x) && t2.includeEnd(y))))))
+                  !t1.includesEnd(x) && t2.includesEnd(y))))))
       }
     }
 
@@ -317,10 +317,10 @@ object CodeOrdering {
       Code.memoize(x, "cord_int_lteq_x", y, "cord_int_lteq_y") { (x, y) =>
         Code(loadStart(x, y), mblteq((mp1, p1), (mp2, p2))) && (
           !mbeq((mp1, p1), (mp2, p2)) || (// if not equal, then lt
-            Code(mp1 := t1.includeStart(x), mp2 := t2.includeStart(y), mp1 && !mp2) || (mp1.ceq(mp2) && (
+            Code(mp1 := t1.includesStart(x), mp2 := t2.includesStart(y), mp1 && !mp2) || (mp1.ceq(mp2) && (
               Code(loadEnd(x, y), mblteq((mp1, p1), (mp2, p2))) && (
                 !mbeq((mp1, p1), (mp2, p2)) ||
-                  !t1.includeEnd(x) || t2.includeEnd(y))))))
+                  !t1.includesEnd(x) || t2.includesEnd(y))))))
       }
     }
 
@@ -331,10 +331,10 @@ object CodeOrdering {
       Code.memoize(x, "cord_int_gt_x", y, "cord_int_gt_y") { (x, y) =>
         Code(loadStart(x, y), mbgt((mp1, p1), (mp2, p2))) || (
           mbeq((mp1, p1), (mp2, p2)) && (
-            Code(mp1 := t1.includeStart(x), mp2 := t2.includeStart(y), !mp1 && mp2) || (mp1.ceq(mp2) && (
+            Code(mp1 := t1.includesStart(x), mp2 := t2.includesStart(y), !mp1 && mp2) || (mp1.ceq(mp2) && (
               Code(loadEnd(x, y), mbgt((mp1, p1), (mp2, p2))) || (
                 mbeq((mp1, p1), (mp2, p2)) &&
-                  t1.includeEnd(x) && !t2.includeEnd(y))))))
+                  t1.includesEnd(x) && !t2.includesEnd(y))))))
       }
     }
 
@@ -345,18 +345,18 @@ object CodeOrdering {
       Code.memoize(x, "cord_int_gteq_x", y, "cord_int_gteq_y") { (x, y) =>
         Code(loadStart(x, y), mbgteq((mp1, p1), (mp2, p2))) && (
           !mbeq((mp1, p1), (mp2, p2)) || (// if not equal, then lt
-            Code(mp1 := t1.includeStart(x), mp2 := t2.includeStart(y), !mp1 && mp2) || (mp1.ceq(mp2) && (
+            Code(mp1 := t1.includesStart(x), mp2 := t2.includesStart(y), !mp1 && mp2) || (mp1.ceq(mp2) && (
               Code(loadEnd(x, y), mbgteq((mp1, p1), (mp2, p2))) && (
                 !mbeq((mp1, p1), (mp2, p2)) ||
-                  t1.includeEnd(x) || !t2.includeEnd(y))))))
+                  t1.includesEnd(x) || !t2.includesEnd(y))))))
       }
     }
   }
 
-  def mapOrdering(t1: PDict, t2: PDict, mb: EmitMethodBuilder): CodeOrdering =
+  def mapOrdering(t1: PDict, t2: PDict, mb: EmitMethodBuilder[_]): CodeOrdering =
     iterableOrdering(PArray(t1.elementType, t1.required), PArray(t2.elementType, t2.required), mb)
 
-  def setOrdering(t1: PSet, t2: PSet, mb: EmitMethodBuilder): CodeOrdering =
+  def setOrdering(t1: PSet, t2: PSet, mb: EmitMethodBuilder[_]): CodeOrdering =
     iterableOrdering(PArray(t1.elementType, t1.required), PArray(t2.elementType, t2.required), mb)
 
 }

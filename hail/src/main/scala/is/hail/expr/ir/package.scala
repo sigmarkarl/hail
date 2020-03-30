@@ -3,6 +3,7 @@ package is.hail.expr
 import is.hail.asm4s
 import is.hail.asm4s._
 import is.hail.annotations.RegionValue
+import is.hail.asm4s.joinpoint.Ctrl
 import is.hail.expr.ir.functions.IRFunctionRegistry
 import is.hail.expr.types._
 import is.hail.expr.types.physical.PType
@@ -87,9 +88,13 @@ package object ir {
   implicit def irToPrimitiveIR(ir: IR): PrimitiveIR = new PrimitiveIR(ir)
 
   implicit def intToIR(i: Int): IR = I32(i)
+
   implicit def longToIR(l: Long): IR = I64(l)
+
   implicit def floatToIR(f: Float): IR = F32(f)
+
   implicit def doubleToIR(d: Double): IR = F64(d)
+
   implicit def booleanToIR(b: Boolean): IR = if (b) True() else False()
 
   def zero(t: Type): IR = t match {
@@ -99,11 +104,17 @@ package object ir {
     case TFloat64 => F64(0d)
   }
 
+
   def mapIR(stream: IR)(f: IR => IR): IR = {
     val ref = Ref(genUID(), coerce[TStream](stream.typ).elementType)
     StreamMap(stream, ref.name, f(ref))
   }
 
   def rangeIR(n: IR): IR = StreamRange(0, n, 1)
+
   def rangeIR(start: IR, stop: IR): IR = StreamRange(start, stop, 1)
+
+  implicit def toRichIndexedSeqEmitSettable(s: IndexedSeq[EmitSettable]): RichIndexedSeqEmitSettable = new RichIndexedSeqEmitSettable(s)
+
+  implicit def emitValueToCode(ev: EmitValue): EmitCode = ev.get
 }

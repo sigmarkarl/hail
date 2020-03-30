@@ -828,7 +828,7 @@ steps:
      mkdir -p www/docs
      rm -f www/*.md
      mv python/hail/docs/_build/html www/docs/0.2
-     mv python/hailtop/pipeline/docs/_build/html www/docs/batch
+     mv python/hailtop/pipeline/docs/_build/html www/docs/pipeline
      HAIL_CACHE_VERSION=$(cat python/hail/hail_version)
      find www -iname *.html -type f -exec sed -i -e "s/\.css/\.css\?v\=$HAIL_CACHE_VERSION/" {} +;
      tar czf /io/www.tar.gz www
@@ -1004,6 +1004,8 @@ steps:
       script: /io/sql/add-batches-time-closed.sql
     - name: add-instance-zone
       script: /io/sql/add-instance-zone.sql
+    - name: add-batches-time-created-index
+      script: /io/sql/add-batches-time-created-index.sql
    inputs:
     - from: /repo/batch/sql
       to: /io/

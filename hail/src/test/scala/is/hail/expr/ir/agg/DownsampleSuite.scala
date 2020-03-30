@@ -13,15 +13,16 @@ class DownsampleSuite extends HailSuite {
   @Test def testLargeRandom(): Unit = {
     val lt = PArray(PString())
     val fb = EmitFunctionBuilder[Unit]("foo")
-    val ds1 = new DownsampleState(fb, lt, maxBufferSize = 4)
-    val ds2 = new DownsampleState(fb, lt, maxBufferSize = 4)
-    val ds3 = new DownsampleState(fb, lt, maxBufferSize = 4)
+    val cb = fb.ecb
+    val ds1 = new DownsampleState(cb, lt, maxBufferSize = 4)
+    val ds2 = new DownsampleState(cb, lt, maxBufferSize = 4)
+    val ds3 = new DownsampleState(cb, lt, maxBufferSize = 4)
 
-    val rand = fb.newRNG(0).invoke[Double, Double, Double]("runif", 0d, 1d)
-    val i = fb.newLocal[Int]
+    val rng = fb.newRNG(0)
+    val i = fb.newLocal[Int]()
 
-    val x = fb.newLocal[Double]
-    val y = fb.newLocal[Double]
+    val x = fb.newLocal[Double]()
+    val y = fb.newLocal[Double]()
     fb.emit(Code(FastIndexedSeq(
       ds1.r := Region.stagedCreate(Region.SMALL),
       ds2.r := Region.stagedCreate(Region.SMALL),
@@ -30,8 +31,8 @@ class DownsampleSuite extends HailSuite {
       ds1.init(100),
       ds2.init(100),
       Code.whileLoop(i < 10000000,
-        x := rand,
-        y := rand,
+        x := rng.invoke[Double, Double, Double]("runif", 0d, 1d),
+        y := rng.invoke[Double, Double, Double]("runif", 0d, 1d),
         ds1.insert(x, y, true, 0L),
         i := i + const(1)),
       ds1.merge(ds2),

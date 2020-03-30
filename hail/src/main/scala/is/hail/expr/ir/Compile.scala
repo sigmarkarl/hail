@@ -36,7 +36,7 @@ object Compile {
       case None =>
     }
 
-    val fb = new EmitFunctionBuilder[F](argTypeInfo, GenericTypeInfo[R]())
+    val fb = EmitFunctionBuilder[F]("Compiled", argTypeInfo, GenericTypeInfo[R]())
 
     var ir = body
     ir = Subst(ir, BindingEnv(args
@@ -49,6 +49,18 @@ object Compile {
     InferPType(ir, Env(args.map { case (n, pt, _) => n -> pt}: _*))
 
     assert(TypeToIRIntermediateClassTag(ir.typ) == classTag[R])
+
+    /*
+    {
+      def visit(x: IR): Unit = {
+        println(f"${ System.identityHashCode(x) }%08x    ${ x.getClass.getSimpleName } ${ x.pType }")
+        Children(x).foreach {
+          case c: IR => visit(c)
+        }
+      }
+
+      visit(ir)
+    } */
 
     Emit(ctx, ir, fb)
 
@@ -241,7 +253,7 @@ object CompileWithAggregators2 {
       case None =>
     }
 
-    val fb = new EmitFunctionBuilder[F](argTypeInfo, GenericTypeInfo[R]())
+    val fb = EmitFunctionBuilder[F]("CompiledWithAggs", argTypeInfo, GenericTypeInfo[R]())
 
     var ir = body
     ir = Subst(ir, BindingEnv(args

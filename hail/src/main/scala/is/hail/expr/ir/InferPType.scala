@@ -6,9 +6,13 @@ import is.hail.utils._
 
 object InferPType {
 
-  def clearPTypes(x: IR): Unit = {
-    x._pType = null
-    x.children.foreach { c => clearPTypes(c.asInstanceOf[IR]) }
+  def clearPTypes(x: BaseIR): Unit = {
+    x match {
+      case x: IR =>
+        x._pType = null
+      case _ =>
+    }
+    x.children.foreach(clearPTypes)
   }
 
   // does not unify physical arg types if multiple nested seq/init ops appear; instead takes the first. The emitter checks equality.
@@ -231,7 +235,9 @@ object InferPType {
         infer(s)
         assert(i.pType isOfType PInt32())
 
-        coerce[PArray](a.pType).elementType.setRequired(a.pType.required && i.pType.required)
+        val aType = coerce[PArray](a.pType)
+        val elemType = aType.elementType
+        elemType.orMissing(a.pType.required && i.pType.required)
       case ArraySort(a, leftName, rightName, compare) =>
         infer(a)
         val et = coerce[PStream](a.pType).elementType
@@ -271,7 +277,7 @@ object InferPType {
       case StreamMap(a, name, body) =>
         infer(a)
         infer(body, env.bind(name, a.pType.asInstanceOf[PStream].elementType))
-        coerce[PStream](a.pType).copy(body.pType, a.pType.required)
+        PStream(body.pType, a.pType.required)
       case StreamZip(as, names, body, behavior) =>
         as.foreach(infer(_))
         val e = behavior match {
@@ -281,7 +287,7 @@ object InferPType {
             env.bindIterable(names.zip(as.map(a => a.pType.asInstanceOf[PStream].elementType)))
         }
         infer(body, e)
-        coerce[PStream](as.head.pType).copy(body.pType, as.forall(_.pType.required))
+        PStream(body.pType, as.forall(_.pType.required))
       case StreamFilter(a, name, cond) =>
         infer(a)
         infer(cond, env = env.bind(name, a.pType.asInstanceOf[PStream].elementType))
@@ -291,19 +297,21 @@ object InferPType {
         infer(body, env.bind(name, a.pType.asInstanceOf[PStream].elementType))
 
         // Whether an array must return depends on a, but element requiredeness depends on body (null a elements elided)
-        coerce[PStream](a.pType).copy(coerce[PIterable](body.pType).elementType, a.pType.required)
+        PStream(coerce[PIterable](body.pType).elementType, a.pType.required)
       case StreamFold(a, zero, accumName, valueName, body) =>
         infer(zero)
         infer(a)
-        infer(body, env.bind(accumName -> zero.pType, valueName -> a.pType.asInstanceOf[PStream].elementType))
-        if (body.pType != zero.pType) {
-          val resPType = InferPType.getNestedElementPTypes(FastSeq(body.pType, zero.pType))
+        val accType = zero.pType.orMissing(a.pType.required)
+        infer(body, env.bind(accumName -> accType, valueName -> a.pType.asInstanceOf[PStream].elementType))
+        if (body.pType != accType) {
+          val resPType = InferPType.getNestedElementPTypes(FastSeq(body.pType, accType))
           // the below does a two-pass inference to unify the accumulator with the body ptype.
           // this is not ideal, may cause problems in the future.
           clearPTypes(body)
           infer(body, env.bind(accumName -> resPType, valueName -> a.pType.asInstanceOf[PStream].elementType))
           resPType
-        } else zero.pType
+        } else
+          accType
       case StreamFor(a, value, body) =>
         infer(a)
         infer(body, env.bind(value -> a.pType.asInstanceOf[PStream].elementType))
@@ -347,7 +355,7 @@ object InferPType {
           resPType
         } else zero.pType
 
-        coerce[PStream](a.pType).copy(elementType = x.accPType)
+        PStream(elementType = x.accPType)
       case StreamLeftJoinDistinct(lIR, rIR, lName, rName, compare, join) =>
         infer(lIR)
         infer(rIR)
@@ -356,7 +364,7 @@ object InferPType {
         infer(compare, e)
         infer(join, e)
 
-        coerce[PStream](lIR.pType).copy(join.pType, lIR.pType.required)
+        PStream(join.pType, lIR.pType.required)
       case NDArrayShape(nd) =>
         infer(nd)
         val r = nd.pType.asInstanceOf[PNDArray].shape.pType
@@ -604,7 +612,7 @@ object InferPType {
         val sigs = signature.indices.map { i => computePhysicalAgg(signature(i), inits(i), seqs(i)) }.toArray
         infer(result, env = e2, aggs = sigs, inits = null, seqs = null)
         x.physicalSignatures = sigs
-        coerce[PStream](array.pType).copy(result.pType)
+        PStream(result.pType, array.pType.required)
       case AggStateValue(i, sig) => PCanonicalBinary(true)
       case x if x.typ == TVoid =>
         x.children.foreach(c => infer(c.asInstanceOf[IR]))

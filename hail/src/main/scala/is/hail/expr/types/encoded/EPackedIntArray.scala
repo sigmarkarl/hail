@@ -2,6 +2,7 @@ package is.hail.expr.types.encoded
 
 import is.hail.annotations.{Region, UnsafeUtils}
 import is.hail.asm4s._
+import is.hail.expr.ir.EmitMethodBuilder
 import is.hail.expr.types.BaseType
 import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
@@ -11,7 +12,9 @@ import is.hail.utils._
 final case class EPackedIntArray(
   override val required: Boolean = false,
   val elementsRequired: Boolean
-) extends EType {
+) extends EContainer {
+  def elementType: EType = EInt32(elementsRequired)
+
   override def _compatible(pt: PType): Boolean = {
     pt.required == required &&
       pt.isInstanceOf[PArray] &&
@@ -20,7 +23,7 @@ final case class EPackedIntArray(
 
   def _decodedPType(requestedType: Type): PType = EArray(EInt32(elementsRequired), required)._decodedPType(requestedType)
 
-  def _buildDecoder(pt: PType, mb: MethodBuilder, region: Value[Region], in: Value[InputBuffer]): Code[_] = {
+  def _buildDecoder(pt: PType, mb: EmitMethodBuilder[_], region: Value[Region], in: Value[InputBuffer]): Code[_] = {
     val pa = pt.asInstanceOf[PArray]
 
     val i = mb.newLocal[Int]("i")
@@ -33,7 +36,7 @@ final case class EPackedIntArray(
     val data = mb.newLocal[Array[Byte]]("data")
     val unpacker = mb.newLocal[IntPacker]("unpacker")
 
-    Code.concat[Long](
+    Code(Code(FastIndexedSeq(
       unpacker := getPacker(mb),
       len := in.readInt(),
       array := pa.allocate(region, len),
@@ -66,11 +69,11 @@ final case class EPackedIntArray(
             unpacker.invoke[Long, Unit]("unpack", pa.elementOffset(array, len, i)),
             Code._empty),
           i := i + 1
-        )),
+        )))),
       array)
   }
 
-  def _buildSkip(mb: MethodBuilder, r: Value[Region], in: Value[InputBuffer]): Code[Unit] = {
+  def _buildSkip(mb: EmitMethodBuilder[_], r: Value[Region], in: Value[InputBuffer]): Code[Unit] = {
     val len = mb.newLocal[Int]("len")
 
     Code(
@@ -84,7 +87,7 @@ final case class EPackedIntArray(
     )
   }
 
-  def _buildEncoder(pt: PType, mb: MethodBuilder, v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
+  def _buildEncoder(pt: PType, mb: EmitMethodBuilder[_], v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
     val pa = pt.asInstanceOf[PArray]
 
     val packer = mb.newLocal[IntPacker]("packer")
@@ -94,7 +97,7 @@ final case class EPackedIntArray(
     val keysLen = mb.newLocal[Int]("keysLen")
     val dataLen = mb.newLocal[Int]("dataLen")
 
-    Code.concat[Unit](
+    Code(Code(FastIndexedSeq(
       packer := getPacker(mb),
       len := pa.loadLength(array),
       out.writeInt(len),
@@ -115,14 +118,14 @@ final case class EPackedIntArray(
             i := i + const(1))),
       packer.load().finish(),
       out.writeInt(packer.load().ki + packer.load().di),
-      out.write(packer.load().keys, const(0), packer.load().ki),
+      out.write(packer.load().keys, const(0), packer.load().ki))),
       out.write(packer.load().data, const(0), packer.load().di))
   }
 
   def _asIdent: String = s"packedintarray_w_${if (elementsRequired) "required" else "optional"}_elements"
   def _toPretty: String = s"EPackedIntArray[${if (elementsRequired) "True" else "False"}]"
 
-  private def getPacker(mb: MethodBuilder): LazyFieldRef[IntPacker] = {
-    mb.fb.getOrDefineLazyField[IntPacker](Code.newInstance[IntPacker], "thePacker")
+  private def getPacker(mb: EmitMethodBuilder[_]): Value[IntPacker] = {
+    mb.getOrDefineLazyField[IntPacker](Code.newInstance[IntPacker], "thePacker")
   }
 }

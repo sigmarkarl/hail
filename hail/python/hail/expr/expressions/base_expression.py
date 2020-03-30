@@ -572,7 +572,11 @@ class Expression(object):
         elif name in {"==", "!=", "<", "<=", ">", ">="}:
             op = ApplyComparisonOp(name, self._ir, other._ir)
         else:
-            op = Apply(name, ret_type, self._ir, other._ir)
+            d = {
+                '+': 'add', '-': 'sub', '*': 'mul', '/': 'div', '//': 'floordiv',
+                '%': 'mod', '**': 'pow'
+            }
+            op = Apply(d.get(name, name), ret_type, self._ir, other._ir)
         return expressions.construct_expr(op, ret_type, indices, aggregations)
 
     def _bin_op_reverse(self, name, other, ret_type):
@@ -586,27 +590,25 @@ class Expression(object):
 
     def _index(self, ret_type, key):
         key = to_expr(key)
-        return self._method("[]", ret_type, key)
+        return self._method("index", ret_type, key)
 
     def _slice(self, ret_type, start=None, stop=None, step=None):
-        ir_args = []
-        if start is not None:
-            start = to_expr(start)
-            ir_args.append(start)
-            start_str = "*"
-        else:
-            start_str = ""
-        if stop is not None:
-            stop = to_expr(stop)
-            ir_args.append(stop)
-            stop_str = "*"
-        else:
-            stop_str = ""
         if step is not None:
             raise NotImplementedError('Variable slice step size is not currently supported')
 
-        mname = "[{}:{}]".format(start_str, stop_str)
-        return self._method(mname, ret_type, *ir_args)
+        if start is not None:
+            start = to_expr(start)
+            if stop is not None:
+                stop = to_expr(stop)
+                return self._method('slice', ret_type, start, stop)
+            else:
+                return self._method('sliceRight', ret_type, start)
+        else:
+            if stop is not None:
+                stop = to_expr(stop)
+                return self._method('sliceLeft', ret_type, stop)
+            else:
+                return self
 
     def _ir_lambda_method(self, irf, f, input_type, ret_type_f, *args):
         args = (to_expr(arg)._ir for arg in args)
@@ -722,7 +724,7 @@ class Expression(object):
             raise NotImplementedError('cannot convert aggregated expression to table')
 
         if source is None:
-            return fallback_name, Env.dummy_table().select(**{fallback_name: self})
+            return fallback_name, hl.Table.parallelize([hl.struct(**{fallback_name: self})], n_partitions=1)
 
         name = source._fields_inverse.get(self)
         top_level = name is not None
@@ -731,7 +733,7 @@ class Expression(object):
         named_self = {name: self}
         if len(axes) == 0:
             x = source.select_globals(**named_self)
-            ds = Env.dummy_table().select(**{name: x.index_globals()[name]})
+            ds = hl.Table.parallelize([x.index_globals()], n_partitions=1)
         elif isinstance(source, hail.Table):
             if top_level and name in source.key:
                 named_self = {}
