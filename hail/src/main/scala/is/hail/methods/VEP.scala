@@ -12,7 +12,7 @@ import is.hail.expr.types._
 import is.hail.expr.types.physical.{PStruct, PType}
 import is.hail.expr.types.virtual._
 import is.hail.methods.VEP._
-import is.hail.rvd.{RVD, RVDContext, RVDType}
+import is.hail.rvd.RVD
 import is.hail.sparkextras.ContextRDD
 import is.hail.utils._
 import is.hail.variant.{Locus, RegionValueVariant, VariantMethods}
@@ -22,7 +22,6 @@ import org.json4s.jackson.JsonMethods
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
-import scala.io.Source
 
 case class VEPConfiguration(
   command: Array[String],
@@ -31,7 +30,7 @@ case class VEPConfiguration(
 
 object VEP {
   def readConfiguration(fs: FS, path: String): VEPConfiguration = {
-    val jv = fs.readFile(path) { in =>
+    val jv = using(fs.open(path)) { in =>
       JsonMethods.parse(in)
     }
     implicit val formats = defaultJSONFormats + new TStructSerializer
@@ -100,7 +99,7 @@ object VEP {
 }
 
 case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTableFunction {
-  private lazy val conf = VEP.readConfiguration(HailContext.sFS, config)
+  private lazy val conf = VEP.readConfiguration(HailContext.fs, config)
   private lazy val vepSignature = conf.vep_json_schema
 
   override def preservesPartitionCounts: Boolean = false
@@ -114,7 +113,7 @@ case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTabl
     assert(tv.typ.key == FastIndexedSeq("locus", "alleles"))
     assert(tv.typ.rowType.size == 2)
 
-    val conf = readConfiguration(HailContext.sFS, config)
+    val conf = readConfiguration(HailContext.fs, config)
     val vepSignature = conf.vep_json_schema
 
     val cmd = conf.command.map(s =>

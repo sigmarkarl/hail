@@ -102,6 +102,7 @@ async def get_pr(request, userdata):  # pylint: disable=unused-argument
     pr = wb.prs[pr_number]
 
     page_context = {}
+    page_context['wb'] = wb
     page_context['repo'] = wb.branch.repo.short_str()
     page_context['pr'] = pr
     # FIXME
@@ -187,7 +188,7 @@ async def post_authorized_source_sha(request, userdata):  # pylint: disable=unus
     log.info(f'authorized sha: {sha}')
     session = await aiohttp_session.get_session(request)
     set_message(session, f'SHA {sha} authorized.', 'info')
-    raise web.HTTPFound('/')
+    raise web.HTTPFound(deploy_config.base_path('ci') + '/')
 
 
 @routes.get('/healthcheck')

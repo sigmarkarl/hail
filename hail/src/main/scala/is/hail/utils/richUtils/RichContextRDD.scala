@@ -32,8 +32,8 @@ class RichContextRDD[T: ClassTag](crdd: ContextRDD[T]) {
     write: (RVDContext, Iterator[T], OutputStream, IndexWriter) => Long
   ): (Array[String], Array[Long]) = {
     val hc = HailContext.get
-    val fs = hc.sFS
-    val bcFS = hc.bcFS
+    val fs = hc.fs
+    val bcFS = hc.fsBc
 
     fs.mkDir(path + "/parts")
     if (idxRelPath != null)
@@ -61,7 +61,7 @@ class RichContextRDD[T: ClassTag](crdd: ContextRDD[T]) {
           partPath -> idxPath
         } else
           finalFilename -> finalIdxFilename
-      val os = fs.unsafeWriter(filename)
+      val os = fs.create(filename)
       val iw = mkIdxWriter(fs, idxFilename)
       val count = write(ctx, it, os, iw)
       if (iw != null)

@@ -13,7 +13,7 @@ import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
 import is.hail.expr.Nat
 import is.hail.expr.types.encoded.{EArray, EBaseStruct, EBinary, EField, EFloat32, EFloat64, EInt32, EInt64, EType}
-import is.hail.io.bgen.MatrixBGENReader
+import is.hail.io.bgen.{IndexBgen, MatrixBGENReader}
 import is.hail.io.{BufferSpec, TypedCodecSpec}
 import is.hail.linalg.BlockMatrix
 import is.hail.methods._
@@ -37,7 +37,7 @@ object IRSuite {
 
   object TestFunctions extends RegistryFunctions {
 
-    def registerSeededWithMissingness(mname: String, aTypes: Array[Type], rType: Type, pt: Seq[PType] => PType)(impl: (EmitRegion, PType, Long, Array[(PType, EmitCode)]) => EmitCode) {
+    def registerSeededWithMissingness(mname: String, aTypes: Array[Type], rType: Type, pt: (Type, Seq[PType]) => PType)(impl: (EmitRegion, PType, Long, Array[EmitCode]) => EmitCode) {
       IRFunctionRegistry.addIRFunction(new SeededIRFunction {
         val isDeterministic: Boolean = false
 
@@ -47,32 +47,32 @@ object IRSuite {
 
         override val returnType: Type = rType
 
-        override def returnPType(argTypes: Seq[PType], returnType: Type): PType = if (pt == null) PType.canonical(returnType) else pt(argTypes)
+        override def returnPType(argTypes: Seq[PType], returnType: Type): PType = if (pt == null) PType.canonical(returnType) else pt(returnType, argTypes)
 
-        def applySeeded(seed: Long, r: EmitRegion, rpt: PType, args: (PType, EmitCode)*): EmitCode = {
-          unify(args.map(_._1.virtualType))
+        def applySeeded(seed: Long, r: EmitRegion, rpt: PType, args: EmitCode*): EmitCode = {
+          unify(args.map(_.pt.virtualType))
           impl(r, rpt, seed, args.toArray)
         }
       })
     }
 
-    def registerSeededWithMissingness(mname: String, mt1: Type, rType: Type, pt: PType => PType)(impl: (EmitRegion, PType, Long, (PType, EmitCode)) => EmitCode): Unit =
+    def registerSeededWithMissingness(mname: String, mt1: Type, rType: Type, pt: (Type, PType) => PType)(impl: (EmitRegion, PType, Long, EmitCode) => EmitCode): Unit =
       registerSeededWithMissingness(mname, Array(mt1), rType, unwrappedApply(pt)) { case (r, rt, seed, Array(a1)) => impl(r, rt, seed, a1) }
 
     def registerAll() {
-      registerSeededWithMissingness("incr_s", TBoolean, TBoolean, null) { case (mb, rt,  _, (lT, l)) =>
+      registerSeededWithMissingness("incr_s", TBoolean, TBoolean, null) { case (mb, rt,  _, l) =>
         EmitCode(Code(Code.invokeScalaObject[Unit](outer.getClass, "incr"), l.setup),
           l.m,
           PCode(rt, l.v))
       }
 
-      registerSeededWithMissingness("incr_m", TBoolean, TBoolean, null) { case (mb, rt, _, (lT, l)) =>
+      registerSeededWithMissingness("incr_m", TBoolean, TBoolean, null) { case (mb, rt, _, l) =>
         EmitCode(l.setup,
           Code(Code.invokeScalaObject[Unit](outer.getClass, "incr"), l.m),
           PCode(rt, l.v))
       }
 
-      registerSeededWithMissingness("incr_v", TBoolean, TBoolean, null) { case (mb, rt, _, (lT, l)) =>
+      registerSeededWithMissingness("incr_v", TBoolean, TBoolean, null) { case (mb, rt, _, l) =>
         EmitCode(l.setup,
           l.m,
           PCode(rt, Code(Code.invokeScalaObject[Unit](outer.getClass, "incr"), l.v)))
@@ -2499,7 +2499,7 @@ class IRSuite extends HailSuite {
 
   @DataProvider(name = "valueIRs")
   def valueIRs(): Array[Array[IR]] = {
-    hc.indexBgen(FastIndexedSeq("src/test/resources/example.8bits.bgen"), rg = Some("GRCh37"), contigRecoding = Map("01" -> "1"))
+    IndexBgen(ctx, Array("src/test/resources/example.8bits.bgen"), rg = Some("GRCh37"), contigRecoding = Map("01" -> "1"))
 
     val b = True()
     val c = Ref("c", TBoolean)
@@ -2733,7 +2733,7 @@ class IRSuite extends HailSuite {
   @DataProvider(name = "matrixIRs")
   def matrixIRs(): Array[Array[MatrixIR]] = {
     try {
-      hc.indexBgen(FastIndexedSeq("src/test/resources/example.8bits.bgen"), rg = Some("GRCh37"), contigRecoding = Map("01" -> "1"))
+      IndexBgen(ctx, Array("src/test/resources/example.8bits.bgen"), rg = Some("GRCh37"), contigRecoding = Map("01" -> "1"))
 
       val tableRead = TableIR.read(hc, "src/test/resources/backward_compatability/1.0.0/table/0.ht")
       val read = MatrixIR.read(hc, "src/test/resources/backward_compatability/1.0.0/matrix_table/0.hmt")
@@ -3173,7 +3173,7 @@ class IRSuite extends HailSuite {
         |       (MakeStruct (locus  (Apply start Locus(GRCh37) (Ref __uid_3))))
         |       (MakeStruct (locus  (Apply end Locus(GRCh37) (Ref __uid_3)))) (True) (False))))
         |""".stripMargin)
-    val (v, _) = HailContext.backend.execute(ir, optimize = true)
+    val (v, _) = HailContext.sparkBackend().execute(ir, optimize = true)
     assert(
       ir.typ.ordering.equiv(
         FastIndexedSeq(

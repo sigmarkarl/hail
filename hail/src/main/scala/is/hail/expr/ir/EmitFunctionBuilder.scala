@@ -7,7 +7,7 @@ import is.hail.annotations.{CodeOrdering, Region, RegionValueBuilder}
 import is.hail.asm4s._
 import is.hail.backend.BackendUtils
 import is.hail.expr.ir.functions.IRRandomness
-import is.hail.expr.types.physical.{PCanonicalTuple, PType}
+import is.hail.expr.types.physical.{PCanonicalTuple, PCode, PSettable, PType}
 import is.hail.expr.types.virtual.Type
 import is.hail.io.{BufferSpec, TypedCodecSpec}
 import is.hail.io.fs.FS
@@ -151,11 +151,11 @@ trait WrappedEmitClassBuilder[C] extends WrappedEmitModuleBuilder with WrappedCl
     body: (EmitMethodBuilder[_], Code[A1], Code[A2]) => Code[R]
   ): (Code[A1], Code[A2]) => Code[R] = ecb.wrapInEmitMethod[A1, A2, R](baseName, body)
 
-  def getUnsafeReader(path: Code[String], checkCodec: Code[Boolean]): Code[InputStream] =
-    getFS.invoke[String, Boolean, InputStream]("unsafeReader", path, checkCodec)
+  def open(path: Code[String], checkCodec: Code[Boolean]): Code[InputStream] =
+    getFS.invoke[String, Boolean, InputStream]("open", path, checkCodec)
 
-  def getUnsafeWriter(path: Code[String]): Code[OutputStream] =
-    getFS.invoke[String, OutputStream]("unsafeWriter", path)
+  def create(path: Code[String]): Code[OutputStream] =
+    getFS.invoke[String, OutputStream]("create", path)
 
   def genDependentFunction[A1: TypeInfo, A2: TypeInfo, R: TypeInfo](
     baseName: String = null
@@ -338,11 +338,11 @@ class EmitClassBuilder[C](
       val confField = genFieldThisRef[FS]()
       val mb = newEmitMethod("addFS", Array(typeInfo[FS]), typeInfo[Unit])
       mb.emit(confField := mb.getArg[FS](1))
-      _hfs = HailContext.sFS
+      _hfs = HailContext.fs
       _hfield = confField
     }
 
-    assert(_hfs == HailContext.sFS && _hfield != null)
+    assert(_hfs == HailContext.fs && _hfield != null)
     _hfield.load()
   }
 

@@ -1,70 +1,60 @@
 package is.hail.io.fs
 
 import java.io._
-import java.util
 
-import is.hail.utils.{TextInputFilterAndReplace, WithContext}
-import net.jpountz.lz4.LZ4Compressor
-import com.esotericsoftware.kryo.io.{Input, Output}
-import org.apache.hadoop.fs.{ FSDataInputStream, FSDataOutputStream }
+import is.hail.HailContext
+import is.hail.backend.BroadcastValue
+import is.hail.io.compress.BGzipCodec
+import is.hail.utils._
 
-trait FileSystem {
-  def open: FSDataInputStream
-  def open(path: FilePath): FSDataInputStream
-  def open(path: String): FSDataInputStream
+import org.apache.commons.io.IOUtils
+import org.apache.hadoop
 
-  def getPath(path: String): FilePath
-  def makeQualified(path: String): FilePath
-  def makeQualified(path: FilePath): FilePath
-  def deleteOnExit(path: FilePath): Boolean
+import scala.io.Source
+
+trait Positioned {
+  def getPosition: Long
+}
+
+trait Seekable extends Positioned {
+  def seek(pos: Long): Unit
+}
+
+class WrappedSeekableDataInputStream(is: SeekableInputStream) extends DataInputStream(is) with Seekable {
+  def getPosition: Long = is.getPosition
+
+  def seek(pos: Long): Unit = is.seek(pos)
+}
+
+class WrappedPositionedDataOutputStream(os: PositionedOutputStream) extends DataOutputStream(os) with Positioned {
+  def getPosition: Long = os.getPosition
 }
 
 trait FileStatus {
-  def getPath: FilePath
-  def getModificationTime: Long
+  def getPath: String
+  def getModificationTime: java.lang.Long
   def getLen: Long
   def isDirectory: Boolean
   def isFile: Boolean
   def getOwner: String
 }
 
-trait FilePath extends Serializable{
-  type Configuration
+trait FS extends Serializable {
+  def getCodec(filename: String): hadoop.io.compress.CompressionCodec
 
-  def toString: String
-  def getName: String
-  def getFileSystem(conf: Configuration): FileSystem
-}
+  def getCodecs(): IndexedSeq[String]
 
-trait FS extends Serializable{
-  def getProperty(name: String): String
+  def setCodecs(codecs: IndexedSeq[String]): Unit
 
-  def setProperty(name: String, value: String): Unit
+  def openNoCompression(filename: String): SeekableDataInputStream
 
-  def getProperties: Iterator[util.Map.Entry[String, String]]
+  def createNoCompression(filename: String): PositionedDataOutputStream
 
-  protected def open(filename: String, checkCodec: Boolean = true): InputStream
-  /**
-    * @return true if a new directory was created, false otherwise
-    **/
-  def mkDir(dirname: String): Boolean
+  def mkDir(dirname: String): Unit
 
   def delete(filename: String, recursive: Boolean)
 
-  def exists(files: String*): Boolean
-
-  def isFile(filename: String): Boolean
-
-  def isDir(path: String): Boolean
-
   def listStatus(filename: String): Array[FileStatus]
-
-  def fileSystem(filename: String): FileSystem
-
-  def getFileSize(filename: String): Long
-
-  def getTemporaryFile(tmpdir: String, nChar: Int = 10,
-                       prefix: Option[String] = None, suffix: Option[String] = None): String
 
   def glob(filename: String): Array[FileStatus]
 
@@ -72,55 +62,216 @@ trait FS extends Serializable{
 
   def globAllStatuses(filenames: Iterable[String]): Array[FileStatus]
 
-  def copy(src: String, dst: String, deleteSource: Boolean = false): Unit
-
-  def copyMerge( sourceFolder: String,
-                 destinationFile: String,
-                 numPartFilesExpected: Int,
-                 deleteSource: Boolean = true,
-                 header: Boolean = true,
-                 partFilesOpt: Option[IndexedSeq[String]] = None ): Unit
-
-  def copyMergeList(srcFileStatuses: Array[FileStatus], destFilename: String, deleteSource: Boolean = true)
-
-  def stripCodec(s: String): String
-
-  def getCodec(s: String): String
-
   def fileStatus(filename: String): FileStatus
 
-  def writeObjectFile[T](filename: String)(f: (ObjectOutputStream) => T): T
+  def makeQualified(path: String): String
 
-  def readObjectFile[T](filename: String)(f: (ObjectInputStream) => T): T
+  def deleteOnExit(path: String): Unit
 
-  def writeDataFile[T](filename: String)(f: (DataOutputStream) => T): T
+  def open(filename: String, checkCodec: Boolean = true): InputStream = {
+    val is = openNoCompression(filename)
 
-  def readDataFile[T](filename: String)(f: (DataInputStream) => T): T
+    if (checkCodec) {
+      val codec = getCodec(filename)
+      if (codec != null)
+        codec.createInputStream(is)
+      else
+        is
+    } else
+      is
+  }
 
-  def writeTextFile[T](filename: String)(f: (OutputStreamWriter) => T): T
+  def create(filename: String): OutputStream = {
+    val os = createNoCompression(filename)
 
-  def readTextFile[T](filename: String)(f: (InputStreamReader) => T): T
+    val codec = getCodec(filename)
+    if (codec != null)
+      codec.createOutputStream(os)
+    else
+      os
+  }
 
-  def writeKryoFile[T](filename: String)(f: (Output) => T): T
+  def getFileSize(filename: String): Long = fileStatus(filename).getLen
 
-  def readKryoFile[T](filename: String)(f: (Input) => T): T
+  def isFile(filename: String): Boolean = {
+    try {
+      fileStatus(filename).isFile
+    } catch {
+      case _: FileNotFoundException => false
+    }
+  }
 
-  def readFile[T](filename: String)(f: (InputStream) => T): T
+  def isDir(filename: String): Boolean = {
+    try {
+      fileStatus(filename).isDirectory
+    } catch {
+      case _: FileNotFoundException => false
+    }
+  }
 
-  def writeFile[T](filename: String)(f: (OutputStream) => T): T
+  def exists(filename: String): Boolean = {
+    try {
+      fileStatus(filename)
+      true
+    } catch {
+      case _: FileNotFoundException => false
+    }
+  }
 
-  def readFileNoCompression[T](filename: String)(f: (FSDataInputStream) => T): T
+  def stripCodecExtension(filename: String): String = {
+    val ext = getCodecExtension(filename)
+    filename.dropRight(ext.length)
+  }
 
-  def writeFileNoCompression[T](filename: String)(f: (FSDataOutputStream) => T): T
+  def getCodecExtension(filename: String): String = {
+    val codec = getCodec(filename)
+    if (codec != null) {
+      val ext = codec.getDefaultExtension
+      assert(filename.endsWith(ext))
+      ext
+    } else
+      ""
+  }
 
-  def readLines[T](filename: String, filtAndReplace: TextInputFilterAndReplace = TextInputFilterAndReplace())(reader: Iterator[WithContext[String]] => T): T
+  def copy(src: String, dst: String, deleteSource: Boolean = false) {
+    using(openNoCompression(src)) { is =>
+      using(createNoCompression(dst)) { os =>
+        IOUtils.copy(is, os)
+      }
+    }
+    if (deleteSource)
+      delete(src, recursive = false)
+  }
 
-  def writeTable(filename: String, lines: Traversable[String], header: Option[String] = None)
+  def readLines[T](filename: String, filtAndReplace: TextInputFilterAndReplace = TextInputFilterAndReplace())(reader: Iterator[WithContext[String]] => T): T = {
+    using(open(filename)) {
+      is =>
+        val lines = Source.fromInputStream(is)
+          .getLines()
+          .zipWithIndex
+          .map {
+            case (value, position) =>
+              val source = Context(value, filename, Some(position))
+              WithContext(value, source)
+          }
+        reader(filtAndReplace(lines))
+    }
+  }
 
-  def writeLZ4DataFile[T](path: String, blockSize: Int, compressor: LZ4Compressor)(writer: (DataOutputStream) => T): T
+  def writeTable(filename: String, lines: Traversable[String], header: Option[String] = None): Unit = {
+    using(new OutputStreamWriter(create(filename))) { fw =>
+        header.foreach { h =>
+          fw.write(h)
+          fw.write('\n')
+        }
+        lines.foreach { line =>
+          fw.write(line)
+          fw.write('\n')
+        }
+    }
+  }
 
-  def unsafeReader(filename: String, checkCodec: Boolean = true): InputStream
+  def copyMerge(
+    sourceFolder: String,
+    destinationFile: String,
+    numPartFilesExpected: Int,
+    deleteSource: Boolean = true,
+    header: Boolean = true,
+    partFilesOpt: Option[IndexedSeq[String]] = None
+  ) {
+    if (!exists(sourceFolder + "/_SUCCESS"))
+      fatal("write failed: no success indicator found")
 
-  def unsafeWriter(filename: String): OutputStream
+    delete(destinationFile, recursive = true) // overwriting by default
+
+    val headerFileStatus = glob(sourceFolder + "/header")
+
+    if (header && headerFileStatus.isEmpty)
+      fatal(s"Missing header file")
+    else if (!header && headerFileStatus.nonEmpty)
+      fatal(s"Found unexpected header file")
+
+    val partFileStatuses = partFilesOpt match {
+      case None => glob(sourceFolder + "/part-*")
+      case Some(files) => files.map(f => fileStatus(sourceFolder + "/" + f)).toArray
+    }
+    val sortedPartFileStatuses = partFileStatuses.sortBy(fs => getPartNumber(new hadoop.fs.Path(fs.getPath).getName))
+    if (sortedPartFileStatuses.length != numPartFilesExpected)
+      fatal(s"Expected $numPartFilesExpected part files but found ${ sortedPartFileStatuses.length }")
+
+    val filesToMerge = headerFileStatus ++ sortedPartFileStatuses
+
+    info(s"merging ${ filesToMerge.length } files totalling " +
+      s"${ readableBytes(sortedPartFileStatuses.map(_.getLen).sum) }...")
+
+    val (_, dt) = time {
+      copyMergeList(filesToMerge, destinationFile, deleteSource)
+    }
+
+    info(s"while writing:\n    $destinationFile\n  merge time: ${ formatTime(dt) }")
+
+    if (deleteSource) {
+      delete(sourceFolder, recursive = true)
+      if (header)
+        delete(sourceFolder + ".header", recursive = false)
+    }
+  }
+
+  def copyMergeList(srcFileStatuses: Array[FileStatus], destFilename: String, deleteSource: Boolean = true) {
+    val codec = Option(getCodec(destFilename))
+    val isBGzip = codec.exists(_.isInstanceOf[BGzipCodec])
+
+    require(srcFileStatuses.forall {
+      fileStatus => fileStatus.getPath != destFilename && fileStatus.isFile
+    })
+
+    using(createNoCompression(destFilename)) { os =>
+
+      var i = 0
+      while (i < srcFileStatuses.length) {
+        val fileStatus = srcFileStatuses(i)
+        val lenAdjust: Long = if (isBGzip && i < srcFileStatuses.length - 1)
+          -28
+        else
+          0
+        using(openNoCompression(fileStatus.getPath)) { is =>
+          hadoop.io.IOUtils.copyBytes(is, os,
+            fileStatus.getLen + lenAdjust,
+            false)
+        }
+        i += 1
+      }
+    }
+
+    if (deleteSource) {
+      srcFileStatuses.foreach { fileStatus =>
+        delete(fileStatus.getPath.toString, recursive = true)
+      }
+    }
+  }
+
+  def getTemporaryFile(tmpdir: String, nChar: Int = 10,
+    prefix: Option[String] = None, suffix: Option[String] = None): String = {
+
+    val prefixString = if (prefix.isDefined) prefix.get + "-" else ""
+    val suffixString = if (suffix.isDefined) "." + suffix.get else ""
+
+    def getRandomName: String = {
+      val randomName = tmpdir + "/" + prefixString + scala.util.Random.alphanumeric.take(nChar).mkString + suffixString
+      val fileExists = exists(randomName)
+
+      if (!fileExists)
+        randomName
+      else
+        getRandomName
+    }
+
+    getRandomName
+  }
+
+  def touch(filename: String): Unit = {
+    using(createNoCompression(filename))(_ => ())
+  }
+
+  lazy val broadcast: BroadcastValue[FS] = HailContext.backend.broadcast(this)
 }
-

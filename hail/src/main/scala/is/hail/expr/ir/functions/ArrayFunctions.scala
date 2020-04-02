@@ -4,7 +4,7 @@ import is.hail.annotations.Region
 import is.hail.asm4s._
 import is.hail.expr.ir._
 import is.hail.expr.types.coerce
-import is.hail.expr.types.physical.{PArray, PFloat64, PType}
+import is.hail.expr.types.physical.{PArray, PCode, PFloat64, PType}
 import is.hail.expr.types.virtual._
 import is.hail.utils._
 
@@ -305,9 +305,10 @@ object ArrayFunctions extends RegistryFunctions {
     }
 
     registerCodeWithMissingness("corr", TArray(TFloat64), TArray(TFloat64), TFloat64, {
-      (t1: PType, t2: PType) => PFloat64()
-    }) {
-      case (r, rt, (t1: PArray, EmitCode(setup1, m1, v1)), (t2: PArray, EmitCode(setup2, m2, v2))) =>
+      (_: Type, _: PType, _: PType) => PFloat64()
+    }) { case (r, rt, EmitCode(setup1, m1, v1), EmitCode(setup2, m2, v2)) =>
+        val t1 = v1.pt.asInstanceOf[PArray]
+        val t2 = v2.pt.asInstanceOf[PArray]
         val a1 = r.mb.newLocal[Long]()
         val a2 = r.mb.newLocal[Long]()
         val xSum = r.mb.newLocal[Double]()

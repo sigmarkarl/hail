@@ -1,6 +1,7 @@
 package is.hail.expr.ir
 
 import is.hail.asm4s.{Code, CodeBuilderLike, MethodBuilder, TypeInfo, Value}
+import is.hail.expr.types.physical.{PCode, PValue, PSettable}
 
 object EmitCodeBuilder {
   def apply(mb: EmitMethodBuilder[_]): EmitCodeBuilder = new EmitCodeBuilder(mb, Code._empty)
@@ -16,6 +17,11 @@ object EmitCodeBuilder {
   def scopedCode[T](mb: EmitMethodBuilder[_])(f: (EmitCodeBuilder) => Code[T]): Code[T] = {
     val (cbcode, retcode) = EmitCodeBuilder.scoped(mb)(f)
     Code(cbcode, retcode)
+  }
+
+  def scopedVoid(mb: EmitMethodBuilder[_])(f: (EmitCodeBuilder) => Unit): Code[Unit] = {
+    val (cbcode, _) = EmitCodeBuilder.scoped(mb)(f)
+    cbcode
   }
 }
 

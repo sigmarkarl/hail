@@ -4,7 +4,7 @@ import is.hail.annotations.{Region, StagedRegionValueBuilder}
 import is.hail.asm4s
 import is.hail.asm4s._
 import is.hail.expr.ir._
-import is.hail.expr.types.physical.{PArray, PBoolean, PCanonicalArray, PCanonicalString, PInt32, PInt64, PSet, PString, PType}
+import is.hail.expr.types.physical._
 import is.hail.expr.types.virtual._
 import is.hail.utils._
 import java.util.Locale
@@ -96,12 +96,12 @@ object StringFunctions extends RegistryFunctions {
   def registerAll(): Unit = {
     val thisClass = getClass
 
-    registerCode("length", TString, TInt32, (_: PType) => PInt32()) { case (r: EmitRegion, rt, (sT: PString, s: Code[Long])) =>
-      asm4s.coerce[String](wrapArg(r, sT)(s)).invoke[Int]("length")
+    registerPCode("length", TString, TInt32, (_: Type, _: PType) => PInt32()) { case (r: EmitRegion, rt, s: PStringCode) =>
+      PCode(rt, s.loadString().invoke[Int]("length"))
     }
 
     registerCode("substring", TString, TInt32, TInt32, TString, {
-      (_: PType, _: PType, _: PType) => PCanonicalString()
+      (_: Type, _: PType, _: PType, _: PType) => PCanonicalString()
     }) {
       case (r: EmitRegion, rt, (sT: PString, s: Code[Long]), (startT, start: Code[Int]), (endT, end: Code[Int])) =>
       unwrapReturn(r, rt)(asm4s.coerce[String](wrapArg(r, sT)(s)).invoke[Int, Int, String]("substring", start, end))
@@ -135,79 +135,79 @@ object StringFunctions extends RegistryFunctions {
     registerIR("sliceRight", TString, TInt32, TString) { (s, start) => invoke("slice", TString, s, start, invoke("length", TInt32, s)) }
     registerIR("sliceLeft", TString, TInt32, TString) { (s, end) => invoke("slice", TString, s, I32(0), end) }
 
-    registerCode("str", tv("T"), TString, (_: PType) => PCanonicalString()) { case (r, rt, (aT, a)) =>
+    registerCode("str", tv("T"), TString, (_: Type, _: PType) => PCanonicalString()) { case (r, rt, (aT, a)) =>
       val annotation = boxArg(r, aT)(a)
       val str = r.mb.getType(aT.virtualType).invoke[Any, String]("str", annotation)
       unwrapReturn(r, rt)(str)
     }
 
     registerCodeWithMissingness("showStr", tv("T"), TInt32, TString, {
-      (_: PType, truncType: PType) => PCanonicalString(truncType.required)
-    }) { case (r, rt, (aT, a), (_, trunc)) =>
-      val annotation = Code(a.setup, a.m).muxAny(Code._null(boxedTypeInfo(aT)), boxArg(r, aT)(a.v))
-      val str = r.mb.getType(aT.virtualType).invoke[Any, Int, String]("showStr", annotation, trunc.value[Int])
+      (_: Type, _: PType, truncType: PType) => PCanonicalString(truncType.required)
+    }) { case (r, rt, a, trunc) =>
+      val annotation = Code(a.setup, a.m).muxAny(Code._null(boxedTypeInfo(a.pt)), boxArg(r, a.pt)(a.v))
+      val str = r.mb.getType(a.pt.virtualType).invoke[Any, Int, String]("showStr", annotation, trunc.value[Int])
       EmitCode(trunc.setup, trunc.m, PCode(rt, unwrapReturn(r, rt)(str)))
     }
 
-    registerCodeWithMissingness("json", tv("T"), TString, (_: PType) => PCanonicalString(true)) { case (r, rt, (aT, a)) =>
-      val bti = boxedTypeInfo(aT)
-      val annotation = Code(a.setup, a.m).muxAny(Code._null(bti), boxArg(r, aT)(a.v))
-      val json = r.mb.getType(aT.virtualType).invoke[Any, JValue]("toJSON", annotation)
+    registerCodeWithMissingness("json", tv("T"), TString, (_: Type, _: PType) => PCanonicalString(true)) { case (r, rt, a) =>
+      val bti = boxedTypeInfo(a.pt)
+      val annotation = Code(a.setup, a.m).muxAny(Code._null(bti), boxArg(r, a.pt)(a.v))
+      val json = r.mb.getType(a.pt.virtualType).invoke[Any, JValue]("toJSON", annotation)
       val str = Code.invokeScalaObject[JValue, String](JsonMethods.getClass, "compact", json)
       EmitCode(Code._empty, false, PCode(rt, unwrapReturn(r, rt)(str)))
     }
 
-    registerWrappedScalaFunction("reverse", TString, TString, (_: PType) => PCanonicalString())(thisClass,"reverse")
-    registerWrappedScalaFunction("upper", TString, TString, (_: PType) => PCanonicalString())(thisClass,"upper")
-    registerWrappedScalaFunction("lower", TString, TString, (_: PType) => PCanonicalString())(thisClass,"lower")
-    registerWrappedScalaFunction("strip", TString, TString, (_: PType) => PCanonicalString())(thisClass,"strip")
+    registerWrappedScalaFunction("reverse", TString, TString, (_: Type, _: PType) => PCanonicalString())(thisClass,"reverse")
+    registerWrappedScalaFunction("upper", TString, TString, (_: Type, _: PType) => PCanonicalString())(thisClass,"upper")
+    registerWrappedScalaFunction("lower", TString, TString, (_: Type, _: PType) => PCanonicalString())(thisClass,"lower")
+    registerWrappedScalaFunction("strip", TString, TString, (_: Type, _: PType) => PCanonicalString())(thisClass,"strip")
     registerWrappedScalaFunction("contains", TString, TString, TBoolean, {
-      case (_: PType, _: PType) => PBoolean()
+      case (_: Type, _: PType, _: PType) => PBoolean()
     })(thisClass, "contains")
     registerWrappedScalaFunction("translate", TString, TDict(TString, TString), TString, {
-      case (_: PType, _: PType) => PCanonicalString()
+      case (_: Type, _: PType, _: PType) => PCanonicalString()
     })(thisClass, "translate")
     registerWrappedScalaFunction("startswith", TString, TString, TBoolean, {
-      case (_: PType, _: PType) => PBoolean()
+      case (_: Type, _: PType, _: PType) => PBoolean()
     })(thisClass, "startswith")
     registerWrappedScalaFunction("endswith", TString, TString, TBoolean, {
-      case (_: PType, _: PType) => PBoolean()
+      case (_: Type, _: PType, _: PType) => PBoolean()
     })(thisClass, "endswith")
     registerWrappedScalaFunction("regexMatch", TString, TString, TBoolean, {
-      case (_: PType, _: PType) => PBoolean()
+      case (_: Type, _: PType, _: PType) => PBoolean()
     })(thisClass, "regexMatch")
     registerWrappedScalaFunction("concat", TString, TString, TString, {
-      case (_: PType, _: PType) => PCanonicalString()
+      case (_: Type, _: PType, _: PType) => PCanonicalString()
     })(thisClass, "concat")
 
     registerWrappedScalaFunction("split", TString, TString, TArray(TString), {
-      case (_: PType, _: PType) => {
+      case (_: Type, _: PType, _: PType) => {
         PCanonicalArray(PCanonicalString(true))
       }
     })(thisClass, "split")
 
     registerWrappedScalaFunction("split", TString, TString, TInt32, TArray(TString), {
-      case (_: PType, _: PType, _: PType) => {
+      case (_: Type, _: PType, _: PType, _: PType) => {
         PCanonicalArray(PCanonicalString(true))
       }
     })(thisClass, "splitLimited")
 
     registerWrappedScalaFunction("replace", TString, TString, TString, TString, {
-      case (_: PType, _: PType, _: PType) => PCanonicalString()
+      case (_: Type, _: PType, _: PType, _: PType) => PCanonicalString()
     })(thisClass, "replace")
 
     registerWrappedScalaFunction("mkString", TSet(TString), TString, TString, {
-      case (_: PType, _: PType) => PCanonicalString()
+      case (_: Type, _: PType, _: PType) => PCanonicalString()
     })(thisClass, "setMkString")
 
     registerWrappedScalaFunction("mkString", TArray(TString), TString, TString, {
-      case (_: PType, _: PType) => PCanonicalString()
+      case (_: Type, _: PType, _: PType) => PCanonicalString()
     })(thisClass, "arrayMkString")
 
     registerCodeWithMissingness("firstMatchIn", TString, TString, TArray(TString), {
-      case(_: PType, _: PType) => PCanonicalArray(PCanonicalString(true))
+      case(_: Type, _: PType, _: PType) => PCanonicalArray(PCanonicalString(true))
     }) {
-      case (er: EmitRegion, rt: PArray, (sT: PString, s: EmitCode), (rT: PString, r: EmitCode)) =>
+      case (er: EmitRegion, rt: PArray, s: EmitCode, r: EmitCode) =>
       val out: LocalRef[IndexedSeq[String]] = er.mb.newLocal[IndexedSeq[String]]()
 
       val srvb: StagedRegionValueBuilder = new StagedRegionValueBuilder(er, rt)
@@ -218,8 +218,8 @@ object StringFunctions extends RegistryFunctions {
       val missing = s.m || r.m || Code(
         out := Code.invokeScalaObject[String, String, IndexedSeq[String]](
           thisClass, "firstMatchIn",
-          asm4s.coerce[String](wrapArg(er, sT)(s.value[Long])),
-          asm4s.coerce[String](wrapArg(er, rT)(r.value[Long]))),
+          asm4s.coerce[String](wrapArg(er, s.pt)(s.value[Long])),
+          asm4s.coerce[String](wrapArg(er, r.pt)(r.value[Long]))),
         out.isNull)
       val value =
         out.ifNull(
@@ -239,9 +239,12 @@ object StringFunctions extends RegistryFunctions {
     }
 
     registerCodeWithMissingness("hamming", TString, TString, TInt32, {
-      case(_: PType, _: PType) => PInt32()
-    }) {
-      case (r: EmitRegion, rt, (e1T: PString, e1: EmitCode), (e2T: PString, e2: EmitCode)) =>
+      case(_: Type, _: PType, _: PType) => PInt32()
+    }) { case (r: EmitRegion, rt, e1: EmitCode, e2: EmitCode) =>
+
+      val e1T = e1.pt.asInstanceOf[PString]
+      val e2T = e2.pt.asInstanceOf[PString]
+
       val len = r.mb.newLocal[Int]()
       val i = r.mb.newLocal[Int]()
       val n = r.mb.newLocal[Int]()
@@ -271,12 +274,12 @@ object StringFunctions extends RegistryFunctions {
           PCode(rt, v))
     }
 
-    registerWrappedScalaFunction("escapeString", TString, TString, (_: PType) => PCanonicalString())(thisClass, "escapeString")
+    registerWrappedScalaFunction("escapeString", TString, TString, (_: Type, _: PType) => PCanonicalString())(thisClass, "escapeString")
     registerWrappedScalaFunction("strftime", TString, TInt64, TString, TString, {
-      case(_: PType, _: PType, _: PType) => PCanonicalString()
+      case(_: Type, _: PType, _: PType, _: PType) => PCanonicalString()
     })(thisClass, "strftime")
     registerWrappedScalaFunction("strptime", TString, TString, TString, TInt64, {
-      case(_: PType, _: PType, _: PType) => PInt64()
+      case(_: Type, _: PType, _: PType, _: PType) => PInt64()
     })(thisClass, "strptime")
   }
 }

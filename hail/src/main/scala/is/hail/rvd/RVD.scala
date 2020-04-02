@@ -786,7 +786,7 @@ class RVD(
   def write(path: String, idxRelPath: String, stageLocally: Boolean, codecSpec: AbstractTypedCodecSpec): Array[Long] = {
     val (partFiles, partitionCounts) = crdd.writeRows(path, idxRelPath, typ, stageLocally, codecSpec)
     val spec = MakeRVDSpec(typ.key, codecSpec, partFiles, partitioner, IndexSpec.emptyAnnotation(idxRelPath, typ.kType))
-    spec.write(HailContext.sFS, path)
+    spec.write(HailContext.fs, path)
     partitionCounts
   }
 
@@ -796,13 +796,13 @@ class RVD(
     stageLocally: Boolean,
     targetPartitioner: RVDPartitioner
   ): Array[Long] = {
-    val fs = HailContext.sFS
+    val fs = HailContext.fs
 
     fs.mkDir(path + "/rows/rows/parts")
     fs.mkDir(path + "/entries/rows/parts")
     fs.mkDir(path + "/index")
 
-    val bcFS = HailContext.bcFS
+    val bcFS = HailContext.fsBc
     val nPartitions =
       if (targetPartitioner != null)
         targetPartitioner.numPartitions
@@ -1486,11 +1486,16 @@ object RVD {
     stageLocally: Boolean
   ): Array[Array[Long]] = {
     val first = rvds.head
-    require(rvds.forall(rvd => rvd.typ == first.typ && rvd.partitioner == first.partitioner))
+    rvds.foreach {rvd =>
+      if (rvd.typ != first.typ)
+        throw new RuntimeException(s"Type mismatch!\n  head: ${ first.typ }\n  altr: ${ rvd.typ }")
+      if (rvd.partitioner != first.partitioner)
+        throw new RuntimeException(s"Partitioner mismatch!\n  head:${ first.partitioner }\n  altr: ${ rvd.partitioner }")
+    }
 
     val sc = HailContext.get.sc
-    val fs = HailContext.sFS
-    val bcFS = HailContext.bcFS
+    val fs = HailContext.fs
+    val bcFS = HailContext.fsBc
 
     val nRVDs = rvds.length
     val partitioner = first.partitioner

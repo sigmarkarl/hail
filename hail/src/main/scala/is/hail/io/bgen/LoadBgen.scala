@@ -47,15 +47,13 @@ case class BgenFileMetadata(
 )
 
 object LoadBgen {
-  def readSamples(fs: is.hail.io.fs.FS, file: String): Array[String] = {
+  def readSamples(fs: FS, file: String): Array[String] = {
     val bState = readState(fs, file)
     if (bState.hasIds) {
-      fs.readFile(file) { is =>
-        val reader = new HadoopFSDataBinaryReader(is)
-
-        reader.seek(bState.headerLength + 4)
-        val sampleIdSize = reader.readInt()
-        val nSamples = reader.readInt()
+      using(new HadoopFSDataBinaryReader(fs.openNoCompression(file))) { is =>
+        is.seek(bState.headerLength + 4)
+        val sampleIdSize = is.readInt()
+        val nSamples = is.readInt()
 
         if (nSamples != bState.nSamples)
           fatal("BGEN file is malformed -- number of sample IDs in header does not equal number in file")
@@ -64,7 +62,7 @@ object LoadBgen {
           fatal("BGEN file is malformed -- offset is smaller than length of header")
 
         (0 until nSamples).map { i =>
-          reader.readLengthAndString(2)
+          is.readLengthAndString(2)
         }.toArray
       }
     } else {
@@ -74,8 +72,8 @@ object LoadBgen {
     }
   }
 
-  def readSampleFile(fs: is.hail.io.fs.FS, file: String): Array[String] = {
-    fs.readFile(file) { s =>
+  def readSampleFile(fs: FS, file: String): Array[String] = {
+    using(fs.open(file)) { s =>
       Source.fromInputStream(s)
         .getLines()
         .drop(2)
@@ -88,34 +86,31 @@ object LoadBgen {
     }
   }
 
-  def readState(fs: is.hail.io.fs.FS, file: String): BgenHeader = {
-    fs.readFile(file) { is =>
-      val reader = new HadoopFSDataBinaryReader(is)
-      readState(reader, file, fs.getFileSize(file))
+  def readState(fs: FS, file: String): BgenHeader = {
+    using(new HadoopFSDataBinaryReader(fs.openNoCompression(file))) { is =>
+      readState(is, file, fs.getFileSize(file))
     }
   }
 
-  def readState(reader: HadoopFSDataBinaryReader, path: String, byteSize: Long): BgenHeader = {
-    reader.seek(0)
-    val allInfoLength = reader.readInt()
-    val headerLength = reader.readInt()
+  def readState(is: HadoopFSDataBinaryReader, path: String, byteSize: Long): BgenHeader = {
+    is.seek(0)
+    val allInfoLength = is.readInt()
+    val headerLength = is.readInt()
     val dataStart = allInfoLength + 4
 
     assert(headerLength <= allInfoLength)
-    val nVariants = reader.readInt()
-    val nSamples = reader.readInt()
+    val nVariants = is.readInt()
+    val nSamples = is.readInt()
 
-    val magicNumber = reader.readBytes(4)
-      .map(_.toInt)
-      .toSeq
+    val magicNumber = is.readBytes(4).map(_.toInt).toFastIndexedSeq
 
     if (magicNumber != FastSeq(0, 0, 0, 0) && magicNumber != FastSeq(98, 103, 101, 110))
       fatal(s"expected magic number [0000] or [bgen], got [${ magicNumber.mkString }]")
 
     if (headerLength > 20)
-      reader.skipBytes(headerLength.toInt - 20)
+      is.skipBytes(headerLength.toInt - 20)
 
-    val flags = reader.readInt()
+    val flags = is.readInt()
     val compressType = flags & 3
 
     if (compressType != 0 && compressType != 1)
@@ -219,8 +214,7 @@ object LoadBgen {
           nVariants,
           index.keyType,
           index.annotationType,
-          rangeBounds
-        )
+          rangeBounds)
       }
     }
   }
@@ -339,7 +333,7 @@ case class MatrixBGENReader(
   includedVariants: Option[TableIR]) extends MatrixHybridReader {
   private val hc = HailContext.get
   private val sc = hc.sc
-  private val fs = hc.sFS
+  private val fs = hc.fs
 
   val allFiles = LoadBgen.getAllFilePaths(fs, files.toArray)
   val indexFiles = LoadBgen.getIndexFiles(fs, allFiles, indexFileMap)
@@ -382,7 +376,7 @@ case class MatrixBGENReader(
 
   val (indexKeyType, indexAnnotationType) = LoadBgen.getIndexTypes(fileMetadata)
 
-  val (maybePartitions, partitionRangeBounds) = BgenRDDPartitions(referenceGenome, fileMetadata,
+  val (maybePartitions, partitionRangeBounds) = BgenRDDPartitions(fs, referenceGenome, fileMetadata,
     if (nPartitions.isEmpty && blockSizeInMB.isEmpty)
     Some(128)
   else
@@ -395,7 +389,7 @@ case class MatrixBGENReader(
       assert(rowType.isPrefixOf(fullMatrixType.rowKeyStruct))
       assert(rowType.types.nonEmpty)
 
-      ExecuteContext.scoped { ctx =>
+      ExecuteContext.scoped() { ctx =>
         val rvd = Interpret(ir.TableDistinct(variantsTableIR), ctx).rvd
 
         val repartitioned = RepartitionedOrderedRDD2(rvd, partitionRangeBounds.map(_.coarsen(rowType.types.length)))
