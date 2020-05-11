@@ -12,8 +12,8 @@ object StagedArrayBuilder {
 }
 
 class StagedArrayBuilder(eltType: PType, cb: EmitClassBuilder[_], region: Value[Region], var initialCapacity: Int = 8) {
-  val eltArray = PArray(eltType.setRequired(false), required = true) // element type must be optional for serialization to work
-  val stateType = PTuple(true, PInt32Required, PInt32Required, eltArray)
+  val eltArray = PCanonicalArray(eltType.setRequired(false), required = true) // element type must be optional for serialization to work
+  val stateType = PCanonicalTuple(true, PInt32Required, PInt32Required, eltArray)
 
   val size: Settable[Int] = cb.genFieldThisRef[Int]("size")
   private val capacity = cb.genFieldThisRef[Int]("capacity")
@@ -69,7 +69,7 @@ class StagedArrayBuilder(eltType: PType, cb: EmitClassBuilder[_], region: Value[
   }
 
   def deserialize(codec: BufferSpec): Value[InputBuffer] => Code[Unit] = {
-    val (decType, dec) = TypedCodecSpec(eltArray, codec).buildEmitDecoderF[Long](eltArray.virtualType, cb)
+    val (decType, dec) = TypedCodecSpec(eltArray, codec).buildEmitDecoderF[Long](cb)
     assert(decType == eltArray)
 
     { (ib: Value[InputBuffer]) =>

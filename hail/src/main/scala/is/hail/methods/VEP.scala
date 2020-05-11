@@ -7,7 +7,7 @@ import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.expr._
 import is.hail.expr.ir.{ExecuteContext, TableValue}
-import is.hail.expr.ir.functions.TableToTableFunction
+import is.hail.expr.ir.functions.{RelationalFunctions, TableToTableFunction}
 import is.hail.expr.types._
 import is.hail.expr.types.physical.{PStruct, PType}
 import is.hail.expr.types.virtual._
@@ -18,6 +18,7 @@ import is.hail.utils._
 import is.hail.variant.{Locus, RegionValueVariant, VariantMethods}
 import is.hail.io.fs.FS
 import org.apache.spark.sql.Row
+import org.json4s.{DefaultFormats, Extraction, Formats, JValue}
 import org.json4s.jackson.JsonMethods
 
 import scala.collection.JavaConverters._
@@ -33,7 +34,7 @@ object VEP {
     val jv = using(fs.open(path)) { in =>
       JsonMethods.parse(in)
     }
-    implicit val formats = defaultJSONFormats + new TStructSerializer
+    implicit val formats: Formats = defaultJSONFormats + new TStructSerializer
     jv.extract[VEPConfiguration]
   }
 
@@ -96,16 +97,32 @@ object VEP {
       None
     }
   }
+
+  def apply(fs: FS, params: VEPParameters): VEP = {
+    val conf = VEP.readConfiguration(fs, params.config)
+    new VEP(params, conf)
+  }
+
+  def apply(fs: FS, config: String, csq: Boolean, blockSize: Int): VEP =
+    VEP(fs, VEPParameters(config, csq, blockSize))
+
+  def fromJValue(fs: FS, jv: JValue): VEP = {
+    println(jv)
+    implicit val formats: Formats = RelationalFunctions.formats
+    val params = jv.extract[VEPParameters]
+    VEP(fs, params)
+  }
 }
 
-case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTableFunction {
-  private lazy val conf = VEP.readConfiguration(HailContext.fs, config)
-  private lazy val vepSignature = conf.vep_json_schema
+case class VEPParameters(config: String, csq: Boolean, blockSize: Int)
+
+class VEP(val params: VEPParameters, conf: VEPConfiguration) extends TableToTableFunction {
+  private def vepSignature = conf.vep_json_schema
 
   override def preservesPartitionCounts: Boolean = false
 
   override def typ(childType: TableType): TableType = {
-    val vepType = if (csq) TArray(TString) else vepSignature
+    val vepType = if (params.csq) TArray(TString) else vepSignature
     TableType(childType.rowType ++ TStruct("vep" -> vepType), childType.key, childType.globalType)
   }
 
@@ -113,32 +130,33 @@ case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTabl
     assert(tv.typ.key == FastIndexedSeq("locus", "alleles"))
     assert(tv.typ.rowType.size == 2)
 
-    val conf = readConfiguration(HailContext.fs, config)
-    val vepSignature = conf.vep_json_schema
+    val localConf = conf
+    val localVepSignature = vepSignature
 
-    val cmd = conf.command.map(s =>
+    val csq = params.csq
+    val cmd = localConf.command.map(s =>
       if (s == "__OUTPUT_FORMAT_FLAG__")
         if (csq) "--vcf" else "--json"
       else
         s)
 
-    val csqHeader = if (csq) getCSQHeaderDefinition(cmd, conf.env) else None
+    val csqHeader = if (csq) getCSQHeaderDefinition(cmd, localConf.env) else None
 
-    val inputQuery = vepSignature.query("input")
+    val inputQuery = localVepSignature.query("input")
 
     val csqRegex = "CSQ=[^;^\\t]+".r
 
-    val localBlockSize = blockSize
+    val localBlockSize = params.blockSize
 
     val localRowType = tv.rvd.rowPType
     val rowKeyOrd = tv.typ.keyType.ordering
 
     val prev = tv.rvd
     val annotations = prev
-      .mapPartitions { it =>
+      .mapPartitions { (_, it) =>
         val pb = new ProcessBuilder(cmd.toList.asJava)
         val env = pb.environment()
-        conf.env.foreach { case (key, value) =>
+        localConf.env.foreach { case (key, value) =>
           env.put(key, value)
         }
 
@@ -146,8 +164,8 @@ case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTabl
 
         val rvv = new RegionValueVariant(localRowType)
         it
-          .map { rv =>
-            rvv.setRegion(rv)
+          .map { ptr =>
+            rvv.set(ptr)
             (rvv.locus(), rvv.alleles(): IndexedSeq[String])
           }
           .grouped(localBlockSize)
@@ -183,7 +201,7 @@ case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTabl
                 } else {
                   try {
                     val jv = JsonMethods.parse(s)
-                    val a = JSONAnnotationImpex.importAnnotation(jv, vepSignature, warnContext = warnContext)
+                    val a = JSONAnnotationImpex.importAnnotation(jv, localVepSignature, warnContext = warnContext)
                     val variantString = inputQuery(a).asInstanceOf[String]
                     if (variantString == null)
                       fatal(s"VEP generated null variant string" +
@@ -214,9 +232,9 @@ case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTabl
           }
       }
 
-    val vepType: Type = if (csq) TArray(TString) else vepSignature
+    val vepType: Type = if (params.csq) TArray(TString) else vepSignature
 
-    val vepRVDType = prev.typ.copy(rowType = PType.canonical(prev.rowType ++ TStruct("vep" -> vepType)).asInstanceOf[PStruct])
+    val vepRVDType = prev.typ.copy(rowType = prev.rowPType.appendKey("vep", PType.canonical(vepType)))
 
     val vepRowType = vepRVDType.rowType
 
@@ -224,9 +242,7 @@ case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTabl
       vepRVDType,
       prev.partitioner,
       ContextRDD.weaken(annotations).cmapPartitions { (ctx, it) =>
-        val region = ctx.region
         val rvb = ctx.rvb
-        val rv = RegionValue(region)
 
         it.map { case (v, vep) =>
           rvb.start(vepRowType)
@@ -235,20 +251,31 @@ case class VEP(config: String, csq: Boolean, blockSize: Int) extends TableToTabl
           rvb.addAnnotation(vepRowType.types(1).virtualType, v.asInstanceOf[Row].get(1))
           rvb.addAnnotation(vepRowType.types(2).virtualType, vep)
           rvb.endStruct()
-          rv.setOffset(rvb.end())
-          rv
+
+          rvb.end()
         }
       })
 
     val (globalValue, globalType) =
-      if (csq)
+      if (params.csq)
         (Row(csqHeader.getOrElse("")), TStruct("vep_csq_header" -> TString))
       else
         (Row(), TStruct.empty)
 
-    TableValue(
+    TableValue(ctx,
       TableType(vepRowType.virtualType, FastIndexedSeq("locus", "alleles"), globalType),
       BroadcastRow(ctx, globalValue, globalType),
       vepRVD)
+  }
+
+  override def toJValue: JValue = {
+    decomposeWithName(params, "VEP")(RelationalFunctions.formats)
+  }
+
+  override def hashCode(): Int = params.hashCode()
+
+  override def equals(that: Any): Boolean = that match {
+    case that: VEP => params == that.params
+    case _ => false
   }
 }

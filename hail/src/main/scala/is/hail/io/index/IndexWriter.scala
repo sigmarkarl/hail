@@ -3,6 +3,7 @@ package is.hail.io.index
 import java.io.OutputStream
 
 import is.hail.annotations.{Annotation, Region, RegionValueBuilder}
+import is.hail.expr.ir.ExecuteContext
 import is.hail.expr.types.encoded.EType
 import is.hail.expr.types.physical.PType
 import is.hail.expr.types.virtual.Type
@@ -73,20 +74,23 @@ object IndexWriter {
   val version: SemanticVersion = SemanticVersion(1, 1, 0)
 
   def builder(
+    ctx: ExecuteContext,
     keyType: PType,
     annotationType: PType,
     branchingFactor: Int = 4096,
     attributes: Map[String, Any] = Map.empty[String, Any]
-  ): (FS, String) => IndexWriter = {
+  ): String => IndexWriter = {
+    val fsBc = ctx.fsBc
+
     val leafPType = LeafNodeBuilder.typ(keyType, annotationType)
-    val makeLeafEnc = TypedCodecSpec(leafPType, BufferSpec.default).buildEncoder(leafPType)
+    val makeLeafEnc = TypedCodecSpec(leafPType, BufferSpec.default).buildEncoder(ctx, leafPType)
 
     val intPType = InternalNodeBuilder.typ(keyType, annotationType)
-    val makeIntEnc = TypedCodecSpec(intPType, BufferSpec.default).buildEncoder(intPType)
+    val makeIntEnc = TypedCodecSpec(intPType, BufferSpec.default).buildEncoder(ctx, intPType)
 
-    { (fs: FS, path: String) =>
+    { (path: String) =>
       new IndexWriter(
-        fs,
+        fsBc.value,
         path,
         keyType,
         annotationType,
@@ -143,7 +147,7 @@ class IndexWriter(
     internalEncoder.writeByte(1)
 
     val regionOffset = node.write(rvb)
-    internalEncoder.writeRegionValue(region, regionOffset)
+    internalEncoder.writeRegionValue(regionOffset)
     internalEncoder.flush()
 
     region.clear()
@@ -175,7 +179,7 @@ class IndexWriter(
     leafEncoder.writeByte(0)
 
     val regionOffset = leafNodeBuilder.write(rvb)
-    leafEncoder.writeRegionValue(region, regionOffset)
+    leafEncoder.writeRegionValue(regionOffset)
     leafEncoder.flush()
 
     region.clear()

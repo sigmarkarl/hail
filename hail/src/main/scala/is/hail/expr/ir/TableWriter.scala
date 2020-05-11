@@ -13,7 +13,8 @@ object TableWriter {
 }
 
 abstract class TableWriter {
-  def apply(mv: TableValue): Unit
+  def path: String
+  def apply(ctx: ExecuteContext, mv: TableValue): Unit
 }
 
 case class TableNativeWriter(
@@ -22,17 +23,17 @@ case class TableNativeWriter(
   stageLocally: Boolean = false,
   codecSpecJSONStr: String = null
 ) extends TableWriter {
-  def apply(tv: TableValue): Unit = tv.write(path, overwrite, stageLocally, codecSpecJSONStr)
+  def apply(ctx: ExecuteContext, tv: TableValue): Unit = tv.write(ctx, path, overwrite, stageLocally, codecSpecJSONStr)
 }
 
 case class TableTextWriter(
   path: String,
   typesFile: String = null,
   header: Boolean = true,
-  exportType: Int = ExportType.CONCATENATED,
+  exportType: String = ExportType.CONCATENATED,
   delimiter: String
 ) extends TableWriter {
-  def apply(tv: TableValue): Unit = tv.export(path, typesFile, header, exportType, delimiter)
+  def apply(ctx: ExecuteContext, tv: TableValue): Unit = tv.export(ctx, path, typesFile, header, exportType, delimiter)
 }
 
 object WrappedMatrixNativeMultiWriter {
@@ -45,6 +46,6 @@ case class WrappedMatrixNativeMultiWriter(
   writer: MatrixNativeMultiWriter,
   colKey: IndexedSeq[String]
 ) {
-  def apply(mvs: IndexedSeq[TableValue]): Unit = writer.apply(
-    mvs.map(_.toMatrixValue(colKey)))
+  def apply(ctx: ExecuteContext, mvs: IndexedSeq[TableValue]): Unit = writer.apply(
+    ctx, mvs.map(_.toMatrixValue(colKey)))
 }

@@ -20,6 +20,18 @@ final class MemoryBuffer extends Serializable {
     pos = 0
   }
 
+  def set(bytes: Array[Byte]): Unit = {
+    mem = bytes
+    pos = 0
+    end = bytes.length
+  }
+
+  def toByteArray(): Array[Byte] = {
+    val dst = new Array[Byte](end)
+    System.arraycopy(mem, 0, dst, 0, end);
+    dst
+  }
+
   def grow(n: Int) {
     mem = util.Arrays.copyOf(mem, math.max(capacity * 2, end + n))
   }
@@ -148,4 +160,17 @@ final class MemoryBuffer extends Serializable {
     assert(pos + n <= end)
     pos += n
   }
+
+  def dumpHexBytes(from: Int = 0, to: Int = end): Unit = {
+    val bytes = (from until to).map { i =>
+      val x = (mem(i).toInt & 0xff).toHexString
+      if (x.length == 1) "0" + x
+      else x
+    } .mkString(" ")
+
+    val index = (from until to by 4).map(i => String.format("%1$-12s", i.toString)).mkString("")
+    println(s"bytes: $bytes")
+    println(s"index: $index")
+  }
 }
+

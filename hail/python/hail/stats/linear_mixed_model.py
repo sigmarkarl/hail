@@ -6,7 +6,7 @@ from hail.linalg import BlockMatrix
 from hail.linalg.utils import _check_dims
 from hail.table import Table
 from hail.typecheck import *
-from hail.utils.java import Env, jnone, jsome, info
+from hail.utils.java import Env, info
 from hail.utils.misc import plural
 
 
@@ -585,8 +585,8 @@ class LinearMixedModel(object):
 
         # Asymptotically near MLE, nLL = a * h2^2 + b * h2 + c with a = 1 / (2 * se^2)
         # By Lagrange interpolation:
-        a = ((h2[2] * (nll[1] - nll[0]) + h2[1] * (nll[0] - nll[2]) + h2[0] * (nll[2] - nll[1])) /
-             ((h2[1] - h2[0]) * (h2[0] - h2[2]) * (h2[2] - h2[1])))
+        a = ((h2[2] * (nll[1] - nll[0]) + h2[1] * (nll[0] - nll[2]) + h2[0] * (nll[2] - nll[1]))
+             / ((h2[1] - h2[0]) * (h2[0] - h2[2]) * (h2[2] - h2[1])))
 
         return 1 / np.sqrt(2 * a)
 
@@ -727,21 +727,24 @@ class LinearMixedModel(object):
         if self._scala_model is None:
             self._set_scala_model()
 
+        backend = Env.spark_backend('LinearMixedModel.fit_alternatives')
+        jfs = backend.fs._jfs
+
         if partition_size is None:
-            block_size = Env.hail().linalg.BlockMatrix.readMetadata(Env.hc()._jhc, pa_t_path).blockSize()
+            block_size = Env.hail().linalg.BlockMatrix.readMetadata(jfs, pa_t_path).blockSize()
             partition_size = block_size
         elif partition_size <= 0:
             raise ValueError(f'partition_size must be positive, found {partition_size}')
 
-        jpa_t = Env.hail().linalg.RowMatrix.readBlockMatrix(Env.hc()._jhc, pa_t_path, jsome(partition_size))
+        jpa_t = Env.hail().linalg.RowMatrix.readBlockMatrix(jfs, pa_t_path, partition_size)
 
         if a_t_path is None:
-            maybe_ja_t = jnone()
+            maybe_ja_t = None
         else:
-            maybe_ja_t = jsome(
-                Env.hail().linalg.RowMatrix.readBlockMatrix(Env.hc()._jhc, a_t_path, jsome(partition_size)))
+            maybe_ja_t = Env.hail().linalg.RowMatrix.readBlockMatrix(jfs, a_t_path, partition_size)
 
-        return Table._from_java(self._scala_model.fit(jpa_t, maybe_ja_t))
+        return Table._from_java(backend._jbackend.pyFitLinearMixedModel(
+            self._scala_model, jpa_t, maybe_ja_t))
 
     @typecheck_method(pa=np.ndarray, a=nullable(np.ndarray), return_pandas=bool)
     def fit_alternatives_numpy(self, pa, a=None, return_pandas=False):
@@ -839,8 +842,8 @@ class LinearMixedModel(object):
             self._ydy_alt,
             _jarray_from_ndarray(self._xdy_alt),
             _breeze_from_ndarray(self._xdx_alt),
-            jsome(_jarray_from_ndarray(self.y)) if self.low_rank else jnone(),
-            jsome(_breeze_from_ndarray(self.x)) if self.low_rank else jnone()
+            _jarray_from_ndarray(self.y) if self.low_rank else None,
+            _breeze_from_ndarray(self.x) if self.low_rank else None
         )
 
     def _check_dof(self, f=None):
@@ -1119,8 +1122,8 @@ class LinearMixedModel(object):
     def _same(self, other, tol=1e-6, up_to_sign=True):
         def same_rows_up_to_sign(a, b, atol):
             assert a.shape[0] == b.shape[0]
-            return all(np.allclose(a[i], b[i], atol=atol) or
-                       np.allclose(-a[i], b[i], atol=atol)
+            return all(np.allclose(a[i], b[i], atol=atol)
+                       or np.allclose(-a[i], b[i], atol=atol)
                        for i in range(a.shape[0]))
 
         close = same_rows_up_to_sign if up_to_sign else np.allclose

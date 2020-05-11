@@ -3,6 +3,7 @@ package is.hail.expr.types.physical
 import is.hail.annotations.{CodeOrdering, Region}
 import is.hail.asm4s._
 import is.hail.expr.ir.{EmitCodeBuilder, EmitMethodBuilder}
+import is.hail.utils.FastIndexedSeq
 import is.hail.variant.Genotype
 
 final case class PCanonicalCall(required: Boolean = false) extends PCall {
@@ -21,12 +22,14 @@ final case class PCanonicalCall(required: Boolean = false) extends PCall {
 }
 
 object PCanonicalCallSettable {
-  def apply(sb: SettableBuilder, pt: PCall, name: String): PCanonicalCallSettable =
+  def apply(sb: SettableBuilder, pt: PCanonicalCall, name: String): PCanonicalCallSettable =
     new PCanonicalCallSettable(pt, sb.newSettable[Int](s"${ name }_call"))
 }
 
-class PCanonicalCallSettable(val pt: PCall, call: Settable[Int]) extends PCallValue with PSettable {
+class PCanonicalCallSettable(val pt: PCanonicalCall, call: Settable[Int]) extends PCallValue with PSettable {
   def get: PCallCode = new PCanonicalCallCode(pt, call)
+
+  def settableTuple(): IndexedSeq[Settable[_]] = FastIndexedSeq(call)
 
   def store(pc: PCode): Code[Unit] = call.store(pc.asInstanceOf[PCanonicalCallCode].call)
 
@@ -35,17 +38,17 @@ class PCanonicalCallSettable(val pt: PCall, call: Settable[Int]) extends PCallVa
   def isPhased(): Code[Boolean] = get.isPhased()
 
   def forEachAllele(cb: EmitCodeBuilder)(alleleCode: Value[Int] => Unit): Unit = {
-    val call2 = cb.memoize[Int](call >>> 3, "fea_call2")
-    val p = cb.memoize[Int](ploidy(), "fea_ploidy")
-    val j = cb.localBuilder.newSettable[Int]("fea_j")
-    val k = cb.localBuilder.newSettable[Int]("fea_k")
+    val call2 = cb.newLocal[Int]("fea_call2", call >>> 3)
+    val p = cb.newLocal[Int]("fea_ploidy", ploidy())
+    val j = cb.newLocal[Int]("fea_j")
+    val k = cb.newLocal[Int]("fea_k")
 
     cb.ifx(p.ceq(2), {
       cb.ifx(call2 < Genotype.nCachedAllelePairs, {
-        cb.assign(j, Code.invokeScalaObject[Int, Int](Genotype.getClass, "cachedAlleleJ", call2))
-        cb.assign(k, Code.invokeScalaObject[Int, Int](Genotype.getClass, "cachedAlleleK", call2))
+        cb.assign(j, Code.invokeScalaObject1[Int, Int](Genotype.getClass, "cachedAlleleJ", call2))
+        cb.assign(k, Code.invokeScalaObject1[Int, Int](Genotype.getClass, "cachedAlleleK", call2))
       }, {
-        cb.assign(k, (Code.invokeStatic[Math, Double, Double]("sqrt", const(8d) * call2.toD + 1d) / 2d - 0.5).toI)
+        cb.assign(k, (Code.invokeStatic1[Math, Double, Double]("sqrt", const(8d) * call2.toD + 1d) / 2d - 0.5).toI)
         cb.assign(j, call2 - (k * (k + 1) / 2))
       })
       alleleCode(j)
@@ -60,8 +63,10 @@ class PCanonicalCallSettable(val pt: PCall, call: Settable[Int]) extends PCallVa
   }
 }
 
-class PCanonicalCallCode(val pt: PCall, val call: Code[Int]) extends PCallCode {
+class PCanonicalCallCode(val pt: PCanonicalCall, val call: Code[Int]) extends PCallCode {
   def code: Code[_] = call
+
+  def codeTuple(): IndexedSeq[Code[_]] = FastIndexedSeq(call)
 
   def ploidy(): Code[Int] = (call >>> 1) & 0x3
 

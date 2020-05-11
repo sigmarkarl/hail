@@ -4,14 +4,14 @@ import is.hail.annotations.{CodeOrdering, Region, StagedRegionValueBuilder}
 import is.hail.asm4s.{Code, _}
 import is.hail.expr.ir._
 import is.hail.expr.types.physical.{PBoolean, PCanonicalInterval, PCode, PInterval, PIntervalCode, PType}
-import is.hail.expr.types.virtual.{TArray, TBoolean, TInt32, TInterval, Type}
+import is.hail.expr.types.virtual.{TArray, TBoolean, TInt32, TInterval, TString, TStruct, TTuple, Type}
 import is.hail.utils._
 
 object IntervalFunctions extends RegistryFunctions {
 
   def registerAll(): Unit = {
 
-    registerCodeWithMissingness("Interval", tv("T"), tv("T"), TBoolean, TBoolean, TInterval(tv("T")),
+    registerEmitCode4("Interval", tv("T"), tv("T"), TBoolean, TBoolean, TInterval(tv("T")),
       { case (_: Type, startpt, endpt, includesStartPT, includesEndPT) =>
         PCanonicalInterval(
           InferPType.getNestedElementPTypes(Seq(startpt, endpt)),
@@ -52,7 +52,7 @@ object IntervalFunctions extends RegistryFunctions {
           PCode(rt, vv))
     }
 
-    registerCodeWithMissingness("start", TInterval(tv("T")), tv("T"),
+    registerEmitCode1("start", TInterval(tv("T")), tv("T"),
       (_: Type, x: PType) => x.asInstanceOf[PInterval].pointType.orMissing(x.required)) {
       case (r, rt, interval) =>
         val intervalT = interval.pt.asInstanceOf[PInterval]
@@ -64,7 +64,7 @@ object IntervalFunctions extends RegistryFunctions {
         )
     }
 
-    registerCodeWithMissingness("end", TInterval(tv("T")), tv("T"),
+    registerEmitCode1("end", TInterval(tv("T")), tv("T"),
       (_: Type, x: PType) => x.asInstanceOf[PInterval].pointType.orMissing(x.required)) {
       case (r, rt, interval) =>
         val intervalT = interval.pt.asInstanceOf[PInterval]
@@ -76,19 +76,19 @@ object IntervalFunctions extends RegistryFunctions {
         )
     }
 
-    registerPCode("includesStart", TInterval(tv("T")), TBoolean, (_: Type, x: PType) =>
+    registerPCode1("includesStart", TInterval(tv("T")), TBoolean, (_: Type, x: PType) =>
       PBoolean(x.required)
     ) {
       case (r, rt, interval: PIntervalCode) => PCode(rt, interval.includesStart())
     }
 
-    registerPCode("includesEnd", TInterval(tv("T")), TBoolean, (_: Type, x: PType) =>
+    registerPCode1("includesEnd", TInterval(tv("T")), TBoolean, (_: Type, x: PType) =>
       PBoolean(x.required)
     ) {
       case (r, rt, interval: PIntervalCode) => PCode(rt, interval.includesEnd())
     }
 
-    registerCodeWithMissingness("contains", TInterval(tv("T")), tv("T"), TBoolean, {
+    registerEmitCode2("contains", TInterval(tv("T")), tv("T"), TBoolean, {
       case(_: Type, intervalT: PInterval, _: PType) => PBoolean(intervalT.required)
     }) {
       case (r, rt, int, point) =>
@@ -114,7 +114,7 @@ object IntervalFunctions extends RegistryFunctions {
           PCode(rt, contains))
     }
 
-    registerCode("isEmpty", TInterval(tv("T")), TBoolean, (_: Type, pt: PType) => PBoolean(pt.required)) {
+    registerCode1("isEmpty", TInterval(tv("T")), TBoolean, (_: Type, pt: PType) => PBoolean(pt.required)) {
       case (r, rt, (intervalT: PInterval, intOff)) =>
         val interval = new IRInterval(r, intervalT, intOff)
 
@@ -124,10 +124,7 @@ object IntervalFunctions extends RegistryFunctions {
         )
     }
 
-    registerCode("overlaps", TInterval(tv("T")), TInterval(tv("T")), TBoolean, {
-      case(_: Type, i1t: PType, i2t: PType) =>
-        PBoolean(i1t.required && i2t.required)
-    }) {
+    registerCode2("overlaps", TInterval(tv("T")), TInterval(tv("T")), TBoolean, (_: Type, i1t: PType, i2t: PType) => PBoolean(i1t.required && i2t.required)) {
       case (r, rt, (i1t: PInterval, iOff1), (i2t: PInterval, iOff2)) =>
         val interval1 = new IRInterval(r, i1t, iOff1)
         val interval2 = new IRInterval(r, i2t, iOff2)
@@ -141,8 +138,8 @@ object IntervalFunctions extends RegistryFunctions {
         )
     }
 
-    registerIR("sortedNonOverlappingIntervalsContain",
-      TArray(TInterval(tv("T"))), tv("T"), TBoolean) { case (intervals, value) =>
+    registerIR2("sortedNonOverlappingIntervalsContain",
+      TArray(TInterval(tv("T"))), tv("T"), TBoolean) { case (_, intervals, value) =>
       val uid = genUID()
       val uid2 = genUID()
       Let(uid, LowerBoundOnOrderedCollection(intervals, value, onKey = true),
@@ -150,6 +147,45 @@ object IntervalFunctions extends RegistryFunctions {
           && invoke("contains", TBoolean, ArrayRef(intervals, Ref(uid2, TInt32)), value)))
           || ((Ref(uid, TInt32) < ArrayLen(intervals))
           && invoke("contains", TBoolean, ArrayRef(intervals, Ref(uid, TInt32)), value)))
+    }
+
+
+    val endpointT = TTuple(tv("T"), TInt32)
+    registerIR2("partitionIntervalContains",
+      TStruct("left" -> endpointT, "right" -> endpointT, "includesLeft" -> TBoolean, "includesRight" -> TBoolean),
+      tv("T"), TBoolean) {
+      case (_, interval, point) =>
+
+        def compareStructs(left: IR, right: IR): IR = {
+          bindIRs(left, right) { case Seq(lTuple, r) =>
+            bindIRs(GetTupleElement(lTuple, 0), GetTupleElement(lTuple, 1)) {
+              case Seq(lValue, lLen) =>
+                val ts = lValue.typ.asInstanceOf[TStruct]
+                assert(r.typ == ts)
+                ts.fields.foldRight[IR](I32(0)) { case (f, acc) =>
+                  If(
+                    lLen ceq f.index,
+                    0,
+                    bindIR(ApplyComparisonOp(Compare(f.typ), GetField(lValue, f.name), GetField(r, f.name))) { c =>
+                      If(c.cne(0), c, acc)
+                    })
+                }
+            }
+          }
+        }
+
+        bindIRs(point, GetField(interval, "left"), GetField(interval, "right")) { case Seq(point, l, r) =>
+
+
+          val gtEqLeft = bindIR(compareStructs(l, point)) { lc =>
+            (lc <= 0) && ((lc < 0) || GetField(interval, "includesLeft"))
+          }
+
+          val ltEqRight = bindIR(compareStructs(r, point)) { rc =>
+            (rc >= 0) && ((rc > 0) || GetField(interval, "includesRight"))
+          }
+          gtEqLeft && ltEqRight
+        }
     }
   }
 }

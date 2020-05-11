@@ -6,23 +6,18 @@ import is.hail.annotations.{UnsafeOrdering, _}
 import is.hail.expr.ir.EmitMethodBuilder
 import is.hail.expr.types.virtual.TString
 
-
 abstract class PString extends PType {
   lazy val virtualType: TString.type = TString
 
-  override def unsafeOrdering(): UnsafeOrdering = PBinary(required).unsafeOrdering()
+  override def unsafeOrdering(): UnsafeOrdering = PCanonicalBinary(required).unsafeOrdering()
 
   def codeOrdering(mb: EmitMethodBuilder[_], other: PType): CodeOrdering = {
     assert(this isOfType other)
-    PBinary(required).codeOrdering(mb, PBinary(other.required))
+    PCanonicalBinary(required).codeOrdering(mb, PCanonicalBinary(other.required))
   }
 
   protected val binaryFundamentalType: PBinary
   override lazy val fundamentalType: PBinary = binaryFundamentalType
-
-  def bytesAddress(boff: Long): Long
-
-  def bytesAddress(boff: Code[Long]): Code[Long]
 
   def loadLength(boff: Long): Int
 
@@ -37,18 +32,12 @@ abstract class PString extends PType {
   def allocateAndStoreString(mb: EmitMethodBuilder[_], region: Value[Region], str: Code[String]): Code[Long]
 }
 
-object PString {
-  def apply(required: Boolean = false): PString = PCanonicalString(required)
-
-  def unapply(t: PString): Option[Boolean] = PCanonicalString.unapply(t)
-}
-
 abstract class PStringCode extends PCode {
   def pt: PString
 
   def loadLength(): Code[Int]
 
-  def bytesAddress(): Code[Long]
-
   def loadString(): Code[String]
+
+  def asBytes(): PBinaryCode
 }

@@ -16,10 +16,10 @@ import org.apache.hadoop.mapred.FileSplit
 import org.apache.hadoop.mapreduce.lib.input.{FileSplit => NewFileSplit}
 import org.apache.log4j.Level
 import org.apache.spark.{Partition, TaskContext}
-import org.json4s.JsonAST.JArray
+import org.json4s.JsonAST.{JArray, JString}
 import org.json4s.jackson.Serialization
 import org.json4s.reflect.TypeInfo
-import org.json4s.{Extraction, Formats, NoTypeHints, Serializer}
+import org.json4s.{Extraction, Formats, JObject, NoTypeHints, Serializer}
 
 import scala.collection.generic.CanBuildFrom
 import scala.collection.{GenTraversableOnce, TraversableOnce, mutable}
@@ -127,8 +127,8 @@ package object utils extends Logging
 
   def triangle(n: Int): Int = (n * (n + 1)) / 2
 
-  def treeAggDepth(hc: HailContext, nPartitions: Int): Int =
-    (math.log(nPartitions) / math.log(hc.branchingFactor) + 0.5).toInt.max(1)
+  def treeAggDepth(nPartitions: Int): Int =
+    (math.log(nPartitions) / math.log(HailContext.get.branchingFactor) + 0.5).toInt.max(1)
 
   def simpleAssert(p: Boolean) {
     if (!p) throw new AssertionError
@@ -564,11 +564,7 @@ package object utils extends Logging
     s"${ ctx.stageId() }-${ ctx.partitionId() }-${ ctx.attemptNumber() }-$fileUUID"
   }
 
-  def partFile(d: Int, i: Int, ctx: TaskContext): String = {
-    val rng = new java.security.SecureRandom()
-    val fileUUID = new java.util.UUID(rng.nextLong(), rng.nextLong())
-    s"${ partFile(d, i) }-${ partSuffix(ctx) }"
-  }
+  def partFile(d: Int, i: Int, ctx: TaskContext): String = s"${ partFile(d, i) }-${ partSuffix(ctx) }"
 
   def mangle(strs: Array[String], formatter: Int => String = "_%d".format(_)): (Array[String], Array[(String, String)]) = {
     val b = new ArrayBuilder[String]
@@ -646,6 +642,20 @@ package object utils extends Logging
     parts
   }
 
+  def partition(n: Long, k: Int): Array[Long] = {
+    if (k == 0) {
+      assert(n == 0)
+      return Array.empty[Long]
+    }
+
+    assert(n >= 0)
+    assert(k > 0)
+    val parts = Array.tabulate(k)(i => (n - i + k - 1) / k)
+    assert(parts.sum == n)
+    assert(parts.max - parts.min <= 1)
+    parts
+  }
+
   def matchErrorToNone[T, U](f: (T) => U): (T) => Option[U] = (x: T) => {
     try {
       Some(f(x))
@@ -676,6 +686,18 @@ package object utils extends Logging
       left
     else
       right
+  }
+
+  def makeJavaMap[K, V](x: TraversableOnce[(K, V)]): java.util.HashMap[K, V] = {
+    val m = new java.util.HashMap[K, V]
+    x.foreach { case (k, v) => m.put(k, v) }
+    m
+  }
+
+  def makeJavaSet[K](x: TraversableOnce[K]): java.util.HashSet[K] = {
+    val m = new java.util.HashSet[K]
+    x.foreach(m.add)
+    m
   }
 
   def toMapFast[T, K, V](
@@ -722,14 +744,13 @@ package object utils extends Logging
       dumpClassLoader(parent)
   }
 
-  def writeNativeFileReadMe(path: String): Unit = {
-    val hc = HailContext.get
+  def writeNativeFileReadMe(fs: FS, path: String): Unit = {
     val dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss")
 
-    using(new OutputStreamWriter(hc.fs.create(path + "/README.txt"))) { out =>
+    using(new OutputStreamWriter(fs.create(path + "/README.txt"))) { out =>
       out.write(
         s"""This folder comprises a Hail (www.hail.is) native Table or MatrixTable.
-           |  Written with version ${ hc.version }
+           |  Written with version ${ HailContext.get.version }
            |  Created at ${ dateFormat.format(new Date()) }""".stripMargin)
     }
   }
@@ -801,6 +822,38 @@ package object utils extends Logging
     }
 
     true
+  }
+
+  def commonPrefix[T](left: IndexedSeq[T], right: IndexedSeq[T]): IndexedSeq[T] = {
+    var i = 0
+    while (i < left.length && i < right.length && left(i) == right(i))
+      i += 1
+    if (i == left.length)
+      left
+    else if (i == right.length)
+      right
+    else
+      left.take(i)
+  }
+
+  def decomposeWithName(v: Any, name: String)(implicit formats: Formats): JObject = {
+    val jo = Extraction.decompose(v).asInstanceOf[JObject]
+    jo.merge(JObject("name" -> JString(name)))
+  }
+
+  def makeVirtualOffset(fileOffset: Long, blockOffset: Int): Long = {
+    assert(fileOffset >= 0)
+    assert(blockOffset >= 0)
+    assert(blockOffset < 64 * 1024)
+    (fileOffset << 16) | blockOffset
+  }
+
+  def virtualOffsetBlockOffset(offset: Long): Int = {
+    (offset & 0xFFFF).toInt
+  }
+
+  def virtualOffsetCompressedOffset(offset: Long): Long = {
+    offset >> 16
   }
 }
 

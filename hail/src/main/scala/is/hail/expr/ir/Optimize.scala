@@ -4,6 +4,9 @@ import is.hail.HailContext
 import is.hail.utils._
 
 object Optimize {
+  def apply[T <: BaseIR](ctx: ExecuteContext, ir: T): T =
+    Optimize(ir, false, "direct", ctx)
+
   def apply[T <: BaseIR](ir0: T, noisy: Boolean, context: String, ctx: ExecuteContext): T = {
     if (noisy)
       log.info(s"optimize $context: before: IR size ${ IRSize(ir0) }: \n" + Pretty(ir0, elideLiterals = true))
@@ -20,7 +23,7 @@ object Optimize {
     ctx.timer.time("Optimize") {
       while (iter < maxIter && ir != last) {
         last = ir
-        runOpt(FoldConstants(_), iter, "FoldConstants")
+        runOpt(FoldConstants(ctx, _), iter, "FoldConstants")
         runOpt(ExtractIntervalFilters(_), iter, "ExtractIntervalFilters")
         runOpt(Simplify(_), iter, "Simplify")
         runOpt(ForwardLets(_), iter, "ForwardLets")

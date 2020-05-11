@@ -17,11 +17,15 @@ setup(
     name="hail",
     version=hail_pip_version,
     author="Hail Team",
-    author_email="hail-team@broadinstitute.org",
+    author_email="hail@broadinstitute.org",
     description="Scalable library for exploring and analyzing genomic data.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://hail.is",
+    project_urls={
+        'Documentation': 'https://hail.is/docs/0.2/',
+        'Repository': 'https://github.com/hail-is/hail',
+    },
     packages=find_packages('.'),
     package_dir={
         'hail': 'hail',

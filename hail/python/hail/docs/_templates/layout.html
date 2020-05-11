@@ -106,11 +106,7 @@
 </head>
 
 <body class="wy-body-for-nav" role="document">
-
-  <nav
-    class="navbar align-content-start justify-content-start documentation-view"
-    id="hail-navbar"
-  ></nav>
+  <nav id="hail-navbar" class="documentation-view"></nav>
 
   <div class="wy-grid-for-nav">
 
@@ -217,14 +213,12 @@
       });
   </script>
   {% endif %}
+
   <script type="text/javascript">
-    jQuery(function ($) {
-      $("#hail-navbar").load("/navbar.html", function() {
-        $(".nav li").removeClass("active");
-        $("#home").addClass("active");
-      });
+    $.get('/index.html', function(data) {
+      $("#hail-navbar").replaceWith($("#hail-navbar", data).addClass("documentation-view"));
     });
-</script>
+  </script>
 
   {%- block footer %} {% endblock %}
 

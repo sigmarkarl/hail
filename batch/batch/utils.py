@@ -35,9 +35,9 @@ def cost_from_msec_mcpu(app, msec_mcpu):
     service_cost_per_core_hour = 0.01
 
     total_cost_per_core_hour = (
-        cpu_cost_per_core_hour +
-        instance_cost_per_instance_hour / worker_cores +
-        service_cost_per_core_hour)
+        cpu_cost_per_core_hour
+        + instance_cost_per_instance_hour / worker_cores
+        + service_cost_per_core_hour)
 
     return (msec_mcpu * 0.001 * 0.001) * (total_cost_per_core_hour / 3600)
 
@@ -97,6 +97,12 @@ def cores_mcpu_to_memory_bytes(cores_in_mcpu, worker_type):
 def adjust_cores_for_memory_request(cores_in_mcpu, memory_in_bytes, worker_type):
     min_cores_mcpu = memory_bytes_to_cores_mcpu(memory_in_bytes, worker_type)
     return max(cores_in_mcpu, min_cores_mcpu)
+
+
+def adjust_cores_for_packability(cores_in_mcpu):
+    cores_in_mcpu = max(1, cores_in_mcpu)
+    power = max(-2, math.ceil(math.log2(cores_in_mcpu / 1000)))
+    return int(2**power * 1000)
 
 
 image_regex = re.compile(r"(?:.+/)?([^:]+)(:(.+))?")

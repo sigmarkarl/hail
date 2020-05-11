@@ -3,17 +3,19 @@ package is.hail.expr.ir
 import is.hail.HailContext
 import is.hail.expr.types.{BlockMatrixSparsity, BlockMatrixType}
 import is.hail.expr.types.virtual.{TArray, TBaseStruct, TFloat64, TInt64, TTuple, Type}
-import is.hail.linalg.BlockMatrix
+import is.hail.linalg.{BlockMatrix, BlockMatrixMetadata}
 import is.hail.utils._
 import breeze.linalg
 import breeze.linalg.DenseMatrix
 import breeze.numerics
 import is.hail.annotations.Region
+import is.hail.backend.spark.SparkBackend
+import is.hail.io.fs.FS
 
 import scala.collection.mutable.ArrayBuffer
 import is.hail.utils.richUtils.RichDenseMatrixDouble
 import org.apache.spark.sql.Row
-import org.json4s.{DefaultFormats, Formats, ShortTypeHints}
+import org.json4s.{DefaultFormats, Extraction, Formats, JValue, ShortTypeHints}
 
 import scala.collection.immutable.NumericRange
 
@@ -25,13 +27,12 @@ object BlockMatrixIR {
   }
 
   def toBlockMatrix(
-    hc: HailContext,
     nRows: Int,
     nCols: Int,
     data: Array[Double],
     blockSize: Int = BlockMatrix.defaultBlockSize): BlockMatrix = {
 
-    BlockMatrix.fromBreezeMatrix(hc.sc,
+    BlockMatrix.fromBreezeMatrix(
       new DenseMatrix[Double](nRows, nCols, data, 0, nCols, isTranspose = true), blockSize)
   }
 
@@ -60,12 +61,6 @@ object BlockMatrixIR {
 abstract sealed class BlockMatrixIR extends BaseIR {
   def typ: BlockMatrixType
 
-  def pyExecute(): BlockMatrix = {
-    ExecuteContext.scoped() { ctx =>
-      Interpret(this, ctx, optimize = true)
-    }
-  }
-
   protected[ir] def execute(ctx: ExecuteContext): BlockMatrix =
     fatal("tried to execute unexecutable IR:\n" + Pretty(this))
 
@@ -84,9 +79,7 @@ case class BlockMatrixRead(reader: BlockMatrixReader) extends BlockMatrixIR {
     BlockMatrixRead(reader)
   }
 
-  override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = {
-    reader(ctx, HailContext.get)
-  }
+  override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = reader(ctx)
 
   val blockCostIsLinear: Boolean = true
 }
@@ -97,43 +90,90 @@ object BlockMatrixReader {
       List(classOf[BlockMatrixNativeReader], classOf[BlockMatrixBinaryReader], classOf[BlockMatrixPersistReader]))
     override val typeHintFieldName: String = "name"
   }
+
+  def fromJValue(ctx: ExecuteContext, jv: JValue): BlockMatrixReader = {
+    (jv \ "name").extract[String] match {
+      case "BlockMatrixNativeReader" => BlockMatrixNativeReader.fromJValue(ctx.fs, jv)
+      case _ => jv.extract[BlockMatrixReader]
+    }
+  }
 }
+
 
 abstract class BlockMatrixReader {
-  def apply(ctx: ExecuteContext, hc: HailContext): BlockMatrix
+  def pathsUsed: Seq[String]
+  def apply(ctx: ExecuteContext): BlockMatrix
   def fullType: BlockMatrixType
+  def toJValue: JValue = {
+    Extraction.decompose(this)(BlockMatrixReader.formats)
+  }
 }
 
-case class BlockMatrixNativeReader(path: String) extends BlockMatrixReader {
-  override lazy val fullType = {
-    val metadata = BlockMatrix.readMetadata(HailContext.get, path)
+object BlockMatrixNativeReader {
+  def apply(fs: FS, path: String): BlockMatrixNativeReader =
+    BlockMatrixNativeReader(fs, BlockMatrixNativeReaderParameters(path))
+
+  def apply(fs: FS, params: BlockMatrixNativeReaderParameters): BlockMatrixNativeReader = {
+    val metadata = BlockMatrix.readMetadata(fs, params.path)
+    new BlockMatrixNativeReader(params, metadata)
+  }
+
+  def fromJValue(fs: FS, jv: JValue): BlockMatrixNativeReader = {
+    implicit val formats: Formats = BlockMatrixReader.formats
+    val params = jv.extract[BlockMatrixNativeReaderParameters]
+    BlockMatrixNativeReader(fs, params)
+  }
+}
+
+case class BlockMatrixNativeReaderParameters(path: String)
+
+class BlockMatrixNativeReader(
+  val params: BlockMatrixNativeReaderParameters,
+  val metadata: BlockMatrixMetadata) extends BlockMatrixReader {
+  def pathsUsed: Seq[String] = Array(params.path)
+
+  lazy val fullType: BlockMatrixType = {
     val (tensorShape, isRowVector) = BlockMatrixIR.matrixShapeToTensorShape(metadata.nRows, metadata.nCols)
 
     val sparsity = BlockMatrixSparsity.fromLinearBlocks(metadata.nRows, metadata.nCols, metadata.blockSize, metadata.maybeFiltered)
     BlockMatrixType(TFloat64, tensorShape, isRowVector, metadata.blockSize, sparsity)
   }
 
-  override def apply(ctx: ExecuteContext, hc: HailContext): BlockMatrix = BlockMatrix.read(hc, path)
+  def apply(ctx: ExecuteContext): BlockMatrix = BlockMatrix.read(ctx.fs, params.path)
+
+  override def toJValue: JValue = {
+    decomposeWithName(params, "BlockMatrixNativeReader")(BlockMatrixReader.formats)
+  }
+
+  override def hashCode(): Int = params.hashCode()
+
+  override def equals(that: Any): Boolean = that match {
+    case that: BlockMatrixNativeReader => params == that.params
+    case _ => false
+  }
 }
 
 case class BlockMatrixBinaryReader(path: String, shape: IndexedSeq[Long], blockSize: Int) extends BlockMatrixReader {
+  def pathsUsed: Seq[String] = Array(path)
+
   val IndexedSeq(nRows, nCols) = shape
   BlockMatrixIR.checkFitsIntoArray(nRows, nCols)
 
-  override lazy val fullType: BlockMatrixType = {
+  lazy val fullType: BlockMatrixType = {
     BlockMatrixType.dense(TFloat64, nRows, nCols, blockSize)
   }
 
-  override def apply(ctx: ExecuteContext, hc: HailContext): BlockMatrix = {
-    val breezeMatrix = RichDenseMatrixDouble.importFromDoubles(hc, path, nRows.toInt, nCols.toInt, rowMajor = true)
-    BlockMatrix.fromBreezeMatrix(hc.sc, breezeMatrix, blockSize)
+  def apply(ctx: ExecuteContext): BlockMatrix = {
+    val breezeMatrix = RichDenseMatrixDouble.importFromDoubles(ctx.fs, path, nRows.toInt, nCols.toInt, rowMajor = true)
+    BlockMatrix.fromBreezeMatrix(breezeMatrix, blockSize)
   }
 }
 
 case class BlockMatrixPersistReader(id: String) extends BlockMatrixReader {
-  lazy val bm: BlockMatrix = HailContext.sparkBackend().bmCache.getPersistedBlockMatrix(id)
+  lazy val bm: BlockMatrix = HailContext.sparkBackend("BlockMatrixPersistReader").bmCache.getPersistedBlockMatrix(id)
+  def pathsUsed: Seq[String] = FastSeq()
   lazy val fullType: BlockMatrixType = BlockMatrixType.fromBlockMatrix(bm)
-  def apply(ctx: ExecuteContext, hc: HailContext): BlockMatrix = bm
+  def apply(ctx: ExecuteContext): BlockMatrix = bm
 }
 
 class BlockMatrixLiteral(value: BlockMatrix) extends BlockMatrixIR {
@@ -182,13 +222,13 @@ case class BlockMatrixMap(child: BlockMatrixIR, eltName: String, f: IR, needsDen
 
     val (name, breezeF): (String, DenseMatrix[Double] => DenseMatrix[Double]) = f match {
       case ApplyUnaryPrimOp(Negate(), _) => ("negate", BlockMatrix.negationOp)
-      case Apply("abs", _, _) => ("abs", numerics.abs(_))
-      case Apply("log", _, _) => ("log", numerics.log(_))
-      case Apply("sqrt", _, _) => ("sqrt", numerics.sqrt(_))
-      case Apply("ceil", _, _) => ("ceil", numerics.ceil(_))
-      case Apply("floor", _, _) => ("floor", numerics.floor(_))
+      case Apply("abs", _, _, _) => ("abs", numerics.abs(_))
+      case Apply("log", _, _, _) => ("log", numerics.log(_))
+      case Apply("sqrt", _, _, _) => ("sqrt", numerics.sqrt(_))
+      case Apply("ceil", _, _, _) => ("ceil", numerics.ceil(_))
+      case Apply("floor", _, _, _) => ("floor", numerics.floor(_))
 
-      case Apply("pow", Seq(Ref(`eltName`, _), r), _) if !Mentions(r, eltName) =>
+      case Apply("pow", _, Seq(Ref(`eltName`, _), r), _) if !Mentions(r, eltName) =>
         ("**", binaryOp(evalIR(ctx, r), numerics.pow(_, _)))
       case ApplyBinaryPrimOp(Add(), Ref(`eltName`, _), r) if !Mentions(r, eltName) =>
         ("+", binaryOp(evalIR(ctx, r), _ + _))
@@ -389,20 +429,20 @@ case class BlockMatrixDot(left: BlockMatrixIR, right: BlockMatrixIR) extends Blo
   override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = {
     var leftBM = left.execute(ctx)
     var rightBM = right.execute(ctx)
-    val hc = HailContext.get
+    val fs = ctx.fs
     if (!left.blockCostIsLinear) {
-      val path = hc.getTemporaryFile(suffix = Some("bm"))
+      val path = ctx.createTmpPath("blockmatrix-dot-left", "bm")
       info(s"BlockMatrix multiply: writing left input with ${ leftBM.nRows } rows and ${ leftBM.nCols } cols " +
         s"(${ leftBM.gp.nBlocks } blocks of size ${ leftBM.blockSize }) to temporary file $path")
-      leftBM.write(hc.fs, path)
-      leftBM = BlockMatrixNativeReader(path).apply(ctx, hc)
+      leftBM.write(ctx, path)
+      leftBM = BlockMatrixNativeReader(fs, path).apply(ctx)
     }
     if (!right.blockCostIsLinear) {
-      val path = hc.getTemporaryFile(suffix = Some("bm"))
+      val path = ctx.createTmpPath("blockmatrix-dot-right", "bm")
       info(s"BlockMatrix multiply: writing right input with ${ rightBM.nRows } rows and ${ rightBM.nCols } cols " +
         s"(${ rightBM.gp.nBlocks } blocks of size ${ rightBM.blockSize }) to temporary file $path")
-      rightBM.write(hc.fs, path)
-      rightBM = BlockMatrixNativeReader(path).apply(ctx, hc)
+      rightBM.write(ctx, path)
+      rightBM = BlockMatrixNativeReader(fs, path).apply(ctx)
     }
     leftBM.dot(rightBM)
   }
@@ -461,7 +501,6 @@ case class BlockMatrixBroadcast(
   }
 
   override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = {
-    val hc = HailContext.get
     val childBm = child.execute(ctx)
     val nRows = shape(0)
     val nCols = shape(1)
@@ -469,34 +508,34 @@ case class BlockMatrixBroadcast(
     inIndexExpr match {
       case IndexedSeq() =>
         val scalar = childBm.getElement(row = 0, col = 0)
-        BlockMatrix.fill(hc, nRows, nCols, scalar, blockSize)
+        BlockMatrix.fill(nRows, nCols, scalar, blockSize)
       case IndexedSeq(0) =>
         BlockMatrixIR.checkFitsIntoArray(nRows, nCols)
-        broadcastColVector(hc, childBm.toBreezeMatrix().data, nRows.toInt, nCols.toInt)
+        broadcastColVector(childBm.toBreezeMatrix().data, nRows.toInt, nCols.toInt)
       case IndexedSeq(1) =>
         BlockMatrixIR.checkFitsIntoArray(nRows, nCols)
-        broadcastRowVector(hc, childBm.toBreezeMatrix().data, nRows.toInt, nCols.toInt)
+        broadcastRowVector(childBm.toBreezeMatrix().data, nRows.toInt, nCols.toInt)
         // FIXME: I'm pretty sure this case is broken.
       case IndexedSeq(0, 0) =>
         BlockMatrixIR.checkFitsIntoArray(nRows, nCols)
-        BlockMatrixIR.toBlockMatrix(hc, nRows.toInt, nCols.toInt, childBm.diagonal(), blockSize)
+        BlockMatrixIR.toBlockMatrix(nRows.toInt, nCols.toInt, childBm.diagonal(), blockSize)
       case IndexedSeq(1, 0) => childBm.transpose()
       case IndexedSeq(0, 1) => childBm
     }
   }
 
-  private def broadcastRowVector(hc: HailContext, vec: Array[Double], nRows: Int, nCols: Int): BlockMatrix = {
+  private def broadcastRowVector(vec: Array[Double], nRows: Int, nCols: Int): BlockMatrix = {
     val data = ArrayBuffer[Double]()
     data.sizeHint(nRows * nCols)
     (0 until nRows).foreach(_ => data ++= vec)
-    BlockMatrixIR.toBlockMatrix(hc, nRows, nCols, data.toArray, blockSize)
+    BlockMatrixIR.toBlockMatrix(nRows, nCols, data.toArray, blockSize)
   }
 
-  private def broadcastColVector(hc: HailContext, vec: Array[Double], nRows: Int, nCols: Int): BlockMatrix = {
+  private def broadcastColVector(vec: Array[Double], nRows: Int, nCols: Int): BlockMatrix = {
     val data = ArrayBuffer[Double]()
     data.sizeHint(nRows * nCols)
     (0 until nRows).foreach(row => (0 until nCols).foreach(_ => data += vec(row)))
-    BlockMatrixIR.toBlockMatrix(hc, nRows, nCols, data.toArray, blockSize)
+    BlockMatrixIR.toBlockMatrix(nRows, nCols, data.toArray, blockSize)
   }
 }
 
@@ -540,7 +579,7 @@ case class BlockMatrixAgg(
     val childBm = child.execute(ctx)
 
     outIndexExpr match {
-      case IndexedSeq() => BlockMatrixIR.toBlockMatrix(HailContext.get, nRows = 1, nCols = 1, Array(childBm.sum()), typ.blockSize)
+      case IndexedSeq() => BlockMatrixIR.toBlockMatrix(nRows = 1, nCols = 1, Array(childBm.sum()), typ.blockSize)
       case IndexedSeq(1) => childBm.rowSum()
       case IndexedSeq(0) => childBm.colSum()
     }
@@ -804,13 +843,12 @@ case class ValueToBlockMatrix(
   override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = {
     val IndexedSeq(nRows, nCols) = shape
     BlockMatrixIR.checkFitsIntoArray(nRows, nCols)
-    val hc = HailContext.get
     Interpret[Any](ctx, child) match {
       case scalar: Double =>
         assert(nRows == 1 && nCols == 1)
-        BlockMatrix.fill(hc, nRows, nCols, scalar, blockSize)
+        BlockMatrix.fill(nRows, nCols, scalar, blockSize)
       case data: IndexedSeq[_] =>
-        BlockMatrixIR.toBlockMatrix(hc, nRows.toInt, nCols.toInt, data.asInstanceOf[IndexedSeq[Double]].toArray, blockSize)
+        BlockMatrixIR.toBlockMatrix(nRows.toInt, nCols.toInt, data.asInstanceOf[IndexedSeq[Double]].toArray, blockSize)
     }
   }
 }
@@ -836,7 +874,7 @@ case class BlockMatrixRandom(
   }
 
   override protected[ir] def execute(ctx: ExecuteContext): BlockMatrix = {
-    BlockMatrix.random(HailContext.get, shape(0), shape(1), blockSize, seed, gaussian)
+    BlockMatrix.random(shape(0), shape(1), blockSize, seed, gaussian)
   }
 }
 

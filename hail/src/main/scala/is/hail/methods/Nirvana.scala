@@ -8,7 +8,7 @@ import is.hail.expr.JSONAnnotationImpex
 import is.hail.expr.ir.{ExecuteContext, TableValue}
 import is.hail.expr.ir.functions.TableToTableFunction
 import is.hail.expr.types._
-import is.hail.expr.types.physical.{PStruct, PType}
+import is.hail.expr.types.physical.{PCanonicalStruct, PStruct, PType}
 import is.hail.expr.types.virtual._
 import is.hail.rvd.{RVD, RVDContext, RVDType}
 import is.hail.sparkextras.ContextRDD
@@ -412,7 +412,7 @@ object Nirvana {
     val prev = tv.rvd
 
     val annotations = prev
-      .mapPartitions { it =>
+      .mapPartitions { (_, it) =>
         val pb = new ProcessBuilder(cmd.asJava)
         val env = pb.environment()
         if (path.orNull != null)
@@ -422,8 +422,8 @@ object Nirvana {
 
         val rvv = new RegionValueVariant(localRowType)
 
-        it.map { rv =>
-          rvv.setRegion(rv)
+        it.map { ptr =>
+          rvv.set(ptr)
           (rvv.locus(), rvv.alleles())
         }
           .grouped(localBlockSize)
@@ -452,7 +452,7 @@ object Nirvana {
           }
       }
 
-    val nirvanaRVDType = prev.typ.copy(rowType = PStruct.canonical(tv.typ.rowType ++ TStruct("nirvana" -> nirvanaSignature)))
+    val nirvanaRVDType = prev.typ.copy(rowType = prev.rowPType.appendKey("nirvana", PType.canonical(nirvanaSignature)))
 
     val nirvanaRowType = nirvanaRVDType.rowType
 
@@ -460,9 +460,7 @@ object Nirvana {
       nirvanaRVDType,
       prev.partitioner,
       ContextRDD.weaken(annotations).cmapPartitions { (ctx, it) =>
-        val region = ctx.region
-        val rvb = new RegionValueBuilder(region)
-        val rv = RegionValue(region)
+        val rvb = new RegionValueBuilder(ctx.region)
 
         it.map { case (v, nirvana) =>
           rvb.start(nirvanaRowType)
@@ -471,13 +469,12 @@ object Nirvana {
           rvb.addAnnotation(nirvanaRowType.types(1).virtualType, v.asInstanceOf[Row].get(1))
           rvb.addAnnotation(nirvanaRowType.types(2).virtualType, nirvana)
           rvb.endStruct()
-          rv.setOffset(rvb.end())
 
-          rv
+          rvb.end()
         }
-      }).persist(StorageLevel.MEMORY_AND_DISK)
+      }).persist(ctx, StorageLevel.MEMORY_AND_DISK)
 
-      TableValue(
+      TableValue(ctx,
         TableType(nirvanaRowType.virtualType, FastIndexedSeq("locus", "alleles"), TStruct.empty),
         BroadcastRow.empty(ctx),
         nirvanaRVD

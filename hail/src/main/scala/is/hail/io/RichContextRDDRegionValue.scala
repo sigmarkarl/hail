@@ -3,6 +3,7 @@ package is.hail.io
 import java.io._
 
 import is.hail.annotations._
+import is.hail.expr.ir.ExecuteContext
 import is.hail.expr.types.physical._
 import is.hail.io.fs.FS
 import is.hail.io.index.IndexWriter
@@ -15,12 +16,14 @@ import org.apache.spark.sql.Row
 import org.apache.spark.util.TaskCompletionListener
 import org.apache.spark.{ExposedMetrics, TaskContext}
 
+import scala.reflect.ClassTag
+
 object RichContextRDDRegionValue {
   def writeRowsPartition(
     makeEnc: (OutputStream) => Encoder,
     indexKeyFieldIndices: Array[Int] = null,
     rowType: PStruct = null
-  )(ctx: RVDContext, it: Iterator[RegionValue], os: OutputStream, iw: IndexWriter): Long = {
+  )(ctx: RVDContext, it: Iterator[Long], os: OutputStream, iw: IndexWriter): Long = {
     val context = TaskContext.get
     val outputMetrics =
       if (context != null)
@@ -31,14 +34,14 @@ object RichContextRDDRegionValue {
     val en = makeEnc(trackedOS)
     var rowCount = 0L
 
-    it.foreach { rv =>
+    it.foreach { ptr =>
       if (iw != null) {
         val off = en.indexOffset()
-        val key = SafeRow.selectFields(rowType, rv)(indexKeyFieldIndices)
+        val key = SafeRow.selectFields(rowType, ctx.r, ptr)(indexKeyFieldIndices)
         iw += (key, off, Row())
       }
       en.writeByte(1)
-      en.writeRegionValue(rv.region, rv.offset)
+      en.writeRegionValue(ptr)
       ctx.region.clear()
       rowCount += 1
 
@@ -59,15 +62,16 @@ object RichContextRDDRegionValue {
   }
 
   def writeSplitRegion(
+    localTmpdir: String,
     fs: FS,
     path: String,
     t: RVDType,
-    it: Iterator[RegionValue],
+    it: Iterator[Long],
     idx: Int,
     ctx: RVDContext,
     partDigits: Int,
     stageLocally: Boolean,
-    makeIndexWriter: (FS, String) => IndexWriter,
+    makeIndexWriter: (String) => IndexWriter,
     makeRowsEnc: (OutputStream) => Encoder,
     makeEntriesEnc: (OutputStream) => Encoder
   ): (String, Long) = {
@@ -81,8 +85,8 @@ object RichContextRDDRegionValue {
     val finalIdxPath = path + "/index/" + f + ".idx"
     val (rowsPartPath, entriesPartPath, idxPath) =
       if (stageLocally) {
-        val rowsPartPath = fs.getTemporaryFile("file:///tmp")
-        val entriesPartPath = fs.getTemporaryFile("file:///tmp")
+        val rowsPartPath = ExecuteContext.createTmpPathNoCleanup(localTmpdir, "write-split-staged-rows-part")
+        val entriesPartPath = ExecuteContext.createTmpPathNoCleanup(localTmpdir, "write-split-staged-entries-part")
         val idxPath = rowsPartPath + ".idx"
         val tc : TaskCompletionListener = _ => {
           fs.delete(rowsPartPath, recursive = false)
@@ -101,21 +105,20 @@ object RichContextRDDRegionValue {
         using(fs.create(entriesPartPath)) { entriesOS =>
           val trackedEntriesOS = new ByteTrackingOutputStream(entriesOS)
           using(makeEntriesEnc(trackedEntriesOS)) { entriesEN =>
-            using(makeIndexWriter(fs, idxPath)) { iw =>
-
+            using(makeIndexWriter(idxPath)) { iw =>
               var rowCount = 0L
 
-              it.foreach { rv =>
+              it.foreach { ptr =>
                 val rows_off = rowsEN.indexOffset()
                 val ents_off = entriesEN.indexOffset()
-                val key = SafeRow.selectFields(fullRowType, rv)(t.kFieldIdx)
+                val key = SafeRow.selectFields(fullRowType, ctx.r, ptr)(t.kFieldIdx)
                 iw += (key, rows_off, Row(ents_off))
 
                 rowsEN.writeByte(1)
-                rowsEN.writeRegionValue(rv.region, rv.offset)
+                rowsEN.writeRegionValue(ptr)
 
                 entriesEN.writeByte(1)
-                entriesEN.writeRegionValue(rv.region, rv.offset)
+                entriesEN.writeRegionValue(ptr)
 
                 ctx.region.clear()
 
@@ -172,6 +175,63 @@ object RichContextRDDRegionValue {
   }
 }
 
+class RichContextRDDLong(val crdd: ContextRDD[Long]) extends AnyVal {
+  def boundary: ContextRDD[Long] =
+    crdd.cmapPartitionsAndContext { (consumerCtx, part) =>
+      val producerCtx = consumerCtx.freshContext
+      val it = part.flatMap(_ (producerCtx))
+      new Iterator[Long]() {
+        private[this] var cleared: Boolean = false
+
+        def hasNext: Boolean = {
+          if (!cleared) {
+            cleared = true
+            producerCtx.region.clear()
+          }
+          it.hasNext
+        }
+
+        def next: Long = {
+          if (!cleared) {
+            producerCtx.region.clear()
+          }
+          cleared = false
+          it.next
+        }
+      }
+    }
+
+  def toCRDDRegionValue: ContextRDD[RegionValue] =
+    boundary.cmapPartitionsWithContext((ctx, part) => {
+      val rv = RegionValue(ctx.r)
+      part(ctx).map(ptr => { rv.setOffset(ptr); rv })
+    })
+
+  def writeRows(
+    ctx: ExecuteContext,
+    path: String,
+    idxRelPath: String,
+    t: RVDType,
+    stageLocally: Boolean,
+    encoding: AbstractTypedCodecSpec
+  ): (Array[String], Array[Long]) = {
+    crdd.writePartitions(
+      ctx,
+      path,
+      idxRelPath,
+      stageLocally,
+      IndexWriter.builder(ctx, t.kType, +PCanonicalStruct()),
+      RichContextRDDRegionValue.writeRowsPartition(
+        encoding.buildEncoder(ctx, t.rowType),
+        t.kFieldIdx,
+        t.rowType))
+  }
+
+  def toRows(rowType: PStruct): RDD[Row] = {
+    crdd.cmap((ctx, ptr) => SafeRow(rowType, ptr)).run
+  }
+}
+
 class RichContextRDDRegionValue(val crdd: ContextRDD[RegionValue]) extends AnyVal {
   def boundary: ContextRDD[RegionValue] =
     crdd.cmapPartitionsAndContext { (consumerCtx, part) =>
@@ -198,23 +258,40 @@ class RichContextRDDRegionValue(val crdd: ContextRDD[RegionValue]) extends AnyVa
       }
     }
 
-  def writeRows(
-    path: String,
-    idxRelPath: String,
-    t: RVDType,
-    stageLocally: Boolean,
-    encoding: AbstractTypedCodecSpec
-  ): (Array[String], Array[Long]) = {
-    crdd.writePartitions(
-      path,
-      idxRelPath,
-      stageLocally,
-      IndexWriter.builder(t.kType, +PStruct()),
-      RichContextRDDRegionValue.writeRowsPartition(
-        encoding.buildEncoder(t.rowType),
-        t.kFieldIdx,
-        t.rowType))
+  def toCRDDPtr: ContextRDD[Long] =
+    crdd.cmap { (consumerCtx, rv) =>
+      // Need to track regions that are in use, but don't want to create a cycle.
+      if (consumerCtx.region != rv.region) {
+        consumerCtx.region.addReferenceTo(rv.region)
+      }
+      rv.offset
+    }
+
+  def cleanupRegions: ContextRDD[RegionValue] = {
+    crdd.cmapPartitionsAndContext { (ctx, part) =>
+      val it = part.flatMap(_ (ctx))
+      new Iterator[RegionValue]() {
+        private[this] var cleared: Boolean = false
+
+        def hasNext: Boolean = {
+          if (!cleared) {
+            cleared = true
+            ctx.region.clear()
+          }
+          it.hasNext
+        }
+
+        def next: RegionValue = {
+          if (!cleared) {
+            ctx.region.clear()
+          }
+          cleared = false
+          it.next
+        }
+      }
+    }
   }
+
 
   def toRows(rowType: PStruct): RDD[Row] = {
     crdd.run.map(rv => SafeRow(rowType, rv.offset))

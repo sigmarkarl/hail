@@ -30,9 +30,9 @@ Build and install a wheel file from source with local-mode ``pyspark``::
 
     make install HAIL_COMPILE_NATIVES=1
 
-As above, but explicitly specifying the Spark version::
+As above, but explicitly specifying the Scala and Spark versions::
 
-    make install HAIL_COMPILE_NATIVES=1 SPARK_VERSION=2.4.1
+    make install HAIL_COMPILE_NATIVES=1 SCALA_VERSION=2.11.12 SPARK_VERSION=2.4.5
 
 Building the Docs and Website
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -60,7 +60,7 @@ Install development dependencies::
 A couple Hail tests compare to PLINK 1.9 (not PLINK 2.0 [ignore the confusing
 URL]):
 
- - `PLINK 1.9 <http://www.cog-genomics.org/plink2>`_
+ - `PLINK 1.9 <https://www.cog-genomics.org/plink2>`_
 
 Execute every Hail test using at most 8 parallel threads::
 

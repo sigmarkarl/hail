@@ -20,7 +20,7 @@ object GoogleStorageFS {
   def containsWildcard(path: String): Boolean = {
     var i = 0
     while (i < path.length) {
-      var c = path(i)
+      val c = path(i)
       if (c == '\\') {
         i += 1
         if (i < path.length)
@@ -33,11 +33,11 @@ object GoogleStorageFS {
       i += 1
     }
 
-    return false
+    false
   }
 
   def getBucketPath(filename: String): (String, String) = {
-    val uri = new URI(filename)
+    val uri = new URI(filename).normalize()
 
     val scheme = uri.getScheme
     assert(scheme != null && scheme == "gs", uri.getScheme)
@@ -100,20 +100,29 @@ class GoogleStorageFileStatus(path: String, modificationTime: java.lang.Long, si
 class GoogleStorageFS(serviceAccountKey: String) extends FS {
   import GoogleStorageFS._
 
-  var codecNames: IndexedSeq[String] = FastIndexedSeq(
+  private var codecNames: IndexedSeq[String] = FastIndexedSeq(
     "is.hail.io.compress.BGzipCodec",
     "is.hail.io.compress.BGzipCodecTbi",
     "org.apache.hadoop.io.compress.GzipCodec")
 
   @transient private var codecs: IndexedSeq[hadoop.io.compress.CompressionCodec] = _
-  
+
+  private val defaultHadoopConf = new hadoop.conf.Configuration()
+
   def createCodecs(): Unit = {
     if (codecs != null)
       return
 
     codecs = codecNames.map { codecName =>
       val codecClass = Class.forName(codecName)
-      codecClass.newInstance().asInstanceOf[hadoop.io.compress.CompressionCodec]
+      val codec = codecClass.newInstance().asInstanceOf[hadoop.io.compress.CompressionCodec]
+
+      codec match {
+        case codec: hadoop.io.compress.DefaultCodec =>
+          codec.setConf(defaultHadoopConf)
+        case _ =>
+      }
+      codec
     }
   }
 

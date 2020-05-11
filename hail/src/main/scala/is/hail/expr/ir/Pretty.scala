@@ -2,9 +2,8 @@ package is.hail.expr.ir
 
 import is.hail.expr.JSONAnnotationImpex
 import is.hail.expr.ir.functions.RelationalFunctions
-import is.hail.expr.types.virtual.{TArray, TInterval}
+import is.hail.expr.types.virtual.{TArray, TInterval, Type}
 import is.hail.utils._
-import org.apache.spark.sql.Row
 import org.json4s.jackson.{JsonMethods, Serialization}
 
 object Pretty {
@@ -20,6 +19,8 @@ object Pretty {
   def prettyStrings(xs: IndexedSeq[String]): String = xs.map(prettyStringLiteral).mkString("(", " ", ")")
 
   def prettyStringsOpt(x: Option[IndexedSeq[String]]): String = x.map(prettyStrings).getOrElse("None")
+
+  def prettyTypes(x: Seq[Type]): String = x.map(typ => typ.parsableString()).mkString("(", " ", ")")
 
   def prettyBooleanLiteral(b: Boolean): String =
     if (b) "True" else "False"
@@ -289,10 +290,10 @@ object Pretty {
             case NDArrayConcat(_, axis) => axis.toString
             case NDArrayAgg(_, axes) => prettyInts(axes)
             case ArraySort(_, l, r, _) => prettyIdentifier(l) + " " + prettyIdentifier(r)
-            case ApplyIR(function, _) => prettyIdentifier(function) + " " + ir.typ.parsableString()
-            case Apply(function, _, t) => prettyIdentifier(function) + " " + t.parsableString()
+            case ApplyIR(function, typeArgs, _) => prettyIdentifier(function) + " " + prettyTypes(typeArgs) + " " + ir.typ.parsableString()
+            case Apply(function, typeArgs, _, t) => prettyIdentifier(function) + " " + prettyTypes(typeArgs) + " " + t.parsableString()
             case ApplySeeded(function, _, seed, t) => prettyIdentifier(function) + " " + seed.toString + " " + t.parsableString()
-            case ApplySpecial(function, _, t) => prettyIdentifier(function) + " " + t.parsableString()
+            case ApplySpecial(function, typeArgs, _, t) => prettyIdentifier(function) + " " + prettyTypes(typeArgs) + " " + t.parsableString()
             case SelectFields(_, fields) => fields.map(prettyIdentifier).mkString("(", " ", ")")
             case LowerBoundOnOrderedCollection(_, _, onKey) => prettyBooleanLiteral(onKey)
             case In(i, typ) => s"$typ $i"
@@ -303,13 +304,13 @@ object Pretty {
               (if (typ == reader.fullMatrixType) "None" else typ.parsableString()) + " " +
               prettyBooleanLiteral(dropCols) + " " +
               prettyBooleanLiteral(dropRows) + " " +
-              '"' + StringEscapeUtils.escapeString(Serialization.write(reader)(MatrixReader.formats)) + '"'
+                '"' + StringEscapeUtils.escapeString(JsonMethods.compact(reader.toJValue)) + '"'
             case MatrixWrite(_, writer) =>
               '"' + StringEscapeUtils.escapeString(Serialization.write(writer)(MatrixWriter.formats)) + '"'
             case MatrixMultiWrite(_, writer) =>
               '"' + StringEscapeUtils.escapeString(Serialization.write(writer)(MatrixNativeMultiWriter.formats)) + '"'
             case BlockMatrixRead(reader) =>
-              '"' + StringEscapeUtils.escapeString(Serialization.write(reader)(BlockMatrixReader.formats)) + '"'
+              '"' + StringEscapeUtils.escapeString(JsonMethods.compact(reader.toJValue)) + '"'
             case BlockMatrixWrite(_, writer) =>
               '"' + StringEscapeUtils.escapeString(Serialization.write(writer)(BlockMatrixWriter.formats)) + '"'
             case BlockMatrixMultiWrite(_, writer) =>
@@ -355,7 +356,7 @@ object Pretty {
             case TableRead(typ, dropRows, tr) =>
               (if (typ == tr.fullType) "None" else typ.parsableString()) + " " +
                 prettyBooleanLiteral(dropRows) + " " +
-                '"' + StringEscapeUtils.escapeString(Serialization.write(tr)(TableReader.formats)) + '"'
+                '"' + StringEscapeUtils.escapeString(JsonMethods.compact(tr.toJValue)) + '"'
             case TableWrite(_, writer) =>
               '"' + StringEscapeUtils.escapeString(Serialization.write(writer)(TableWriter.formats)) + '"'
             case TableMultiWrite(_, writer) =>
@@ -365,6 +366,7 @@ object Pretty {
                 prettyBooleanLiteral(isSorted)
             case TableRange(n, nPartitions) => s"$n $nPartitions"
             case TableRepartition(_, n, strategy) => s"$n $strategy"
+            case TableGroupWithinPartitions(_, name, n) => s"${ prettyIdentifier(name) } $n"
             case TableHead(_, n) => n.toString
             case TableTail(_, n) => n.toString
             case TableJoin(_, _, joinType, joinKey) => s"$joinType $joinKey"
@@ -387,7 +389,7 @@ object Pretty {
                 prettyIdentifiers(colKey)
             case MatrixToMatrixApply(_, function) => prettyStringLiteral(Serialization.write(function)(RelationalFunctions.formats))
             case MatrixToTableApply(_, function) => prettyStringLiteral(Serialization.write(function)(RelationalFunctions.formats))
-            case TableToTableApply(_, function) => prettyStringLiteral(Serialization.write(function)(RelationalFunctions.formats))
+            case TableToTableApply(_, function) => prettyStringLiteral(JsonMethods.compact(function.toJValue))
             case TableToValueApply(_, function) => prettyStringLiteral(Serialization.write(function)(RelationalFunctions.formats))
             case MatrixToValueApply(_, function) => prettyStringLiteral(Serialization.write(function)(RelationalFunctions.formats))
             case BlockMatrixToTableApply(_, _, function) => prettyStringLiteral(Serialization.write(function)(RelationalFunctions.formats))
@@ -416,8 +418,8 @@ object Pretty {
             case RelationalLetTable(name, _, _) => prettyIdentifier(name)
             case RelationalLetMatrixTable(name, _, _) => prettyIdentifier(name)
             case RelationalLetBlockMatrix(name, _, _) => prettyIdentifier(name)
-            case ReadPartition(_, spec, rowType) =>
-              s"${ prettyStringLiteral(spec.toString) } ${ rowType.parsableString() }"
+            case ReadPartition(_, rowType, reader) =>
+              s"${ rowType.parsableString() } ${ prettyStringLiteral(JsonMethods.compact(reader.toJValue)) }"
             case ReadValue(_, spec, reqType) =>
               s"${ prettyStringLiteral(spec.toString) } ${ reqType.parsableString() }"
             case WriteValue(_, _, spec) => prettyStringLiteral(spec.toString)

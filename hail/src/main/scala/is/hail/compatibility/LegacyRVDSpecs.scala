@@ -6,6 +6,7 @@ import is.hail.expr.ir.ExecuteContext
 import is.hail.expr.types.encoded._
 import is.hail.expr.types.virtual._
 import is.hail.io._
+import is.hail.io.fs.FS
 import is.hail.rvd.{AbstractRVDSpec, IndexSpec2, IndexedRVDSpec2, RVD, RVDPartitioner}
 import is.hail.utils.{FastIndexedSeq, Interval}
 import org.json4s.JValue
@@ -84,13 +85,12 @@ trait ShimRVDSpec extends AbstractRVDSpec {
   override def partitioner: RVDPartitioner = shim.partitioner
 
   override def read(
-    hc: HailContext,
+    ctx: ExecuteContext,
     path: String,
     requestedType: TStruct,
-    ctx: ExecuteContext,
     newPartitioner: Option[RVDPartitioner],
     filterIntervals: Boolean
-  ): RVD = shim.read(hc, path, requestedType, ctx, newPartitioner, filterIntervals)
+  ): RVD = shim.read(ctx, path, requestedType, newPartitioner, filterIntervals)
 
   override def typedCodecSpec: AbstractTypedCodecSpec = shim.typedCodecSpec
 
@@ -111,7 +111,7 @@ case class IndexedRVDSpec private(
   private val lRvdType = LegacyEncodedTypeParser.parseLegacyRVDType(rvdType)
 
   lazy val shim = IndexedRVDSpec2(lRvdType.key,
-    TypedCodecSpec(lRvdType.rowEType, lRvdType.rowType, codecSpec.child),
+    TypedCodecSpec(lRvdType.rowEType.setRequired(true), lRvdType.rowType, codecSpec.child),
     indexSpec.toIndexSpec2, partFiles, jRangeBounds, Map.empty[String, String])
 }
 
@@ -126,7 +126,7 @@ case class UnpartitionedRVDSpec private(
 
   def key: IndexedSeq[String] = FastIndexedSeq()
 
-  def typedCodecSpec: AbstractTypedCodecSpec = TypedCodecSpec(rowEType, rowVType, codecSpec.child)
+  def typedCodecSpec: AbstractTypedCodecSpec = TypedCodecSpec(rowEType.setRequired(true), rowVType, codecSpec.child)
 
   val attrs: Map[String, String] = Map.empty
 }
@@ -147,7 +147,7 @@ case class OrderedRVDSpec private(
       JSONAnnotationImpex.importAnnotation(jRangeBounds, rangeBoundsType, padNulls = false).asInstanceOf[IndexedSeq[Interval]])
   }
 
-  override def typedCodecSpec: AbstractTypedCodecSpec = TypedCodecSpec(lRvdType.rowEType, lRvdType.rowType, codecSpec.child)
+  override def typedCodecSpec: AbstractTypedCodecSpec = TypedCodecSpec(lRvdType.rowEType.setRequired(true), lRvdType.rowType, codecSpec.child)
 
   val attrs: Map[String, String] = Map.empty
 }

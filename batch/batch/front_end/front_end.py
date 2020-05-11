@@ -18,6 +18,7 @@ from hailtop.utils import time_msecs, time_msecs_str, humanize_timedelta_msecs, 
     request_retry_transient_errors, run_if_changed, retry_long_running, \
     LoggingTimer
 from hailtop.config import get_deploy_config
+from hailtop.tls import get_server_ssl_context, ssl_client_session
 from gear import Database, setup_aiohttp_session, \
     rest_authenticated_users_only, web_authenticated_users_only, \
     web_authenticated_developers_only, check_csrf_token, transaction, \
@@ -28,7 +29,7 @@ from web_common import setup_aiohttp_jinja2, setup_common_static_routes, render_
 # import uvloop
 
 from ..utils import parse_cpu_in_mcpu, parse_memory_in_bytes, adjust_cores_for_memory_request, \
-    worker_memory_per_core_gb, cost_from_msec_mcpu
+    worker_memory_per_core_gb, cost_from_msec_mcpu, adjust_cores_for_packability
 from ..batch import batch_record_to_dict, job_record_to_dict
 from ..log_store import LogStore
 from ..database import CallError, check_call_procedure
@@ -586,6 +587,7 @@ WHERE user = %s AND id = %s AND NOT deleted;
                         f'cpu cannot be 0')
 
                 cores_mcpu = adjust_cores_for_memory_request(req_cores_mcpu, req_memory_bytes, worker_type)
+                cores_mcpu = adjust_cores_for_packability(cores_mcpu)
 
                 if cores_mcpu > worker_cores * 1000:
                     total_memory_available = worker_memory_per_core_gb(worker_type) * worker_cores
@@ -709,7 +711,12 @@ VALUES (%s, %s, %s);
 ''',
                                             (batch_id, spec_writer.token, start_job_id))
 
-            await insert()  # pylint: disable=no-value-for-parameter
+            try:
+                await insert()  # pylint: disable=no-value-for-parameter
+            except Exception as err:
+                raise ValueError(f'encountered exception while inserting a bunch'
+                                 f'jobs_args={json.dumps(jobs_args)}'
+                                 f'job_parents_args={json.dumps(job_parents_args)}') from err
     return web.Response()
 
 
@@ -897,7 +904,7 @@ WHERE user = %s AND id = %s AND NOT deleted;
                 reason=f'wrong number of jobs: expected {expected_n_jobs}, actual {actual_n_jobs}')
         raise
 
-    async with aiohttp.ClientSession(
+    async with ssl_client_session(
             raise_for_status=True, timeout=aiohttp.ClientTimeout(total=60)) as session:
         await request_retry_transient_errors(
             session, 'PATCH',
@@ -1322,7 +1329,7 @@ async def index(request, userdata):
 
 
 async def cancel_batch_loop_body(app):
-    async with aiohttp.ClientSession(
+    async with ssl_client_session(
             raise_for_status=True, timeout=aiohttp.ClientTimeout(total=5)) as session:
         await request_retry_transient_errors(
             session, 'POST',
@@ -1334,7 +1341,7 @@ async def cancel_batch_loop_body(app):
 
 
 async def delete_batch_loop_body(app):
-    async with aiohttp.ClientSession(
+    async with ssl_client_session(
             raise_for_status=True, timeout=aiohttp.ClientTimeout(total=5)) as session:
         await request_retry_transient_errors(
             session, 'POST',
@@ -1413,4 +1420,5 @@ def run():
                                                  client_max_size=HTTP_CLIENT_MAX_SIZE),
                 host='0.0.0.0',
                 port=5000,
-                access_log_class=AccessLogger)
+                access_log_class=AccessLogger,
+                ssl_context=get_server_ssl_context())

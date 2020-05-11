@@ -53,10 +53,6 @@ class BaseIR(Renderable):
         """
         return ''
 
-    @abc.abstractmethod
-    def parse(self, code, ref_map, ir_map):
-        return
-
     @property
     @abc.abstractmethod
     def typ(self):
@@ -237,12 +233,6 @@ class IR(BaseIR):
     def _compute_type(self, env, agg_env):
         raise NotImplementedError(self)
 
-    def parse(self, code, ref_map={}, ir_map={}):
-        return Env.hail().expr.ir.IRParser.parse_value_ir(
-            code,
-            {k: t._parsable_string() for k, t in ref_map.items()},
-            ir_map)
-
     @property
     def free_vars(self):
         def vars_from_child(i):
@@ -307,9 +297,6 @@ class TableIR(BaseIR):
     def renderable_new_block(self, i: int) -> bool:
         return True
 
-    def parse(self, code, ref_map={}, ir_map={}):
-        return Env.hail().expr.ir.IRParser.parse_table_ir(code, ref_map, ir_map)
-
     global_env = {'global'}
     row_env = {'global', 'row'}
 
@@ -331,9 +318,6 @@ class MatrixIR(BaseIR):
 
     def renderable_new_block(self, i: int) -> bool:
         return True
-
-    def parse(self, code, ref_map={}, ir_map={}):
-        return Env.hail().expr.ir.IRParser.parse_matrix_ir(code, ref_map, ir_map)
 
     global_env = {'global'}
     row_env = {'global', 'va'}
@@ -359,9 +343,6 @@ class BlockMatrixIR(BaseIR):
     def renderable_new_block(self, i: int) -> bool:
         return True
 
-    def parse(self, code, ref_map={}, ir_map={}):
-        return Env.hail().expr.ir.IRParser.parse_blockmatrix_ir(code, ref_map, ir_map)
-
     def unpersisted(self):
         return self
 
@@ -377,7 +358,7 @@ class JIRVectorReference(object):
 
     def __del__(self):
         try:
-            Env.hc()._jhc.pyRemoveIrVector(self.jid)
+            Env.backend()._jhc.pyRemoveIrVector(self.jid)
         # there is only so much we can do if the attempt to remove the unused IR fails,
         # especially since this will often get called during interpreter shutdown.
         except Exception:

@@ -94,6 +94,8 @@ class Classx[C](val name: String, val superName: String) {
       InitializeLocals(m)
     }
 
+    // println(Pretty(this))
+
     Emit(this,
       print
       // Some(new PrintWriter(System.out))
@@ -316,12 +318,12 @@ class MethodLit(
 ) extends MethodRef
 
 class Local(var method: Method, val name: String, val ti: TypeInfo[_]) {
-  override def toString: String = f"t${ System.identityHashCode(this) }%08x/$name"
-//  val stack = Thread.currentThread().getStackTrace
+  override def toString: String = f"t${ System.identityHashCode(this) }%08x/$name ${ ti.desc }"
+  // val stack = Thread.currentThread().getStackTrace
 }
 
 class Parameter(method: Method, val i: Int, ti: TypeInfo[_]) extends Local(method, null, ti) {
-  override def toString: String = s"arg:$i"
+  override def toString: String = s"arg:$i ${ ti.desc }"
 }
 
 class Block {
@@ -582,6 +584,14 @@ class InsnX(val op: Int, _ti: TypeInfo[_]) extends ValueX {
       return _ti
 
     op match {
+      // Int + Boolean
+      case IAND =>
+        children.head.ti
+      case IOR =>
+        children.head.ti
+      case IXOR =>
+        children.head.ti
+
       // Int
       case INEG => IntInfo
       case IADD => IntInfo
@@ -589,9 +599,6 @@ class InsnX(val op: Int, _ti: TypeInfo[_]) extends ValueX {
       case IMUL => IntInfo
       case IDIV => IntInfo
       case IREM => IntInfo
-      case IAND => IntInfo
-      case IOR => IntInfo
-      case IXOR => IntInfo
       case L2I => IntInfo
       case F2I => IntInfo
       case D2I => IntInfo
@@ -646,18 +653,10 @@ class NewArrayX(val eti: TypeInfo[_]) extends ValueX {
 
 class NewInstanceX(val ti: TypeInfo[_]) extends ValueX
 
-class LdcX(val a: Any) extends ValueX {
-  val ti: TypeInfo[_] = a match {
-    case _: Boolean => BooleanInfo
-    case _: Byte => ByteInfo
-    case _: Short => ShortInfo
-    case _: Int => IntInfo
-    case _: Long => LongInfo
-    case _: Char => CharInfo
-    case _: Float => FloatInfo
-    case _: Double => DoubleInfo
-    case _: String => classInfo[String]
-  }
+class LdcX(val a: Any, val ti: TypeInfo[_]) extends ValueX {
+  assert(
+    a.isInstanceOf[String] || a.isInstanceOf[Double] || a.isInstanceOf[Float] || a.isInstanceOf[Int] || a.isInstanceOf[Long],
+    s"not a string, double, float, int, or long: $a")
 }
 
 class MethodX(val op: Int, val method: MethodRef) extends ValueX {

@@ -1,10 +1,10 @@
 package is.hail.expr.types.virtual
 
 import is.hail.annotations._
+import is.hail.asm4s._
 import is.hail.check.{Arbitrary, Gen}
-import is.hail.expr.ir.IRParser
+import is.hail.expr.ir._
 import is.hail.expr.types._
-import is.hail.expr.types.physical.PType
 import is.hail.expr.{JSONAnnotationImpex, SparkAnnotationImpex}
 import is.hail.utils
 import is.hail.utils._
@@ -104,6 +104,8 @@ object Type {
 
 abstract class Type extends BaseType with Serializable {
   self =>
+
+  def ti: TypeInfo[_] = typeToTypeInfo(this)
 
   def children: Seq[Type] = FastSeq()
 
@@ -209,6 +211,11 @@ abstract class Type extends BaseType with Serializable {
   def _typeCheck(a: Any): Boolean
 
   final def typeCheck(a: Any): Boolean = a == null || _typeCheck(a)
+
+  def valueSubsetter(subtype: Type): Any => Any = {
+    assert(this == subtype)
+    identity
+  }
 
   def canCastTo(t: Type): Boolean = this match {
     case TInterval(tt1) => t match {

@@ -19,10 +19,9 @@ Coll_T = TypeVar('Collection_T', ArrayExpression, SetExpression)
 Num_T = TypeVar('Numeric_T', Int32Expression, Int64Expression, Float32Expression, Float64Expression)
 
 
-def _func(name, ret_type, *args):
+def _func(name, ret_type, *args, type_args=()):
     indices, aggregations = unify_all(*args)
-    return construct_expr(Apply(name, ret_type, *(a._ir for a in args)), ret_type, indices, aggregations)
-
+    return construct_expr(Apply(name, ret_type, *(a._ir for a in args), type_args=type_args), ret_type, indices, aggregations)
 
 def _seeded_func(name, ret_type, seed, *args):
     seed = seed if seed is not None else Env.next_seed()
@@ -1553,6 +1552,30 @@ def json(x) -> StringExpression:
     return _func("json", tstr, x)
 
 
+@typecheck(x=expr_str, dtype=hail_type)
+def parse_json(x, dtype):
+    """Convert a JSON string to a structured expression.
+
+    Examples
+    --------
+    >>> json_str = '{"a": 5, "b": 1.1, "c": "foo"}'
+    >>> parsed = hl.parse_json(json_str, dtype='struct{a: int32, b: float64, c: str}')
+    >>> hl.eval(parsed.a)
+    5
+
+    Parameters
+    ----------
+    x : :class:`.StringExpression`
+        JSON string.
+    dtype
+        Type of value to parse.
+
+    Returns
+    -------
+    :class:`.Expression`
+    """
+    return _func("parse_json", ttuple(dtype), x, type_args=(dtype,))[0]
+
 @typecheck(x=expr_float64, base=nullable(expr_float64))
 def log(x, base=None) -> Float64Expression:
     """Take the logarithm of the `x` with base `base`.
@@ -2628,10 +2651,10 @@ def is_transversion(ref, alt) -> BooleanExpression:
 @udf(tstr, tstr)
 def _is_snp_transition(ref, alt) -> BooleanExpression:
     indices = hl.range(0, ref.length())
-    return hl.any(lambda i: ((ref[i] != alt[i]) & (((ref[i] == 'A') & (alt[i] == 'G')) |
-                                                   ((ref[i] == 'G') & (alt[i] == 'A')) |
-                                                   ((ref[i] == 'C') & (alt[i] == 'T')) |
-                                                   ((ref[i] == 'T') & (alt[i] == 'C')))), indices)
+    return hl.any(lambda i: ((ref[i] != alt[i]) & (((ref[i] == 'A') & (alt[i] == 'G'))
+                                                   | ((ref[i] == 'G') & (alt[i] == 'A'))
+                                                   | ((ref[i] == 'C') & (alt[i] == 'T'))
+                                                   | ((ref[i] == 'T') & (alt[i] == 'C')))), indices)
 
 @typecheck(ref=expr_str, alt=expr_str)
 def is_insertion(ref, alt) -> BooleanExpression:
@@ -2702,8 +2725,8 @@ def is_indel(ref, alt) -> BooleanExpression:
     -------
     :class:`.BooleanExpression`
     """
-    return hl.bind(lambda t: (t == _allele_ints["Insertion"]) |
-                             (t == _allele_ints["Deletion"]),
+    return hl.bind(lambda t: (t == _allele_ints["Insertion"])
+                   | (t == _allele_ints["Deletion"]),
                    _num_allele_type(ref, alt))
 
 
@@ -4859,8 +4882,8 @@ def get_sequence(contig, position, before=0, after=0, reference_genome='default'
 
     if not reference_genome.has_sequence():
         raise TypeError("Reference genome '{}' does not have a sequence loaded. Use 'add_sequence' to load the sequence from a FASTA file.".format(reference_genome.name))
-    return _func("getReferenceSequence_{}".format(reference_genome.name), tstr,
-                 contig, position, before, after)
+
+    return _func("getReferenceSequence", tstr, contig, position, before, after, type_args=(tlocus(reference_genome), ))
 
 @typecheck(contig=expr_str,
            reference_genome=reference_genome_type)
@@ -4885,7 +4908,7 @@ def is_valid_contig(contig, reference_genome='default') -> BooleanExpression:
     -------
     :class:`.BooleanExpression`
     """
-    return _func("isValidContig_{}".format(reference_genome.name), tbool, contig)
+    return _func("isValidContig", tbool, contig, type_args=(tlocus(reference_genome), ))
 
 @typecheck(contig=expr_str,
            reference_genome=reference_genome_type)
@@ -4907,7 +4930,7 @@ def contig_length(contig, reference_genome='default') -> Int32Expression:
     -------
     :class:`.Int32Expression`
     """
-    return _func("contigLength_{}".format(reference_genome.name), tint32, contig)
+    return _func("contigLength", tint32, contig, type_args=(tlocus(reference_genome), ))
 
 
 @typecheck(contig=expr_str,
@@ -4935,7 +4958,7 @@ def is_valid_locus(contig, position, reference_genome='default') -> BooleanExpre
     -------
     :class:`.BooleanExpression`
     """
-    return _func("isValidLocus_{}".format(reference_genome.name), tbool, contig, position)
+    return _func("isValidLocus", tbool, contig, position, type_args=(tlocus(reference_genome), ))
 
 
 @typecheck(locus=expr_locus(), is_female=expr_bool, father=expr_call, mother=expr_call, child=expr_call)
@@ -5231,8 +5254,8 @@ def uniroot(f: Callable, min, max, *, max_iter=1000, epsilon=2.2204460492503131e
         pq = cond(
             a == c,
             (cb * t1) / (t1 - 1.0),  # linear
-            -t2 * (cb * q1 * (q1 - t1) - (b-a)*(t1 - 1.0)) /
-            ((q1 - 1.0) * (t1 - 1.0) * (t2 - 1.0)))  # quadratic
+            -t2 * (cb * q1 * (q1 - t1) - (b-a)*(t1 - 1.0))
+            / ((q1 - 1.0) * (t1 - 1.0) * (t2 - 1.0)))  # quadratic
 
         interpolated = cond((sign(pq) == sign(cb))
                             & (.75 * abs(cb) > abs(pq) + tol / 2)  # b + pq within [b, c]

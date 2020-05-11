@@ -11,8 +11,8 @@ import is.hail.utils._
 
 final case class EPackedIntArray(
   override val required: Boolean = false,
-  val elementsRequired: Boolean
-) extends EContainer {
+  elementsRequired: Boolean
+) extends EContainer with EFundamentalType {
   def elementType: EType = EInt32(elementsRequired)
 
   override def _compatible(pt: PType): Boolean = {
@@ -23,7 +23,8 @@ final case class EPackedIntArray(
 
   def _decodedPType(requestedType: Type): PType = EArray(EInt32(elementsRequired), required)._decodedPType(requestedType)
 
-  def _buildDecoder(pt: PType, mb: EmitMethodBuilder[_], region: Value[Region], in: Value[InputBuffer]): Code[_] = {
+
+  def _buildFundamentalDecoder(pt: PType, mb: EmitMethodBuilder[_], region: Value[Region], in: Value[InputBuffer]): Code[_] = {
     val pa = pt.asInstanceOf[PArray]
 
     val i = mb.newLocal[Int]("i")
@@ -87,7 +88,7 @@ final case class EPackedIntArray(
     )
   }
 
-  def _buildEncoder(pt: PType, mb: EmitMethodBuilder[_], v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
+  def _buildFundamentalEncoder(pt: PType, mb: EmitMethodBuilder[_], v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
     val pa = pt.asInstanceOf[PArray]
 
     val packer = mb.newLocal[IntPacker]("packer")
@@ -128,4 +129,6 @@ final case class EPackedIntArray(
   private def getPacker(mb: EmitMethodBuilder[_]): Value[IntPacker] = {
     mb.getOrDefineLazyField[IntPacker](Code.newInstance[IntPacker], "thePacker")
   }
+
+  def setRequired(newRequired: Boolean): EPackedIntArray = EPackedIntArray(newRequired, elementsRequired)
 }

@@ -4,7 +4,7 @@ import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.expr.ir._
 import is.hail.expr.ir.functions.MatrixToTableFunction
-import is.hail.expr.types.physical.{PFloat64, PInt64, PString, PStruct}
+import is.hail.expr.types.physical.{PCanonicalString, PCanonicalStruct, PFloat64, PInt64, PString, PStruct}
 import is.hail.expr.types.virtual.{TFloat64, TStruct}
 import is.hail.expr.types.{MatrixType, TableType}
 import is.hail.rvd.RVDContext
@@ -22,7 +22,7 @@ object IBDInfo {
   }
 
   val pType =
-    PStruct(("Z0", PFloat64()), ("Z1", PFloat64()), ("Z2", PFloat64()), ("PI_HAT", PFloat64()))
+    PCanonicalStruct(("Z0", PFloat64()), ("Z1", PFloat64()), ("Z2", PFloat64()), ("PI_HAT", PFloat64()))
 
   def fromRegionValue(offset: Long): IBDInfo = {
     val Z0 = Region.loadDouble(pType.loadField(offset, 0))
@@ -51,7 +51,7 @@ case class IBDInfo(Z0: Double, Z1: Double, Z2: Double, PI_HAT: Double) {
 
 object ExtendedIBDInfo {
   val pType =
-    PStruct(("ibd", IBDInfo.pType), ("ibs0", PInt64()), ("ibs1", PInt64()), ("ibs2", PInt64()))
+    PCanonicalStruct(("ibd", IBDInfo.pType), ("ibs0", PInt64()), ("ibs1", PInt64()), ("ibs2", PInt64()))
 
   def fromRegionValue(offset: Long): ExtendedIBDInfo = {
     val ibd = IBDInfo.fromRegionValue(pType.loadField(offset, 0))
@@ -204,26 +204,27 @@ object IBD {
     min: Option[Double],
     max: Option[Double],
     sampleIds: IndexedSeq[String],
-    bounded: Boolean): ContextRDD[RegionValue] = {
+    bounded: Boolean): ContextRDD[Long] = {
 
     val nSamples = input.nCols
 
-    val rowType = input.rvRowType
     val rowPType = input.rvRowPType
-    val unnormalizedIbse = input.rvd.mapPartitions { it =>
+    val unnormalizedIbse = input.rvd.mapPartitions { (ctx, it) =>
+      val rv = RegionValue(ctx.r)
       val view = HardCallView(rowPType)
-      it.map { rv =>
-        view.setRegion(rv)
+      it.map { ptr =>
+        rv.setOffset(ptr)
+        view.set(ptr)
         ibsForGenotypes(view, computeMaf.map(f => f(rv)))
       }
     }.fold(IBSExpectations.empty)(_ join _)
 
     val ibse = unnormalizedIbse.normalized
 
-    val chunkedGenotypeMatrix = input.rvd.mapPartitions { it =>
+    val chunkedGenotypeMatrix = input.rvd.mapPartitions { (_, it) =>
       val view = HardCallView(rowPType)
-      it.map { rv =>
-        view.setRegion(rv)
+      it.map { ptr =>
+        view.set(ptr)
         Array.tabulate[Byte](view.getLength) { i =>
           view.setGenotype(i)
           if (view.hasGT)
@@ -268,9 +269,7 @@ object IBD {
 
     joined
       .cmapPartitions { (ctx, it) =>
-        val region = ctx.region
-        val rv = RegionValue(region)
-        val rvb = new RegionValueBuilder(region)
+        val rvb = new RegionValueBuilder(ctx.region)
         for {
           ((iChunk, jChunk), ibses) <- it
           si <- (0 until chunkSize).iterator
@@ -288,13 +287,13 @@ object IBD {
           rvb.addString(sampleIds(j))
           eibd.toRegionValue(rvb)
           rvb.endStruct()
-          rv.setOffset(rvb.end())
-          rv
+          rvb.end()
         }
       }
   }
 
-  private val ibdPType = PStruct(("i", PString()), ("j", PString())) ++ ExtendedIBDInfo.pType
+  private val ibdPType =
+    PCanonicalStruct(required = true, Array(("i", PCanonicalString()), ("j", PCanonicalString())) ++ ExtendedIBDInfo.pType.fields.map(f => (f.name, f.typ)): _*)
   private val ibdKey = FastIndexedSeq("i", "j")
 
   private[methods] def generateComputeMaf(input: MatrixValue, fieldName: String): (RegionValue) => Double = {

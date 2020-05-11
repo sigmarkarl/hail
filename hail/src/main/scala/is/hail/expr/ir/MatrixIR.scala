@@ -3,12 +3,14 @@ package is.hail.expr.ir
 
 import is.hail.HailContext
 import is.hail.annotations._
+import is.hail.backend.Backend
 import is.hail.expr.ir.IRBuilder._
 import is.hail.expr.ir.functions.MatrixToMatrixFunction
 import is.hail.expr.types._
 import is.hail.expr.types.virtual._
 import is.hail.io.TextMatrixReader
 import is.hail.io.bgen.MatrixBGENReader
+import is.hail.io.fs.FS
 import is.hail.io.gen.MatrixGENReader
 import is.hail.io.plink.MatrixPLINKReader
 import is.hail.io.vcf.MatrixVCFReader
@@ -20,12 +22,12 @@ import org.apache.spark.storage.StorageLevel
 import org.json4s._
 
 object MatrixIR {
-  def read(hc: HailContext, path: String, dropCols: Boolean = false, dropRows: Boolean = false, requestedType: Option[MatrixType] = None): MatrixIR = {
-    val reader = MatrixNativeReader(path)
+  def read(fs: FS, path: String, dropCols: Boolean = false, dropRows: Boolean = false, requestedType: Option[MatrixType] = None): MatrixIR = {
+    val reader = MatrixNativeReader(fs, path)
     MatrixRead(requestedType.getOrElse(reader.fullMatrixType), dropCols, dropRows, reader)
   }
 
-  def range(hc: HailContext, nRows: Int, nCols: Int, nPartitions: Option[Int], dropCols: Boolean = false, dropRows: Boolean = false): MatrixIR = {
+  def range(nRows: Int, nCols: Int, nPartitions: Option[Int], dropCols: Boolean = false, dropRows: Boolean = false): MatrixIR = {
     val reader = MatrixRangeReader(nRows, nCols, nPartitions)
     MatrixRead(reader.fullMatrixType, dropCols = dropCols, dropRows = dropRows, reader = reader)
   }
@@ -42,13 +44,6 @@ abstract sealed class MatrixIR extends BaseIR {
 
   override def copy(newChildren: IndexedSeq[BaseIR]): MatrixIR
 
-  def persist(storageLevel: StorageLevel): MatrixIR = {
-    ExecuteContext.scoped() { ctx =>
-      val tv = Interpret(this, ctx, optimize = true)
-      MatrixLiteral(this.typ, TableLiteral(tv.persist(storageLevel), ctx))
-    }
-  }
-
   def unpersist(): MatrixIR = {
     this match {
       case MatrixLiteral(typ, tl) => MatrixLiteral(typ, tl.unpersist().asInstanceOf[TableLiteral])
@@ -56,30 +51,17 @@ abstract sealed class MatrixIR extends BaseIR {
     }
   }
 
-  def pyPersist(storageLevel: String): MatrixIR = {
-    val level = try {
-      StorageLevel.fromString(storageLevel)
-    } catch {
-      case e: IllegalArgumentException =>
-        fatal(s"unknown StorageLevel: $storageLevel")
-    }
-    persist(level)
-  }
-
   def pyUnpersist(): MatrixIR = unpersist()
 }
 
 object MatrixLiteral {
-  def apply(typ: MatrixType, rvd: RVD, globals: Row, colValues: IndexedSeq[Row]): MatrixLiteral = {
+  def apply(ctx: ExecuteContext, typ: MatrixType, rvd: RVD, globals: Row, colValues: IndexedSeq[Row]): MatrixLiteral = {
     val tt = typ.canonicalTableType
-    ExecuteContext.scoped() { ctx =>
-      MatrixLiteral(typ,
-        TableLiteral(
-          TableValue(tt,
-            BroadcastRow(ctx, Row.merge(globals, Row(colValues)), typ.canonicalTableType.globalType),
-            rvd),
-          ctx))
-    }
+    MatrixLiteral(typ,
+      TableLiteral(
+        TableValue(ctx, tt,
+          BroadcastRow(ctx, Row.merge(globals, Row(colValues)), typ.canonicalTableType.globalType),
+          rvd)))
   }
 }
 
@@ -97,19 +79,23 @@ case class MatrixLiteral(typ: MatrixType, tl: TableLiteral) extends MatrixIR {
 }
 
 object MatrixReader {
-  implicit val formats: Formats = RelationalSpec.formats + ShortTypeHints(
-    List(classOf[MatrixNativeReader],
-      classOf[MatrixRangeReader],
-      classOf[MatrixVCFReader],
-      classOf[MatrixBGENReader],
-      classOf[MatrixPLINKReader],
-      classOf[MatrixGENReader],
-      classOf[TextInputFilterAndReplace],
-      classOf[TextMatrixReader])
-  ) + new NativeReaderOptionsSerializer()
+  def fromJson(env: IRParserEnvironment, jv: JValue): MatrixReader = {
+    implicit val formats: Formats = DefaultFormats
+    (jv \ "name").extract[String] match {
+      case "MatrixRangeReader" => MatrixRangeReader.fromJValue(env.ctx, jv)
+      case "MatrixNativeReader" => MatrixNativeReader.fromJValue(env.ctx.fs, jv)
+      case "MatrixBGENReader" => MatrixBGENReader.fromJValue(env, jv)
+      case "TextMatrixReader" => TextMatrixReader.fromJValue(env.ctx, jv)
+      case "MatrixGENReader" => MatrixGENReader.fromJValue(env.ctx, jv)
+      case "MatrixPLINKReader" => MatrixPLINKReader.fromJValue(env.ctx, jv)
+      case "MatrixVCFReader" => MatrixVCFReader.fromJValue(env.ctx, jv)
+    }
+  }
 }
 
 trait MatrixReader {
+  def pathsUsed: Seq[String]
+
   def columnCount: Option[Int]
 
   def partitionCounts: Option[IndexedSeq[Long]]
@@ -117,6 +103,8 @@ trait MatrixReader {
   def fullMatrixType: MatrixType
 
   def lower(mr: MatrixRead): TableIR
+
+  def toJValue: JValue
 }
 
 abstract class MatrixHybridReader extends TableReader with MatrixReader {
@@ -140,64 +128,90 @@ abstract class MatrixHybridReader extends TableReader with MatrixReader {
     tr
   }
 
-  def makeGlobalValue(ctx: ExecuteContext, requestedType: TableType, values: => IndexedSeq[Row]): BroadcastRow = {
+  def makeGlobalValue(ctx: ExecuteContext, requestedType: TStruct, values: => IndexedSeq[Row]): BroadcastRow = {
     assert(fullType.globalType.size == 1)
-    val colType = requestedType.globalType.fieldOption(LowerMatrixIR.colsFieldName)
+    val colType = requestedType.fieldOption(LowerMatrixIR.colsFieldName)
       .map(fd => fd.typ.asInstanceOf[TArray].elementType.asInstanceOf[TStruct])
 
     colType match {
       case Some(ct) =>
-        assert(requestedType.globalType.size == 1)
+        assert(requestedType.size == 1)
         val containedFields = ct.fieldNames.toSet
         val colValueIndices = fullMatrixType.colType.fields
           .filter(f => containedFields.contains(f.name))
           .map(_.index)
           .toArray
         val arr = values.map(r => Row.fromSeq(colValueIndices.map(r.get))).toFastIndexedSeq
-        BroadcastRow(ctx, Row(arr), requestedType.globalType)
+        BroadcastRow(ctx, Row(arr), requestedType)
       case None =>
-        assert(requestedType.globalType == TStruct.empty)
-        BroadcastRow(ctx, Row(), requestedType.globalType)
+        assert(requestedType == TStruct.empty)
+        BroadcastRow(ctx, Row(), requestedType)
     }
   }
 }
 
-case class MatrixNativeReader(
-  path: String,
-  options: Option[NativeReaderOptions] = None,
-  _spec: AbstractMatrixTableSpec = null
-) extends MatrixReader {
-  lazy val spec: AbstractMatrixTableSpec = Option(_spec).getOrElse(
-    (RelationalSpec.read(HailContext.get, path): @unchecked) match {
-      case mts: AbstractMatrixTableSpec => mts
-      case _: AbstractTableSpec => fatal(s"file is a Table, not a MatrixTable: '$path'")
-    })
+object MatrixNativeReader {
+  def apply(fs: FS, path: String, options: Option[NativeReaderOptions] = None): MatrixNativeReader =
+    MatrixNativeReader(fs, MatrixNativeReaderParameters(path, options))
 
-  lazy val columnCount: Option[Int] = Some(RelationalSpec.read(HailContext.get, path + "/cols")
-    .asInstanceOf[AbstractTableSpec]
+  def apply(fs: FS, params: MatrixNativeReaderParameters): MatrixNativeReader = {
+    val spec =
+      (RelationalSpec.read(fs, params.path): @unchecked) match {
+        case mts: AbstractMatrixTableSpec => mts
+        case _: AbstractTableSpec => fatal(s"file is a Table, not a MatrixTable: '${ params.path }'")
+      }
+
+    val intervals = params.options.map(_.intervals)
+    if (intervals.nonEmpty && !spec.indexed)
+      fatal("""`intervals` specified on an unindexed matrix table.
+              |This matrix table was written using an older version of hail
+              |rewrite the matrix in order to create an index to proceed""".stripMargin)
+
+    new MatrixNativeReader(params, spec)
+  }
+
+  def fromJValue(fs: FS, jv: JValue): MatrixNativeReader = {
+    val path = jv \ "path" match {
+      case JString(s) => s
+    }
+
+    val options = jv \ "options" match {
+      case optionsJV: JObject =>
+        Some(NativeReaderOptions.fromJValue(optionsJV))
+      case JNothing => None
+    }
+
+    MatrixNativeReader(fs, MatrixNativeReaderParameters(path, options))
+  }
+}
+
+case class MatrixNativeReaderParameters(
+  path: String,
+  options: Option[NativeReaderOptions])
+
+class MatrixNativeReader(
+  val params: MatrixNativeReaderParameters,
+  spec: AbstractMatrixTableSpec
+) extends MatrixReader {
+  def pathsUsed: Seq[String] = FastSeq(params.path)
+
+  lazy val columnCount: Option[Int] = Some(spec.colsSpec
     .partitionCounts
     .sum
     .toInt)
 
-  def partitionCounts: Option[IndexedSeq[Long]] = if (intervals.isEmpty) Some(spec.partitionCounts) else None
+  def partitionCounts: Option[IndexedSeq[Long]] = if (params.options.isEmpty) Some(spec.partitionCounts) else None
 
   def fullMatrixType: MatrixType = spec.matrix_type
 
-  private def intervals = options.map(_.intervals)
-
-  if (intervals.nonEmpty && !spec.indexed(path))
-    fatal("""`intervals` specified on an unindexed matrix table.
-            |This matrix table was written using an older version of hail
-            |rewrite the matrix in order to create an index to proceed""".stripMargin)
-
   override def lower(mr: MatrixRead): TableIR = {
-    val rowsPath = path + "/rows"
-    val entriesPath = path + "/entries"
-    val colsPath = path + "/cols"
+    val rowsPath = params.path + "/rows"
+    val entriesPath = params.path + "/entries"
+    val colsPath = params.path + "/cols"
 
     if (mr.dropCols) {
       val tt = TableType(mr.typ.rowType, mr.typ.rowKey, mr.typ.globalType)
-      val trdr: TableReader = TableNativeReader(rowsPath, options, _spec = spec.rowsTableSpec(rowsPath))
+      val trdr: TableReader = new TableNativeReader(TableNativeReaderParameters(rowsPath, params.options), spec.rowsSpec)
       var tr: TableIR = TableRead(tt, mr.dropRows, trdr)
       tr = TableMapGlobals(
         tr,
@@ -217,23 +231,22 @@ case class MatrixNativeReader(
       val trdr = TableNativeZippedReader(
         rowsPath,
         entriesPath,
-        options,
-        spec.rowsTableSpec(rowsPath),
-        spec.entriesTableSpec(entriesPath))
+        params.options,
+        spec.rowsSpec,
+        spec.entriesSpec)
       val tr: TableIR = TableRead(tt, mr.dropRows, trdr)
-      val colsTableSpec = spec.colsTableSpec(colsPath)
-      val colsRVDSpec = colsTableSpec.rowsSpec(colsPath)
-      val partFiles = colsRVDSpec.absolutePartPaths(colsTableSpec.rowsComponent.absolutePath(colsPath))
+      val colsRVDSpec = spec.colsSpec.rowsSpec
+      val partFiles = colsRVDSpec.absolutePartPaths(spec.colsSpec.rowsComponent.absolutePath(colsPath))
 
       val cols = if (partFiles.length == 1) {
-        ReadPartition(Str(partFiles.head), colsRVDSpec.typedCodecSpec, mr.typ.colType)
+        ReadPartition(Str(partFiles.head), mr.typ.colType, PartitionNativeReader(colsRVDSpec.typedCodecSpec))
       } else {
         val partNames = MakeArray(partFiles.map(Str), TArray(TString))
         val elt = Ref(genUID(), TString)
         StreamFlatMap(
           partNames,
           elt.name,
-          ReadPartition(elt, colsRVDSpec.typedCodecSpec, mr.typ.colType))
+          ReadPartition(elt, mr.typ.colType, PartitionNativeReader(colsRVDSpec.typedCodecSpec)))
       }
 
       TableMapGlobals(tr, InsertFields(
@@ -242,9 +255,44 @@ case class MatrixNativeReader(
       ))
     }
   }
+
+  def toJValue: JValue = {
+    implicit val formats: Formats = DefaultFormats
+    decomposeWithName(params, "MatrixNativeReader")
+  }
+
+  override def hashCode(): Int = params.hashCode()
+
+  override def equals(that: Any): Boolean = that match {
+    case that: MatrixNativeReader => params == that.params
+    case _ => false
+  }
 }
 
-case class MatrixRangeReader(nRows: Int, nCols: Int, nPartitions: Option[Int]) extends MatrixReader {
+object MatrixRangeReader {
+  def apply(nRows: Int, nCols: Int, nPartitions: Option[Int]): MatrixRangeReader =
+    MatrixRangeReader(MatrixRangeReaderParameters(nRows, nCols, nPartitions))
+
+  def fromJValue(ctx: ExecuteContext, jv: JValue): MatrixRangeReader = {
+    implicit val formats: Formats = DefaultFormats
+    val params = jv.extract[MatrixRangeReaderParameters]
+
+    MatrixRangeReader(params)
+  }
+
+  def apply(params: MatrixRangeReaderParameters): MatrixRangeReader = {
+    val nPartitionsAdj = math.min(params.nRows, params.nPartitions.getOrElse(HailContext.backend.defaultParallelism))
+    new MatrixRangeReader(params, nPartitionsAdj)
+  }
+}
+
+case class MatrixRangeReaderParameters(nRows: Int, nCols: Int, nPartitions: Option[Int])
+
+class MatrixRangeReader(
+  val params: MatrixRangeReaderParameters,
+  nPartitionsAdj: Int
+) extends MatrixReader {
+  def pathsUsed: Seq[String] = FastSeq()
   val fullMatrixType: MatrixType = MatrixType(
     globalType = TStruct.empty,
     colKey = Array("col_idx"),
@@ -253,24 +301,31 @@ case class MatrixRangeReader(nRows: Int, nCols: Int, nPartitions: Option[Int]) e
     rowType = TStruct("row_idx" -> TInt32),
     entryType = TStruct.empty)
 
-  val columnCount: Option[Int] = Some(nCols)
+  val columnCount: Option[Int] = Some(params.nCols)
 
-  lazy val partitionCounts: Option[IndexedSeq[Long]] = {
-    val nPartitionsAdj = math.min(nRows, nPartitions.getOrElse(HailContext.get.sc.defaultParallelism))
-    Some(partition(nRows, nPartitionsAdj).map(_.toLong))
-  }
+  lazy val partitionCounts: Option[IndexedSeq[Long]] = Some(partition(params.nRows, nPartitionsAdj).map(_.toLong))
 
   override def lower(mr: MatrixRead): TableIR = {
-    val uid1 = Symbol(genUID())
-
-    val nRowsAdj = if (mr.dropRows) 0 else nRows
-    val nColsAdj = if (mr.dropCols) 0 else nCols
-    TableRange(nRowsAdj, nPartitions.getOrElse(HailContext.get.sc.defaultParallelism))
+    val nRowsAdj = if (mr.dropRows) 0 else params.nRows
+    val nColsAdj = if (mr.dropCols) 0 else params.nCols
+    TableRange(nRowsAdj, params.nPartitions.getOrElse(HailContext.backend.defaultParallelism))
       .rename(Map("idx" -> "row_idx"))
       .mapGlobals(makeStruct(LowerMatrixIR.colsField ->
         irRange(0, nColsAdj).map('i ~> makeStruct('col_idx -> 'i))))
       .mapRows('row.insertFields(LowerMatrixIR.entriesField ->
         irRange(0, nColsAdj).map('i ~> makeStruct())))
+  }
+
+  def toJValue: JValue = {
+    implicit val formats: Formats = DefaultFormats
+    decomposeWithName(params, "MatrixRangeReader")
+  }
+
+  override def hashCode(): Int = params.hashCode()
+
+  override def equals(that: Any): Boolean = that match {
+    case that: MatrixRangeReader => params == that.params
+    case _ => false
   }
 }
 

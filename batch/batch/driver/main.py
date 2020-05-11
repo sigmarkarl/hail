@@ -13,6 +13,7 @@ from gear import Database, setup_aiohttp_session, web_authenticated_developers_o
     check_csrf_token, transaction, AccessLogger
 from hailtop.config import get_deploy_config
 from hailtop.utils import time_msecs
+from hailtop.tls import get_server_ssl_context
 from web_common import setup_aiohttp_jinja2, setup_common_static_routes, render_template, \
     set_message
 import googlecloudprofiler
@@ -147,7 +148,7 @@ async def close_batch(request):
     user = request.match_info['user']
     batch_id = int(request.match_info['batch_id'])
 
-    record = db.select_and_fetchone(
+    record = await db.select_and_fetchone(
         '''
 SELECT state FROM batches WHERE user = %s AND id = %s;
 ''',
@@ -532,6 +533,7 @@ async def on_startup(app):
 async def on_cleanup(app):
     blocking_pool = app['blocking_pool']
     blocking_pool.shutdown()
+    await app['db'].async_close()
 
 
 def run():
@@ -561,4 +563,5 @@ def run():
                                                  client_max_size=HTTP_CLIENT_MAX_SIZE),
                 host='0.0.0.0',
                 port=5000,
-                access_log_class=AccessLogger)
+                access_log_class=AccessLogger,
+                ssl_context=get_server_ssl_context())

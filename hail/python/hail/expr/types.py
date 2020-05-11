@@ -11,7 +11,7 @@ from hail.expr.nat import NatBase, NatLiteral
 from hail.expr.type_parsing import type_grammar, type_node_visitor
 from hail.genetics.reference_genome import reference_genome_type
 from hail.typecheck import *
-from hail.utils.java import scala_object, jset, Env, escape_parsable
+from hail.utils.java import escape_parsable
 
 __all__ = [
     'dtype',
@@ -626,7 +626,7 @@ class tndarray(HailType):
 
     def _traverse(self, obj, f):
         if f(self, obj):
-            for elt in np.nditer(obj):
+            for elt in np.nditer(obj, ['zerosize_ok']):
                 self.element_type._traverse(elt.item(), f)
 
     def _typecheck_one_level(self, annotation):
@@ -654,20 +654,18 @@ class tndarray(HailType):
         return np.ndarray(shape=x['shape'], buffer=np.array(x['data'], dtype=np_type), strides=x['strides'], dtype=np_type)
 
     def _convert_to_json(self, x):
-        data = x.reshape(x.size).tolist()
+        data = x.flatten("F").tolist()
 
         strides = []
         axis_one_step_byte_size = x.itemsize
-        for dimension_size in reversed(x.shape):
-            strides.insert(0, axis_one_step_byte_size)
+        for dimension_size in x.shape:
+            strides.append(axis_one_step_byte_size)
             axis_one_step_byte_size *= (dimension_size if dimension_size > 0 else 1)
 
         json_dict = {
             "shape": x.shape,
             "strides": strides,
-            "flags": 0,
-            "data": data,
-            "offset": 0
+            "data": data
         }
         return json_dict
 
@@ -1128,9 +1126,9 @@ class tstruct(HailType, Mapping):
         return {f: t._convert_to_json_na(x[f]) for f, t in self.items()}
 
     def _is_prefix_of(self, other):
-        return (isinstance(other, tstruct) and
-                len(self._fields) <= len(other._fields) and
-                all(x == y for x, y in zip(self._field_types.values(), other._field_types.values())))
+        return (isinstance(other, tstruct)
+                and len(self._fields) <= len(other._fields)
+                and all(x == y for x, y in zip(self._field_types.values(), other._field_types.values())))
 
     def _concat(self, other):
         new_field_types = {}
@@ -1424,7 +1422,25 @@ class _tcall(HailType):
         return "Call"
 
     def _convert_from_json(self, x):
-        return hl.Call._from_java(hl.Call._call_jobject().parse(x))
+        if x == '-':
+            return hl.Call([])
+        if x == '|-':
+            return hl.Call([], phased=True)
+        if x[0] == '|':
+            return hl.Call([int(x[1:])], phased=True)
+
+        n = len(x)
+        i = 0
+        while i < n:
+            c = x[i]
+            if c in '|/':
+                break
+            i += 1
+
+        if i == n:
+            return hl.Call([int(x)])
+
+        return hl.Call([int(x[0:i]), int(x[i+1:])], phased=(c == '|'))
 
     def _convert_to_json(self, x):
         return str(x)

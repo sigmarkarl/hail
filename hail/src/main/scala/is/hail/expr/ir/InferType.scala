@@ -69,8 +69,9 @@ object InferType {
         }
       case a: ApplyIR => a.explicitNode.typ
       case a: AbstractApplyNode[_] =>
+        val typeArgs = a.typeArgs
         val argTypes = a.args.map(_.typ)
-        a.implementation.unify(argTypes :+ a.returnType)
+        assert(a.implementation.unify(typeArgs, argTypes, a.returnType))
         a.returnType
       case ArrayRef(a, i, s) =>
         assert(i.typ == TInt32)
@@ -97,6 +98,14 @@ object InferType {
       case GroupByKey(collection) =>
         val elt = coerce[TBaseStruct](coerce[TStream](collection.typ).elementType)
         TDict(elt.types(0), TArray(elt.types(1)))
+      case StreamTake(a, _) =>
+        a.typ
+      case StreamDrop(a, _) =>
+        a.typ
+      case StreamGrouped(a, _) =>
+        TStream(a.typ)
+      case StreamGroupByKey(a, _) =>
+        TStream(a.typ)
       case StreamMap(a, name, body) =>
         TStream(body.typ)
       case StreamZip(as, _, body, _) =>
@@ -124,7 +133,7 @@ object InferType {
         TStream(join.typ)
       case NDArrayShape(nd) =>
         val ndType = nd.typ.asInstanceOf[TNDArray]
-        ndType.representation.fieldType("shape").asInstanceOf[TTuple]
+        ndType.shapeType
       case NDArrayReshape(nd, shape) =>
         TNDArray(coerce[TNDArray](nd.typ).elementType, Nat(shape.typ.asInstanceOf[TTuple].size))
       case NDArrayConcat(nds, _) =>
@@ -220,10 +229,22 @@ object InferType {
       case MatrixToValueApply(child, function) => function.typ(child.typ)
       case BlockMatrixToValueApply(child, function) => function.typ(child.typ)
       case CollectDistributedArray(_, _, _, _, body) => TArray(body.typ)
-      case ReadPartition(_, _, rowType) => TStream(rowType)
+      case ReadPartition(_, rowType, _) => TStream(rowType)
       case ReadValue(_, _, typ) => typ
       case WriteValue(value, pathPrefix, spec) => TString
       case LiftMeOut(child) => child.typ
+      case ShuffleStart(_, _, _, _) =>
+        TBinary
+      case ShuffleWrite(id, partitionId, rows) =>
+        TBinary
+      case ShuffleWritingFinished(id, successfulPartitionIds) =>
+        TVoid
+      case ShuffleGetPartitionBounds(_, _, _, rowType, _) =>
+        TArray(rowType)
+      case ShuffleRead(id, keyRange, rowType, rowEType) =>
+        TStream(rowType)
+      case ShuffleDelete(id) =>
+        TVoid
     }
   }
 }

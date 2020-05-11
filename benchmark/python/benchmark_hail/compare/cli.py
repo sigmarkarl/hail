@@ -4,7 +4,7 @@ from .compare import compare
 
 
 def main(args_):
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument('run1',
                         type=str,
@@ -18,7 +18,7 @@ def main(args_):
                         help='Minimum runtime in either run for inclusion.')
     parser.add_argument('--metric',
                         type=str,
-                        default='best',
+                        default='median',
                         choices=['best', 'median'],
                         help='Comparison metric.')
 

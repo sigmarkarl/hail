@@ -12,12 +12,12 @@ import is.hail.utils._
 case object EFloat64Optional extends EFloat64(false)
 case object EFloat64Required extends EFloat64(true)
 
-class EFloat64(override val required: Boolean) extends EType {
-  def _buildEncoder(pt: PType, mb: EmitMethodBuilder[_], v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
+class EFloat64(override val required: Boolean) extends EFundamentalType {
+  override def _buildFundamentalEncoder(pt: PType, mb: EmitMethodBuilder[_], v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
     out.writeDouble(coerce[Double](v))
   }
 
-  def _buildDecoder(
+  def _buildFundamentalDecoder(
     pt: PType,
     mb: EmitMethodBuilder[_],
     region: Value[Region],
@@ -32,6 +32,8 @@ class EFloat64(override val required: Boolean) extends EType {
 
   def _asIdent = "float64"
   def _toPretty = "EFloat64"
+
+  def setRequired(newRequired: Boolean): EFloat64 = EFloat64(newRequired)
 }
 
 object EFloat64 {

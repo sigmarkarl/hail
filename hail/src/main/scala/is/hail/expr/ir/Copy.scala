@@ -135,6 +135,18 @@ object Copy {
       case GroupByKey(_) =>
         assert(newChildren.length == 1)
         GroupByKey(newChildren(0).asInstanceOf[IR])
+      case StreamTake(_, _) =>
+        assert(newChildren.length == 2)
+        StreamTake(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR])
+      case StreamDrop(_, _) =>
+        assert(newChildren.length == 2)
+        StreamDrop(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR])
+      case StreamGrouped(_, _) =>
+        assert(newChildren.length == 2)
+        StreamGrouped(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR])
+      case StreamGroupByKey(_, key) =>
+        assert(newChildren.length == 1)
+        StreamGroupByKey(newChildren(0).asInstanceOf[IR], key)
       case StreamMap(_, name, _) =>
         assert(newChildren.length == 2)
         StreamMap(newChildren(0).asInstanceOf[IR], name, newChildren(1).asInstanceOf[IR])
@@ -244,17 +256,17 @@ object Copy {
       case Die(_, typ) =>
         assert(newChildren.length == 1)
         Die(newChildren(0).asInstanceOf[IR], typ)
-      case x@ApplyIR(fn, args) =>
-        val r = ApplyIR(fn, newChildren.map(_.asInstanceOf[IR]))
+      case x@ApplyIR(fn, typeArgs, args) =>
+        val r = ApplyIR(fn, typeArgs, newChildren.map(_.asInstanceOf[IR]))
         r.conversion = x.conversion
         r.inline = x.inline
         r
-      case Apply(fn, args, t) =>
-        Apply(fn, newChildren.map(_.asInstanceOf[IR]), t)
+      case Apply(fn, typeArgs, args, t) =>
+        Apply(fn, typeArgs, newChildren.map(_.asInstanceOf[IR]), t)
       case ApplySeeded(fn, args, seed, t) =>
         ApplySeeded(fn, newChildren.map(_.asInstanceOf[IR]), seed, t)
-      case ApplySpecial(fn, args, t) =>
-        ApplySpecial(fn, newChildren.map(_.asInstanceOf[IR]), t)
+      case ApplySpecial(fn, typeArgs, args, t) =>
+        ApplySpecial(fn, typeArgs, newChildren.map(_.asInstanceOf[IR]), t)
       // from MatrixIR
       case MatrixWrite(_, writer) =>
         assert(newChildren.length == 1)
@@ -308,9 +320,9 @@ object Copy {
       case CollectDistributedArray(_, _, cname, gname, _) =>
         assert(newChildren.length == 3)
         CollectDistributedArray(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], cname, gname, newChildren(2).asInstanceOf[IR])
-      case ReadPartition(path, spec, rowType) =>
+      case ReadPartition(context, rowType, reader) =>
         assert(newChildren.length == 1)
-        ReadPartition(newChildren(0).asInstanceOf[IR], spec, rowType)
+        ReadPartition(newChildren(0).asInstanceOf[IR], rowType, reader)
       case ReadValue(path, spec, requestedType) =>
         assert(newChildren.length == 1)
         ReadValue(newChildren(0).asInstanceOf[IR], spec, requestedType)

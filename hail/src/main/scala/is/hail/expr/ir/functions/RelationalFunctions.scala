@@ -1,23 +1,21 @@
 package is.hail.expr.ir.functions
 
-import is.hail.expr.ir.{ExecuteContext, LowerMatrixIR, MatrixValue, RelationalSpec, TableValue}
+import is.hail.expr.ir.{ExecuteContext, LowerMatrixIR, MatrixValue, RelationalSpec, TableReader, TableValue}
 import is.hail.expr.types.virtual.Type
 import is.hail.expr.types.{BlockMatrixType, MatrixType, TableType}
 import is.hail.linalg.BlockMatrix
 import is.hail.methods._
 import is.hail.rvd.RVDType
-import org.json4s.ShortTypeHints
-import org.json4s.jackson.Serialization
+import org.json4s.{Extraction, JValue, ShortTypeHints}
+import org.json4s.jackson.{JsonMethods, Serialization}
 
 
 abstract class MatrixToMatrixFunction {
   def typ(childType: MatrixType): MatrixType
 
-  def execute(ctx: ExecuteContext, mv: MatrixValue): MatrixValue
-
   def preservesPartitionCounts: Boolean
 
-  def lower(): Option[TableToTableFunction] = None
+  def lower(): TableToTableFunction
 
   def requestType(requestedType: MatrixType, childBaseType: MatrixType): MatrixType = childBaseType
 }
@@ -53,25 +51,7 @@ case class WrappedMatrixToTableFunction(
   override def preservesPartitionCounts: Boolean = function.preservesPartitionCounts
 }
 
-case class WrappedMatrixToMatrixFunction(function: MatrixToMatrixFunction,
-  inColsFieldName: String,
-  inEntriesFieldName: String,
-  colKey: IndexedSeq[String]) extends TableToTableFunction {
-  override def typ(childType: TableType): TableType = {
-    val mType = MatrixType.fromTableType(childType, inColsFieldName, inEntriesFieldName, colKey)
-    val outMatrixType = function.typ(mType)
-    outMatrixType.canonicalTableType
-  }
-
-  def execute(ctx: ExecuteContext, tv: TableValue): TableValue = function.execute(ctx, tv
-    .toMatrixValue(colKey, inColsFieldName, inEntriesFieldName))
-    .toTableValue
-
-  def preservesPartitionCounts: Boolean = function.preservesPartitionCounts
-}
-
 abstract class TableToTableFunction {
-
   def typ(childType: TableType): TableType
 
   def execute(ctx: ExecuteContext, tv: TableValue): TableValue
@@ -79,6 +59,10 @@ abstract class TableToTableFunction {
   def preservesPartitionCounts: Boolean
 
   def requestType(requestedType: TableType, childBaseType: TableType): TableType = childBaseType
+
+  def toJValue: JValue = {
+    Extraction.decompose(this)(RelationalFunctions.formats)
+  }
 }
 
 abstract class TableToValueFunction {
@@ -137,26 +121,30 @@ object RelationalFunctions {
     classOf[Nirvana],
     classOf[GetElement],
     classOf[WrappedMatrixToTableFunction],
-    classOf[WrappedMatrixToMatrixFunction],
     classOf[WrappedMatrixToValueFunction],
     classOf[PCRelate]
   ))
 
-  def extractTo[T: Manifest](config: String): T = {
-    Serialization.read[T](config)
+  def extractTo[T: Manifest](ctx: ExecuteContext, config: String): T = {
+    val jv = JsonMethods.parse(config)
+    (jv \ "name").extract[String] match {
+      case "VEP" => VEP.fromJValue(ctx.fs, jv).asInstanceOf[T]
+      case _ =>
+        jv.extract[T]
+    }
   }
 
-  def lookupMatrixToMatrix(config: String): MatrixToMatrixFunction = extractTo[MatrixToMatrixFunction](config)
+  def lookupMatrixToMatrix(ctx: ExecuteContext, config: String): MatrixToMatrixFunction = extractTo[MatrixToMatrixFunction](ctx, config)
 
-  def lookupMatrixToTable(config: String): MatrixToTableFunction = extractTo[MatrixToTableFunction](config)
+  def lookupMatrixToTable(ctx: ExecuteContext, config: String): MatrixToTableFunction = extractTo[MatrixToTableFunction](ctx, config)
 
-  def lookupTableToTable(config: String): TableToTableFunction = extractTo[TableToTableFunction](config)
+  def lookupTableToTable(ctx: ExecuteContext, config: String): TableToTableFunction = extractTo[TableToTableFunction](ctx, config)
 
-  def lookupBlockMatrixToTable(config: String): BlockMatrixToTableFunction = extractTo[BlockMatrixToTableFunction](config)
+  def lookupBlockMatrixToTable(ctx: ExecuteContext, config: String): BlockMatrixToTableFunction = extractTo[BlockMatrixToTableFunction](ctx, config)
 
-  def lookupTableToValue(config: String): TableToValueFunction = extractTo[TableToValueFunction](config)
+  def lookupTableToValue(ctx: ExecuteContext, config: String): TableToValueFunction = extractTo[TableToValueFunction](ctx, config)
 
-  def lookupMatrixToValue(config: String): MatrixToValueFunction = extractTo[MatrixToValueFunction](config)
+  def lookupMatrixToValue(ctx: ExecuteContext, config: String): MatrixToValueFunction = extractTo[MatrixToValueFunction](ctx, config)
 
-  def lookupBlockMatrixToValue(config: String): BlockMatrixToValueFunction = extractTo[BlockMatrixToValueFunction](config)
+  def lookupBlockMatrixToValue(ctx: ExecuteContext, config: String): BlockMatrixToValueFunction = extractTo[BlockMatrixToValueFunction](ctx, config)
 }

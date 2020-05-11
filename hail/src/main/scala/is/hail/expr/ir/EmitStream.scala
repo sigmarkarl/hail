@@ -1,6 +1,6 @@
  package is.hail.expr.ir
 
-import is.hail.annotations.{Region, RegionValue, StagedRegionValueBuilder}
+import is.hail.annotations.{CodeOrdering, Region, RegionValue, StagedRegionValueBuilder}
 import is.hail.asm4s._
 import is.hail.asm4s.joinpoint.Ctrl
 import is.hail.expr.ir.ArrayZipBehavior.ArrayZipBehavior
@@ -72,9 +72,11 @@ object COption {
       missing.mux(none, some(value))
   }
 
-  object None extends COption[Nothing] {
-    def apply(none: Code[Ctrl], some: Nothing => Code[Ctrl])(implicit ctx: EmitStreamContext): Code[Ctrl] =
+  def none[A](dummy: A): COption[A] = new COption[A] {
+    def apply(none: Code[Ctrl], some: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Code[Ctrl] = {
+      val _ = some(dummy)
       none
+    }
   }
 
   def present[A](value: A): COption[A] = new COption[A] {
@@ -103,27 +105,19 @@ object COption {
   // Presumably 'fuse' dynamically chooses one or the other based on the same
   // boolean passed in 'useLeft. 'fuse' is needed because we don't require
   // a temporary.
-  def choose[A](useLeft: Code[Boolean], left: COption[A], right: COption[A], fuse: (A, A) => A): COption[A] =
-    (left, right) match {
-      case (COption.None, COption.None) => COption.None
-      case (_, COption.None) =>
-        left.filter(!useLeft)
-      case (COption.None, _) =>
-        right.filter(useLeft)
-      case _ => new COption[A] {
-        var l: Option[A] = scala.None
-        var r: Option[A] = scala.None
-        def apply(none: Code[Ctrl], some: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Code[Ctrl] = {
-          val L = CodeLabel()
-          val M = CodeLabel()
-          val runLeft = left(Code(L, none), a => { l = Some(a); M.goto })
-          val runRight = right(L.goto, a => { r = Some(a); M.goto })
-          Code(
-            useLeft.mux(runLeft, runRight),
-            M, some(fuse(l.get, r.get)))
-        }
-      }
+  def choose[A](useLeft: Code[Boolean], left: COption[A], right: COption[A], fuse: (A, A) => A): COption[A] = new COption[A] {
+    var l: Option[A] = scala.None
+    var r: Option[A] = scala.None
+    def apply(none: Code[Ctrl], some: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Code[Ctrl] = {
+      val L = CodeLabel()
+      val M = CodeLabel()
+      val runLeft = left(Code(L, none), a => { l = Some(a); M.goto })
+      val runRight = right(L.goto, a => { r = Some(a); M.goto })
+      Code(
+        useLeft.mux(runLeft, runRight),
+        M, some(fuse(l.get, r.get)))
     }
+  }
 
   def fromEmitCode(et: EmitCode): COption[PCode] = new COption[PCode] {
     def apply(none: Code[Ctrl], some: PCode => Code[Ctrl])(implicit ctx: EmitStreamContext): Code[Ctrl] = {
@@ -131,115 +125,54 @@ object COption {
     }
   }
 
-  def toEmitCode(opt: COption[PCode], t: PType, mb: EmitMethodBuilder[_]): EmitCode = {
+  def toEmitCode(opt: COption[PCode], mb: EmitMethodBuilder[_]): EmitCode = {
     implicit val ctx = EmitStreamContext(mb)
-    val m = mb.newLocal[Boolean]()
-    val v = mb.newPLocal(t)
-    val L = CodeLabel()
+    val Lmissing = CodeLabel()
+    val Lpresent = CodeLabel()
+    var value: PCode = null
+    val setup = opt(Lmissing.goto, pc => { value = pc; Lpresent.goto })
+
+    assert(value != null)
     EmitCode(
-      Code(
-        opt(Code(m := true, L.goto),
-          a => Code(m := false, v := a, L.goto)),
-        L),
-      m, v.load())
+      Code._empty,
+      new CCode(setup.start, Lmissing.start, Lpresent.start),
+      value)
   }
 }
 
-object CodeStream { self =>
-  case class Source[+A](setup0: Code[Unit], close0: Code[Unit], setup: Code[Unit], close: Code[Unit], pull: Code[Ctrl])
+abstract class Stream[+A] { self =>
+  import Stream._
 
-  abstract class Stream[+A] {
-    def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A]
+  def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A]
 
-    def fold(mb: EmitMethodBuilder[_], init: => Code[Unit], f: (A) => Code[Unit], ret: => Code[Ctrl]): Code[Ctrl] = {
-      implicit val ctx = EmitStreamContext(mb)
-      val Ltop = CodeLabel()
-      val Lafter = CodeLabel()
-      val s = apply(Lafter.goto, (a) => Code(f(a), Ltop.goto: Code[Ctrl]))
-      Code(
-        init,
-        s.setup0,
-        s.setup,
-        Ltop,
-        s.pull,
-        Lafter,
-        s.close,
-        s.close0,
-        ret)
-    }
-
-    def forEach(mb: EmitMethodBuilder[_])(f: A => Code[Unit]): Code[Unit] =
-      CodeStream.forEach(mb, this, f)
-
-    def mapCPS[B](
-      f: (EmitStreamContext, A, B => Code[Ctrl]) => Code[Ctrl],
-      setup0: Option[Code[Unit]] = None,
-      setup: Option[Code[Unit]] = None,
-      close0: Option[Code[Unit]] = None,
-      close: Option[Code[Unit]] = None
-    ): Stream[B] = CodeStream.mapCPS(this)(f, setup0, setup, close0, close)
-
-    def map[B](
-      f: A => B,
-      setup0: Option[Code[Unit]] = None,
-      setup: Option[Code[Unit]] = None,
-      close0: Option[Code[Unit]] = None,
-      close: Option[Code[Unit]] = None
-    ): Stream[B] = CodeStream.map(this)(f, setup0, setup, close0, close)
-
-    def flatMap[B](f: A => Stream[B]): Stream[B] =
-      CodeStream.flatMap(map(f))
+  def fold(mb: EmitMethodBuilder[_], init: => Code[Unit], f: (A) => Code[Unit], ret: => Code[Ctrl]): Code[Ctrl] = {
+    implicit val ctx = EmitStreamContext(mb)
+    val Ltop = CodeLabel()
+    val Lafter = CodeLabel()
+    val s = self(Lafter.goto, (a) => Code(f(a), Ltop.goto: Code[Ctrl]))
+    Code(
+      init,
+      s.setup0,
+      s.setup,
+      Ltop,
+      s.pull,
+      Lafter,
+      s.close,
+      s.close0,
+      ret)
   }
 
-  def range(mb: EmitMethodBuilder[_], start: Code[Int], step: Code[Int], len: Code[Int]): Stream[Code[Int]] = {
-    val lstep = mb.newLocal[Int]("sr_lstep")
-    val cur = mb.newLocal[Int]("sr_cur")
-    val t = mb.newLocal[Int]("sr_t")
-    val rem = mb.newLocal[Int]("sr_rem")
+  def forEachCPS(mb: EmitMethodBuilder[_], f: (A, Code[Ctrl]) => Code[Ctrl]): Code[Unit] =
+    mapCPS[Unit]((_, a, k) => f(a, k(()))).run(mb)
 
-    unfold[Code[Int]](
-      init0 = Code._empty,
-      init = Code(lstep := step, cur := start, rem := len),
-      f = {
-        case (_ctx, k) =>
-          implicit val ctx = _ctx
-          k(COption(rem <= 0,
-            Code(
-              t := cur,
-              rem := rem - 1,
-              cur := cur + lstep,
-              t)))
-      })
-  }
+  def forEach(mb: EmitMethodBuilder[_], f: A => Code[Unit]): Code[Unit] =
+    mapCPS[Unit]((_, a, k) => Code(f(a), k(()))).run(mb)
 
-  def unfold[A](
-    init0: Code[Unit],
-    init: Code[Unit],
-    f: (EmitStreamContext, COption[A] => Code[Ctrl]) => Code[Ctrl]
-  ): Stream[A] = new Stream[A] {
-    def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
-      Source[A](
-        setup0 = init0,
-        close0 = Code._empty,
-        setup = init,
-        close = Code._empty,
-        pull = f(ctx, _.apply(
-          none = eos,
-          some = a => push(a))))
-    }
-  }
-
-  def forEachCPS[A](mb: EmitMethodBuilder[_], stream: Stream[A], f: (A, Code[Ctrl]) => Code[Ctrl]): Code[Unit] =
-    run(mb, stream.mapCPS[Unit]((_, a, k) => f(a, k(()))))
-
-  def forEach[A](mb: EmitMethodBuilder[_], stream: Stream[A], f: A => Code[Unit]): Code[Unit] =
-    run(mb, stream.mapCPS((_, a, k) => Code(f(a), k(()))))
-
-  def run(mb: EmitMethodBuilder[_], stream: Stream[Unit]): Code[Unit] = {
+  def run(mb: EmitMethodBuilder[_]): Code[Unit] = {
     implicit val ctx = EmitStreamContext(mb)
     val Leos = CodeLabel()
     val Lpull = CodeLabel()
-    val source = stream(eos = Leos.goto, push = _ => Lpull.goto)
+    val source = self(eos = Leos.goto, push = _ => Lpull.goto)
     Code(
       source.setup0,
       source.setup,
@@ -247,10 +180,10 @@ object CodeStream { self =>
       Lpull, source.pull,
       Leos, source.close, source.close0
       // fall off
-    )
+      )
   }
 
-  def mapCPS[A, B](stream: Stream[A])(
+  def mapCPS[B](
     f: (EmitStreamContext, A, B => Code[Ctrl]) => Code[Ctrl],
     setup0: Option[Code[Unit]] = None,
     setup:  Option[Code[Unit]] = None,
@@ -258,7 +191,7 @@ object CodeStream { self =>
     close:  Option[Code[Unit]] = None
   ): Stream[B] = new Stream[B] {
     def apply(eos: Code[Ctrl], push: B => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[B] = {
-      val source = stream(
+      val source = self(
         eos = eos,
         push = f(ctx, _, b => push(b)))
       Source[B](
@@ -270,59 +203,207 @@ object CodeStream { self =>
     }
   }
 
-  def map[A, B](stream: Stream[A])(
+  def map[B](
     f: A => B,
     setup0: Option[Code[Unit]] = None,
     setup:  Option[Code[Unit]] = None,
     close0: Option[Code[Unit]] = None,
     close:  Option[Code[Unit]] = None
-  ): Stream[B] = mapCPS(stream)((_, a, k) => k(f(a)), setup0, setup, close0, close)
+  ): Stream[B] = mapCPS((_, a, k) => k(f(a)), setup0, setup, close0, close)
 
-  def flatMap[A](outer: Stream[Stream[A]]): Stream[A] = new Stream[A] {
+  def addSetup(setup: Code[Unit]) = map(x => x, setup = Some(setup))
+
+  def grouped(size: Code[Int]): Stream[Stream[A]] = new Stream[Stream[A]] {
+    def apply(outerEos: Code[Ctrl], outerPush: Stream[A] => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[Stream[A]] = {
+      val xCounter = ctx.mb.newLocal[Int]("st_grp_ctr")
+      val xInOuter = ctx.mb.newLocal[Boolean]("st_grp_io")
+      val xSize = ctx.mb.newLocal[Int]("st_grp_sz")
+      val LchildPull = CodeLabel()
+      val LouterPush = CodeLabel()
+      val LinnerPush = CodeLabel()
+      val LouterEos = CodeLabel()
+
+      var childSource: Source[A] = null
+      val inner = new Stream[A] {
+        def apply(innerEos: Code[Ctrl], innerPush: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
+          val LinnerEos = CodeLabel()
+
+          childSource = self(
+            xInOuter.mux(LouterEos.goto, LinnerEos.goto),
+            { a =>
+              Code(LinnerPush, innerPush(a))
+
+              Code(
+                // xCounter takes values in [1, xSize + 1]
+                xCounter := xCounter + 1,
+                // !xInOuter iff this element was requested by an inner stream.
+                // Else we are stepping to the beginning of the next group.
+                xInOuter.mux(
+                  (xCounter > xSize).mux(
+                    // first of a group
+                    Code(xCounter := 1, LouterPush.goto),
+                    LchildPull.goto),
+                  LinnerPush.goto))
+            })
+
+          Code(LinnerEos, innerEos)
+          Code(LchildPull, childSource.pull)
+
+          Source[A](
+            setup0 = Code._empty,
+            close0 = Code._empty,
+            setup = Code._empty,
+            close = Code._empty,
+            pull = xInOuter.mux(
+              // xInOuter iff this is the first pull from inner stream,
+              // in which case the element has already been produced
+              Code(
+                xInOuter := false,
+                xCounter.cne(1).orEmpty(Code._fatal[Unit](const("expected counter = 1"))),
+                LinnerPush.goto),
+              (xCounter < xSize).mux(
+                LchildPull.goto,
+                LinnerEos.goto)))
+        }
+      }
+
+      Code(LouterPush, outerPush(inner))
+      Code(LouterEos, outerEos)
+
+      Source[Stream[A]](
+        setup0 = childSource.setup0,
+        close0 = childSource.close0,
+        setup = Code(
+          childSource.setup,
+          xSize := size,
+          xCounter := xSize),
+        close = childSource.close,
+        pull = Code(xInOuter := true, LchildPull.goto))
+    }
+  }
+
+  def flatMap[B](f: A => Stream[B]): Stream[B] =
+    map(f).flatten
+}
+
+object Stream {
+  case class Source[+A](setup0: Code[Unit], close0: Code[Unit], setup: Code[Unit], close: Code[Unit], pull: Code[Ctrl])
+
+  def empty[A](dummy: A): Stream[A] = new Stream[A] {
     def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
-      val closing = ctx.mb.newLocal[Boolean]("sfm_closing")
-      val LouterPull = CodeLabel()
-      var innerSource: Source[A] = null
-      val LinnerPull = CodeLabel()
-      val LinnerEos = CodeLabel()
-      val LcloseOuter = CodeLabel()
-      val inInnerStream = ctx.mb.newLocal[Boolean]("sfm_in_innner")
-      val outerSource = outer(
-        eos = eos,
-        push = inner => {
-          innerSource = inner(
-            eos = LinnerEos.goto,
-            push = push)
-          Code(FastIndexedSeq[Code[Unit]](
-            innerSource.setup, inInnerStream := true, LinnerPull, innerSource.pull,
+      val _ = push(dummy)
+      Source[A](
+        setup0 = Code._empty,
+        close0 = Code._empty,
+        setup = Code._empty,
+        close = Code._empty,
+        pull = eos)
+    }
+  }
+
+  def iota(mb: EmitMethodBuilder[_], start: Code[Int], step: Code[Int]): Stream[Code[Int]] = {
+    val lstep = mb.newLocal[Int]("sr_lstep")
+    val cur = mb.newLocal[Int]("sr_cur")
+
+    unfold[Code[Int]](
+      f = {
+        case (_ctx, k) =>
+          implicit val ctx = _ctx
+          Code(cur := cur + lstep, k(COption.present(cur)))
+      },
+      setup = Some(Code(lstep := step, cur := start - lstep)))
+  }
+
+  def iotaL(mb: EmitMethodBuilder[_], start: Code[Long], step: Code[Int]): Stream[Code[Long]] = {
+    val lstep = mb.newLocal[Int]("sr_lstep")
+    val cur = mb.newLocal[Long]("sr_cur")
+
+    unfold[Code[Long]](
+      f = {
+        case (_ctx, k) =>
+          implicit val ctx = _ctx
+          Code(cur := cur + lstep.toL, k(COption.present(cur)))
+      },
+      setup = Some(Code(lstep := step, cur := start - lstep.toL)))
+  }
+
+  def range(mb: EmitMethodBuilder[_], start: Code[Int], step: Code[Int], len: Code[Int]): Stream[Code[Int]] =
+    zip(iota(mb, start, step),
+        iota(mb, len, -1))
+      .map[COption[Code[Int]]] { case (cur, rem) =>
+        COption(rem <= 0, cur)
+      }
+      .take
+
+  def unfold[A](
+    f: (EmitStreamContext, COption[A] => Code[Ctrl]) => Code[Ctrl],
+    setup0: Option[Code[Unit]] = None,
+    setup:  Option[Code[Unit]] = None,
+    close0: Option[Code[Unit]] = None,
+    close:  Option[Code[Unit]] = None
+  ): Stream[A] = new Stream[A] {
+    assert(f != null)
+    def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
+      Source[A](
+        setup0 = setup0.getOrElse(Code._empty),
+        close0 = close0.getOrElse(Code._empty),
+        setup = setup.getOrElse(Code._empty),
+        close = close.getOrElse(Code._empty),
+        pull = f(ctx, _.apply(
+          none = eos,
+          some = a => push(a))))
+    }
+  }
+
+  implicit class StreamStream[A](val outer: Stream[Stream[A]]) extends AnyVal {
+    def flatten: Stream[A] = new Stream[A] {
+      def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
+        val closing = ctx.mb.newLocal[Boolean]("sfm_closing")
+        val LouterPull = CodeLabel()
+        var innerSource: Source[A] = null
+        val LinnerPull = CodeLabel()
+        val LinnerEos = CodeLabel()
+        val LcloseOuter = CodeLabel()
+        val inInnerStream = ctx.mb.newLocal[Boolean]("sfm_in_innner")
+        val outerSource = outer(
+          eos = eos,
+          push = inner => {
+            innerSource = inner(
+              eos = LinnerEos.goto,
+              push = push)
+            Code(FastIndexedSeq[Code[Unit]](
+              innerSource.setup, inInnerStream := true, LinnerPull, innerSource.pull,
               // for layout
               LinnerEos, innerSource.close, inInnerStream := false, closing.mux(LcloseOuter.goto, LouterPull.goto)))
-        })
-      Source[A](
-        setup0 = Code(outerSource.setup0, innerSource.setup0),
-        close0 = Code(innerSource.close0, outerSource.close0),
-        setup = Code(closing := false, inInnerStream := false, outerSource.setup),
-        close = Code(inInnerStream.mux(Code(closing := true, LinnerEos.goto), Code._empty), LcloseOuter, outerSource.close),
-        pull = inInnerStream.mux(LinnerPull.goto, Code(LouterPull, outerSource.pull)))
+          })
+        Source[A](
+          setup0 = Code(outerSource.setup0, innerSource.setup0),
+          close0 = Code(innerSource.close0, outerSource.close0),
+          setup = Code(closing := false, inInnerStream := false, outerSource.setup),
+          close = Code(inInnerStream.mux(Code(closing := true, LinnerEos.goto), Code._empty), LcloseOuter, outerSource.close),
+          pull = inInnerStream.mux(LinnerPull.goto, Code(LouterPull, outerSource.pull)))
+      }
     }
   }
 
-  def filter[A](stream: Stream[COption[A]]): Stream[A] = new Stream[A] {
-    def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
-      val Lpull = CodeLabel()
-      val source = stream(
-        eos = eos,
-        push = _.apply(none = Lpull.goto, some = push))
-      source.copy(pull = Code(Lpull, source.pull))
+  implicit class StreamCOpt[A](val stream: Stream[COption[A]]) extends AnyVal {
+    def flatten: Stream[A] = new Stream[A] {
+      def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
+        val Lpull = CodeLabel()
+        val source = stream(
+          eos = eos,
+          push = _.apply(none = Lpull.goto, some = push))
+        source.copy(pull = Code(Lpull, source.pull))
+      }
     }
-  }
 
-  def take[A](stream: Stream[COption[A]]): Stream[A] = new Stream[A] {
-    def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
-      val Leos = CodeLabel()
-      stream(
-        eos = Code(Leos, eos),
-        push = _.apply(none = Leos.goto, some = push)).asInstanceOf[Source[A]]
+    def take: Stream[A] = new Stream[A] {
+      def apply(eos: Code[Ctrl], push: A => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[A] = {
+        val Leos = CodeLabel()
+        stream(
+          eos = Code(Leos, eos),
+          push = _.apply(none = Leos.goto, some = push)).asInstanceOf[Source[A]]
+      }
     }
   }
 
@@ -431,19 +512,17 @@ object CodeStream { self =>
 
 object EmitStream {
 
-  import CodeStream._
+  import Stream._
 
   def write(mb: EmitMethodBuilder[_], sstream: SizedStream, ab: StagedArrayBuilder): Code[Unit] = {
-    val SizedStream(stream, optLen) = sstream
+    val SizedStream(ssSetup, stream, optLen) = sstream
     Code(
+      ssSetup,
       ab.clear,
-      optLen match {
-        case Some((setupLen, len)) => Code(setupLen, ab.ensureCapacity(len))
-        case None => ab.ensureCapacity(16)
-      },
-      stream.forEach(mb) { et =>
+      ab.ensureCapacity(optLen.getOrElse(16)),
+      stream.forEach(mb, { et =>
         Code(et.setup, et.m.mux(ab.addMissing(), ab.add(et.v)))
-      })
+      }))
   }
 
   def toArray(mb: EmitMethodBuilder[_], aTyp: PArray, optStream: COption[SizedStream]): EmitCode = {
@@ -467,21 +546,21 @@ object EmitStream {
               srvb.advance()),
             srvb.offset))
 
-        case Some((setupLen, len)) =>
+        case Some(len) =>
           PCode(aTyp, Code(
-            setupLen,
+            ss.setup,
             srvb.start(len),
-            ss.stream.forEach(mb) { et =>
+            ss.stream.forEach(mb, { et =>
               Code(
                 et.setup,
                 et.m.mux(srvb.setMissing(), srvb.addIRIntermediate(aTyp.elementType)(et.v)),
                 srvb.advance())
-            },
+            }),
             srvb.offset))
       }
     }
 
-    COption.toEmitCode(result, aTyp, mb)
+    COption.toEmitCode(result, mb)
   }
 
   def sequence(mb: EmitMethodBuilder[_], elemPType: PType, elements: IndexedSeq[EmitCode]): Stream[EmitCode] = new Stream[EmitCode] {
@@ -507,7 +586,14 @@ object EmitStream {
   }
 
   // length is required to be a variable reference
-  case class SizedStream(stream: Stream[EmitCode], length: Option[(Code[Unit], Settable[Int])])
+  case class SizedStream(setup: Code[Unit], stream: Stream[EmitCode], length: Option[Code[Int]]) {
+    def getStream: Stream[EmitCode] = stream.addSetup(setup)
+  }
+
+  object SizedStream {
+    def unsized(stream: Stream[EmitCode]): SizedStream =
+      SizedStream(Code._empty, stream, None)
+  }
 
   def mux(mb: EmitMethodBuilder[_], eltType: PType, cond: Code[Boolean], left: Stream[EmitCode], right: Stream[EmitCode]): Stream[EmitCode] = new Stream[EmitCode] {
     def apply(eos: Code[Ctrl], push: EmitCode => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[EmitCode] = {
@@ -528,6 +614,84 @@ object EmitStream {
     }
   }
 
+  def groupBy(mb: EmitMethodBuilder[_], region: Value[Region], stream: Stream[PCode], eltType: PStruct, key: Array[String]): Stream[Stream[PCode]] = new Stream[Stream[PCode]] {
+    def apply(outerEos: Code[Ctrl], outerPush: Stream[PCode] => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[Stream[PCode]] = {
+      val keyType = eltType.selectFields(key)
+      val keyViewType = PSubsetStruct(eltType, key)
+      val ordering = keyType.codeOrdering(mb, keyViewType).asInstanceOf[CodeOrdering { type T = Long }]
+
+      val xCurKey = ctx.mb.newPLocal("st_grpby_curkey", keyType)
+      val xCurElt = ctx.mb.newPLocal("st_grpby_curelt", eltType)
+      val xInOuter = ctx.mb.newLocal[Boolean]("st_grpby_io")
+      val xEOS = ctx.mb.newLocal[Boolean]("st_grpby_eos")
+      val xNextGrpReady = ctx.mb.newLocal[Boolean]("st_grpby_ngr")
+
+      val LchildPull = CodeLabel()
+      val LouterPush = CodeLabel()
+      val LinnerPush = CodeLabel()
+      val LouterEos = CodeLabel()
+      val LinnerEos = CodeLabel()
+
+      var childSource: Source[PCode] = null
+      val inner = new Stream[PCode] {
+        def apply(innerEos: Code[Ctrl], innerPush: PCode => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[PCode] = {
+          childSource = stream(
+            xInOuter.mux(LouterEos.goto, Code(xEOS := true, LinnerEos.goto)),
+            { a: PCode =>
+              Code(
+                xCurElt := a,
+                // !xInOuter iff this element was requested by an inner stream.
+                // Else we are stepping to the beginning of the next group.
+                (xCurKey.tcode[Long].cne(0L) && ordering.equivNonnull(xCurKey.tcode[Long], xCurElt.tcode[Long])).mux(
+                  xInOuter.mux(
+                    LchildPull.goto,
+                    LinnerPush.goto),
+                  Code(
+                    xCurKey := keyType.copyFromPValue(mb, region, new PSubsetStructCode(keyViewType, xCurElt.tcode[Long])),
+                    xInOuter.mux(
+                      LouterPush.goto,
+                      Code(xNextGrpReady := true, LinnerEos.goto)))))
+            })
+
+          Code(LinnerPush, innerPush(xCurElt))
+          Code(LinnerEos, innerEos)
+          Code(LchildPull, childSource.pull)
+
+          Source[PCode](
+            setup0 = Code._empty,
+            close0 = Code._empty,
+            setup = Code._empty,
+            close = Code._empty,
+            pull = xInOuter.mux(
+              // xInOuter iff this is the first pull from inner stream,
+              // in which case the element has already been produced
+              Code(xInOuter := false, LinnerPush.goto),
+              LchildPull.goto))
+        }
+      }
+
+      Code(LouterPush, outerPush(inner))
+      Code(LouterEos, outerEos)
+
+      Source[Stream[PCode]](
+        setup0 = childSource.setup0,
+        close0 = childSource.close0,
+        setup = Code(
+          childSource.setup,
+          xCurKey := keyType.defaultValue,
+          xEOS := false,
+          xNextGrpReady := false),
+        close = childSource.close,
+        pull = Code(
+          xInOuter := true,
+          xEOS.mux(
+            LouterEos.goto,
+            xNextGrpReady.mux(
+              Code(xNextGrpReady := false, LouterPush.goto),
+              LchildPull.goto))))
+    }
+  }
+
   def extendNA(mb: EmitMethodBuilder[_], eltType: PType, stream: Stream[EmitCode]): Stream[COption[EmitCode]] = new Stream[COption[EmitCode]] {
     def apply(eos: Code[Ctrl], push: COption[EmitCode] => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[COption[EmitCode]] = {
       val atEnd = mb.newLocal[Boolean]()
@@ -543,30 +707,50 @@ object EmitStream {
     }
   }
 
-  private[ir] def apply[C](
+  private[ir] def emit[C](
     emitter: Emit[C],
-    mb: EmitMethodBuilder[C],
     streamIR0: IR,
+    mb: EmitMethodBuilder[C],
     env0: Emit.E,
-    er: EmitRegion,
+    container: Option[AggContainer]
+  ): COption[SizedStream] =
+    emit(emitter, streamIR0, mb, mb.getCodeParam[Region](1), env0, container)
+
+  private[ir] def emit[C](
+    emitter: Emit[C],
+    streamIR0: IR,
+    mb: EmitMethodBuilder[C],
+    region: Value[Region],
+    env0: Emit.E,
     container: Option[AggContainer]
   ): COption[SizedStream] = {
-    assert(mb eq er.mb)
 
     def emitStream(streamIR: IR, env: Emit.E): COption[SizedStream] = {
 
-      def emitIR(ir: IR, mb:  EmitMethodBuilder[C] = mb, env: Emit.E = env, container: Option[AggContainer] = container): EmitCode =
-        emitter.emit(ir, mb, env, er, container)
+      def emitIR(ir: IR, env: Emit.E = env, region: Value[Region] = region, container: Option[AggContainer] = container): EmitCode =
+        emitter.emitWithRegion(ir, mb, region, env, container)
 
-      def emitVoidIR(ir: IR, mb:  EmitMethodBuilder[C] = mb, env: Emit.E = env, container: Option[AggContainer] = container): Code[Unit] = {
+      def emitVoidIR(ir: IR, env: Emit.E = env, container: Option[AggContainer] = container): Code[Unit] = {
         EmitCodeBuilder.scopedVoid(mb) { cb =>
-          emitter.emitVoid(cb, ir, mb, env, er, container, None)
+          emitter.emitVoid(cb, ir, mb, region, env, container, None)
         }
       }
 
       streamIR match {
-        case NA(_) =>
-          COption.None
+        case x@NA(_) =>
+          COption.none(SizedStream(
+            Code._empty,
+            coerce[PCanonicalStream](x.pType).defaultValue.stream,
+            Some(0)))
+
+        case x@Ref(name, _) =>
+          val typ = coerce[PStream](x.pType)
+          val ev = env.lookup(name)
+          if (ev.pt != typ)
+            throw new RuntimeException(s"PValue type did not match inferred ptype:\n name: $name\n  pv: ${ ev.pt }\n  ir: $typ")
+          COption.fromEmitCode(ev.get).map { pc =>
+            SizedStream.unsized(pc.asStream.stream)
+          }
 
         case x@StreamRange(startIR, stopIR, stepIR) =>
           val eltType = coerce[PStream](x.pType).elementType
@@ -599,9 +783,10 @@ object EmitStream {
                     (llen > const(Int.MaxValue.toLong)).mux[Unit](
                       Code._fatal[Unit]("Array range cannot have more than MAXINT elements."),
                       some(SizedStream(
-                        range(mb, start, step, llen.toI)
+                        len := llen.toI,
+                        range(mb, start, step, len)
                           .map(i => EmitCode(Code._empty, const(false), PCode(eltType, i))),
-                        Some((len := llen.toI, len))))))))
+                        Some(len)))))))
             }
           }
 
@@ -631,64 +816,30 @@ object EmitStream {
                     eos))
             }
 
-            val sslen = mb.newLocal[Int]("ts_sslen")
             Code(
               asetup,
               len := a.loadLength(),
-              k(SizedStream(
-                newStream,
-                Some((sslen := len, sslen)))))
+              k(SizedStream(Code._empty, newStream, Some(len))))
           }
 
         case x@MakeStream(elements, t) =>
           val eltType = coerce[PStream](x.pType).elementType
           val stream = sequence(mb, eltType, elements.toFastIndexedSeq.map { ir =>
               val et = emitIR(ir)
-              EmitCode(et.setup, et.m, PCode(eltType, eltType.copyFromTypeAndStackValue(er.mb, er.region, ir.pType, et.value)))
+              EmitCode(et.setup, et.m, PCode(eltType, eltType.copyFromTypeAndStackValue(mb, region, ir.pType, et.value)))
           })
 
-          val len = mb.newLocal[Int]()
+          COption.present(SizedStream(Code._empty, stream, Some(elements.length)))
 
-          COption.present(SizedStream(stream, Some((len := elements.length, len))))
+        case x@ReadPartition(context, rowType, reader) =>
+          reader.emitStream(context, rowType, emitter, mb, region, env, container)
 
-        case x@ReadPartition(pathIR, spec, requestedType) =>
-          val eltType = coerce[PStream](x.pType).elementType
-          val strType = coerce[PString](pathIR.pType)
-
-          val (_, dec) = spec.buildEmitDecoderF[Long](requestedType, mb.ecb)
-
-          COption.fromEmitCode(emitIR(pathIR)).map { path =>
-            val pathString = path.asString.loadString()
-            val xRowBuf = mb.newLocal[InputBuffer]()
-            val stream = unfold[Code[Long]](
-              Code._empty,
-              Code._empty,
-              (_, k) =>
-                k(COption(
-                  !xRowBuf.load().readByte().toZ,
-                  dec(er.region, xRowBuf))))
-            .map(
-              EmitCode.present(eltType, _),
-              setup0 = None,
-              setup = Some(xRowBuf := spec
-                .buildCodeInputBuffer(mb.open(pathString, true))))
-
-            SizedStream(stream, None)
-          }
-
-        case In(n, PStream(eltType, _)) =>
+        case In(n, PCanonicalStream(eltType, _)) =>
           val xIter = mb.newLocal[Iterator[RegionValue]]()
 
-          new COption[Code[Iterator[RegionValue]]] {
-            def apply(none: Code[Ctrl], some: (Code[Iterator[RegionValue]]) => Code[Ctrl])(implicit ctx: EmitStreamContext): Code[Ctrl] = {
-              mb.getArg[Boolean](2 + 2 * n + 1).mux(
-                none,
-                some(mb.getArg[Iterator[RegionValue]](2 + 2 * n)))
-            }
-          }.map { iter =>
+          // this, Region, ...
+          mb.getStreamEmitParam(2 + n).map { iter =>
             val stream = unfold[Code[RegionValue]](
-              Code._empty,
-              Code._empty,
               (_, k) => k(COption(
                 !xIter.load().hasNext,
                 xIter.load().next()))
@@ -698,27 +849,106 @@ object EmitStream {
               setup = Some(xIter := iter)
             )
 
-            SizedStream(stream, None)
+            SizedStream.unsized(stream)
+          }
+
+        case StreamTake(a, num) =>
+          val optStream = emitStream(a, env)
+          val optN = COption.fromEmitCode(emitIR(num))
+          val xN = mb.newLocal[Int]("st_n")
+          optStream.flatMap { case SizedStream(setup, stream, len) =>
+            optN.map { n =>
+              val newStream = zip(stream, range(mb, 0, 1, xN))
+                .map({ case (elt, count) => elt })
+              SizedStream(
+                Code(setup, xN := n.tcode[Int], (xN < 0).orEmpty(Code._fatal[Unit](const("StreamTake: negative length")))),
+                newStream,
+                len.map(_.min(xN)))
+            }
+          }
+
+        case StreamDrop(a, num) =>
+          val optStream = emitStream(a, env)
+          val optN = COption.fromEmitCode(emitIR(num))
+          val xN = mb.newLocal[Int]("st_n")
+          optStream.flatMap { case SizedStream(setup, stream, len) =>
+            optN.map { n =>
+              val newStream =
+               zip(stream, iota(mb, 0, 1))
+                .map({ case (elt, count) => COption(count < xN, elt) })
+                .flatten
+              SizedStream(
+                Code(setup, xN := n.tcode[Int], (xN < 0).orEmpty(Code._fatal[Unit](const("StreamDrop: negative num")))),
+                newStream,
+                len.map(l => (l - xN).max(0)))
+            }
+          }
+
+        case x@StreamGrouped(a, size) =>
+          val innerType = coerce[PCanonicalStream](coerce[PStream](x.pType).elementType)
+          val optStream = emitStream(a, env)
+          val optSize = COption.fromEmitCode(emitIR(size))
+          val xS = mb.newLocal[Int]("st_n")
+          optStream.flatMap { case SizedStream(setup, stream, len) =>
+            optSize.map { s =>
+              val newStream = stream.grouped(xS).map(inner => EmitCode(Code._empty, false, PCanonicalStreamCode(innerType, inner)))
+              SizedStream(
+                Code(setup, xS := s.tcode[Int], (xS <= 0).orEmpty(Code._fatal[Unit](const("StreamGrouped: nonpositive size")))),
+                newStream,
+                len.map(l => ((l.toL + xS.toL - 1L) / xS.toL).toI)) // rounding up integer division
+            }
+          }
+
+        case x@StreamGroupByKey(a, key) =>
+          val innerType = coerce[PCanonicalStream](coerce[PStream](x.pType).elementType)
+          val eltType = coerce[PStruct](innerType.elementType)
+          val optStream = emitStream(a, env)
+          optStream.map { ss =>
+            val nonMissingStream = ss.getStream.mapCPS[PCode] { (_, ec, k) =>
+              Code(ec.setup, ec.m.orEmpty(Code._fatal[Unit](const("expected non-missing"))), k(ec.pv))
+            }
+            val newStream = groupBy(mb, region, nonMissingStream, eltType, key.toArray)
+              .map(inner => EmitCode.present(PCanonicalStreamCode(innerType, inner.map(EmitCode.present))))
+
+            SizedStream.unsized(newStream)
           }
 
         case StreamMap(childIR, name, bodyIR) =>
-          val childEltType = coerce[PStream](childIR.pType).elementType
+          val eltType = coerce[PStream](childIR.pType).elementType
 
           val optStream = emitStream(childIR, env)
-          optStream.map { case SizedStream(stream, len) =>
-            val newStream = stream.map { eltt =>
-              val xElt = mb.newEmitField(name, childEltType)
-              val bodyenv = env.bind(name -> xElt)
-              val bodyt = emitIR(bodyIR, env = bodyenv)
+          optStream.map { case SizedStream(setup, stream, len) =>
+            val newStream = stream.map { eltt => (eltType, bodyIR.pType) match {
+              case (eltType: PCanonicalStream, bodyType: PCanonicalStream) =>
+                val bodyenv = env.bind(name -> new EmitUnrealizableValue(eltType, eltt))
 
-              EmitCode(
-                Code(xElt := eltt,
-                     bodyt.setup),
-                bodyt.m,
-                bodyt.pv)
-            }
+                COption.toEmitCode(
+                  emitStream(bodyIR, env = bodyenv)
+                    .map(ss => PCanonicalStreamCode(bodyType, ss.getStream)),
+                  mb)
+              case (eltType: PCanonicalStream, _) =>
+                val bodyenv = env.bind(name -> new EmitUnrealizableValue(eltType, eltt))
 
-            SizedStream(newStream, len)
+                emitIR(bodyIR, env = bodyenv)
+              case (_, bodyType: PCanonicalStream) =>
+                val xElt = mb.newEmitField(name, eltType)
+                val bodyenv = env.bind(name -> xElt)
+
+                EmitCode(
+                  xElt := eltt,
+                  COption.toEmitCode(
+                    emitStream(bodyIR, env = bodyenv)
+                      .map(ss => PCanonicalStreamCode(bodyType, ss.getStream)),
+                    mb))
+              case _ =>
+                val xElt = mb.newEmitField(name, eltType)
+                val bodyenv = env.bind(name -> xElt)
+                val bodyt = emitIR(bodyIR, env = bodyenv)
+
+                EmitCode(xElt := eltt, bodyt)
+            }}
+
+            SizedStream(setup, newStream, len)
           }
 
         case StreamFilter(childIR, name, condIR) =>
@@ -726,8 +956,8 @@ object EmitStream {
 
           val optStream = emitStream(childIR, env)
 
-          optStream.map { case SizedStream(stream, len) =>
-            val newStream = filter(stream
+          optStream.map { ss =>
+            val newStream = ss.getStream
               .map { elt =>
                 val xElt = mb.newEmitField(name, childEltType)
                 val condEnv = env.bind(name -> xElt)
@@ -745,12 +975,13 @@ object EmitStream {
                     )
                   }
                 }
-              })
+              }.flatten
 
-            SizedStream(newStream, None)
+            SizedStream.unsized(newStream)
           }
 
         case StreamZip(as, names, bodyIR, behavior) =>
+          // FIXME: should make StreamZip support unrealizable element types
           val eltTypes = {
             val types = as.map(ir => coerce[PStream](ir.pType).elementType)
             behavior match {
@@ -763,6 +994,7 @@ object EmitStream {
           val optStreams = COption.lift(as.map(emitStream(_, env)))
 
           optStreams.map { emitStreams =>
+            val lenSetup = Code(emitStreams.map(_.setup))
             val streams = emitStreams.map(_.stream)
             val lengths = emitStreams.map(_.length)
 
@@ -778,14 +1010,13 @@ object EmitStream {
                 val newLength = behavior match {
                   case ArrayZipBehavior.TakeMinLength =>
                     lengths.reduceLeft(_.liftedZip(_).map {
-                      case ((s1, l1), (s2, l2)) =>
-                        (Code(s1, s2, (l1 > l2).orEmpty(l1 := l2)), l1)
+                      case (l1, l2) => l1.min(l2)
                     })
                   case ArrayZipBehavior.AssumeSameLength =>
                     lengths.flatten.headOption
                 }
 
-                SizedStream(newStream, newLength)
+                SizedStream(lenSetup, newStream, newLength)
 
               case ArrayZipBehavior.AssertSameLength =>
                 // extend to infinite streams, where the COption becomes missing after EOS
@@ -824,19 +1055,25 @@ object EmitStream {
                   }
 
                 // termininate the stream when all streams are EOS
-                val newStream = take(flagged)
+                val newStream = flagged.take
 
-                val newLength =
-                    lengths.flatten.reduceLeftOption[(Code[Unit], Settable[Int])] {
-                      case ((s1, l1), (s2, l2)) =>
-                        (Code(s1,
-                          s2,
-                          l1.cne(l2).orEmpty(Code._fatal[Unit](
-                            const("zip: length mismatch: ").concat(l1.toS).concat(", ").concat(l2.toS)))),
-                          l1)
-                    }
+                val newLength = lengths.flatten match {
+                  case Seq() => None
+                  case ls =>
+                    val len = mb.newLocal[Int]("zip_asl_len")
+                    val lenTemp = mb.newLocal[Int]("zip_asl_len_temp")
+                    Some(Code(
+                      len := ls.head,
+                      ls.tail.foldLeft(Code._empty) { (acc, l) =>
+                        Code(acc,
+                          lenTemp := l,
+                          len.cne(lenTemp).orEmpty(Code._fatal[Unit](
+                            const("zip: length mismatch: ").concat(len.toS).concat(", ").concat(lenTemp.toS))))
+                      },
+                      len))
+                }
 
-                SizedStream(newStream, newLength)
+                SizedStream(lenSetup, newStream, newLength)
 
               case ArrayZipBehavior.ExtendNA =>
                 // extend to infinite streams, where the COption becomes missing after EOS
@@ -861,7 +1098,7 @@ object EmitStream {
                                    k(COption.fromEmitCode(elt)))
                             }
 
-                        COption.toEmitCode(optElt, t, mb)
+                        COption.toEmitCode(optElt, mb)
                       }
                     val bodyEnv = env.bind(names.zip(eltVars): _*)
                     val body = emitIR(bodyIR, env = bodyEnv)
@@ -873,26 +1110,13 @@ object EmitStream {
                   }
 
                 // termininate the stream when all streams are EOS
-                val newStream = take(flagged)
+                val newStream = flagged.take
 
-                val newLength = behavior match {
-                  case ArrayZipBehavior.ExtendNA =>
-                    lengths.reduceLeft(_.liftedZip(_).map {
-                      case ((s1, l1), (s2, l2)) =>
-                        (Code(s1, s2, (l1 < l2).orEmpty(l1 := l2)), l1)
-                    })
-                  case ArrayZipBehavior.AssertSameLength =>
-                    lengths.flatten.reduceLeftOption[(Code[Unit], Settable[Int])] {
-                      case ((s1, l1), (s2, l2)) =>
-                        (Code(s1,
-                              s2,
-                              l1.cne(l2).orEmpty(Code._fatal[Unit](
-                                const("zip: length mismatch: ").concat(l1.toS).concat(", ").concat(l2.toS)))),
-                          l1)
-                    }
-                }
+                val newLength = lengths.reduceLeft(_.liftedZip(_).map {
+                  case (l1, l2) => l1.max(l2)
+                })
 
-                SizedStream(newStream, newLength)
+                SizedStream(lenSetup, newStream, newLength)
             }
           }
 
@@ -902,17 +1126,22 @@ object EmitStream {
           val optOuter = emitStream(outerIR, env)
 
           optOuter.map { outer =>
-            val nested = outer.stream.mapCPS[COption[Stream[EmitCode]]] { (ctx, elt, k) =>
-              val xElt = mb.newEmitField(name, outerEltType)
-              val innerEnv = env.bind(name -> xElt)
-              val optInner = emitStream(innerIR, innerEnv).map(_.stream)
+            val nested = outer.getStream.map[COption[Stream[EmitCode]]] { elt =>
+              if (outerEltType.isRealizable) {
+                val xElt = mb.newEmitField(name, outerEltType)
+                val innerEnv = env.bind(name -> xElt)
+                val optInner = emitStream(innerIR, innerEnv).map(_.getStream)
 
-              Code(
-                xElt := elt,
-                k(optInner))
+                optInner.addSetup(xElt := elt)
+              } else {
+                val innerEnv = env.bind(name -> new EmitUnrealizableValue(outerEltType, elt))
+
+                emitStream(innerIR, innerEnv).map(_.getStream)
+              }
+
             }
 
-            SizedStream(flatMap(filter(nested)), None)
+            SizedStream.unsized(nested.flatten.flatten)
           }
 
         case If(condIR, thn, els) =>
@@ -923,42 +1152,54 @@ object EmitStream {
           val optLeftStream = emitStream(thn, env)
           val optRightStream = emitStream(els, env)
 
-          // TODO: set xCond in setup of choose, don't need CPS
-          condT.flatMapCPS[SizedStream] { (cond, _, k) =>
+          condT.flatMap[SizedStream] { cond =>
             val newOptStream = COption.choose[SizedStream](
               xCond,
               optLeftStream,
               optRightStream,
-              { case (SizedStream(leftStream, lLen), SizedStream(rightStream, rLen)) =>
+              { case (SizedStream(leftSetup, leftStream, lLen), SizedStream(rightSetup, rightStream, rLen)) =>
                   val newStream = mux(mb, eltType,
                     xCond,
                     leftStream,
                     rightStream)
-                  val newLen = lLen.liftedZip(rLen).map { case ((s1, l1), (s2, l2)) =>
-                    (Code(s1, s2, xCond.orEmpty(l2 := l1)), l2)
+                  val newLen = lLen.liftedZip(rLen).map { case (l1, l2) =>
+                    xCond.mux(l1, l2)
                   }
+                  val newSetup = xCond.mux(leftSetup, rightSetup)
 
-                SizedStream(newStream, newLen)
+                  SizedStream(newSetup, newStream, newLen)
               })
 
-            Code(xCond := cond.tcode[Boolean], k(newOptStream))
+            newOptStream.addSetup(xCond := cond.tcode[Boolean])
           }
 
         case Let(name, valueIR, bodyIR) =>
           val valueType = valueIR.pType
-          val xValue = mb.newEmitField(name, valueType)
 
-          val valuet = emitIR(valueIR)
-          val bodyEnv = env.bind(name -> xValue)
+          valueType match {
+            case streamType: PCanonicalStream =>
+              val valuet = COption.toEmitCode(
+                emitStream(valueIR, env)
+                  .map(ss => PCanonicalStreamCode(streamType, ss.getStream)),
+                mb)
+              val bodyEnv = env.bind(name -> new EmitUnrealizableValue(valueType, valuet))
 
-          emitStream(bodyIR, bodyEnv).addSetup(xValue := valuet)
+              emitStream(bodyIR, bodyEnv)
+
+            case _ =>
+              val xValue = mb.newEmitField(name, valueType)
+              val bodyEnv = env.bind(name -> xValue)
+              val valuet = emitIR(valueIR)
+
+              emitStream(bodyIR, bodyEnv).addSetup(xValue := valuet)
+          }
 
         case x@StreamScan(childIR, zeroIR, accName, eltName, bodyIR) =>
           val eltType = coerce[PStream](childIR.pType).elementType
-          val accType = x.accPType
+          val accType = coerce[PStream](x.pType).elementType
 
           val streamOpt = emitStream(childIR, env)
-          streamOpt.map { case SizedStream(stream, len) =>
+          streamOpt.map { case SizedStream(setup, stream, len) =>
             val Lpush = CodeLabel()
             val hasPulled = mb.newLocal[Boolean]()
 
@@ -966,10 +1207,10 @@ object EmitStream {
             val xAcc = mb.newEmitField(accName, accType)
             val tmpAcc = mb.newEmitField(accName, accType)
 
-            val zero = emitIR(zeroIR).map(accType.copyFromPValue(mb, er.region, _))
+            val zero = emitIR(zeroIR).map(accType.copyFromPValue(mb, region, _))
             val bodyEnv = env.bind(accName -> tmpAcc, eltName -> xElt)
 
-            val body = emitIR(bodyIR, env = bodyEnv).map(accType.copyFromPValue(mb, er.region, _))
+            val body = emitIR(bodyIR, env = bodyEnv).map(accType.copyFromPValue(mb, region, _))
 
             val newStream = new Stream[EmitCode] {
               def apply(eos: Code[Ctrl], push: EmitCode => Code[Ctrl])(implicit ctx: EmitStreamContext): Source[EmitCode] = {
@@ -988,13 +1229,13 @@ object EmitStream {
               }
             }
 
-            val newLen = len.map { case (s, l) => (Code(s, l := l + 1), l) }
-            SizedStream(newStream, newLen)
+            val newLen = len.map(l => l + 1)
+            SizedStream(setup, newStream, newLen)
           }
 
         case x@RunAggScan(array, name, init, seqs, result, _) =>
           val aggs = x.physicalSignatures
-          val (newContainer, aggSetup, aggCleanup) = AggContainer.fromClassBuilder(aggs, mb.ecb, "array_agg_scan")
+          val (newContainer, aggSetup, aggCleanup) = AggContainer.fromMethodBuilder(aggs, mb, "array_agg_scan")
 
           val eltType = coerce[PStream](array.pType).elementType
 
@@ -1008,7 +1249,7 @@ object EmitStream {
 
           val optStream = emitStream(array, env)
 
-          optStream.map { case SizedStream(stream, len) =>
+          optStream.map { case SizedStream(setup, stream, len) =>
             val newStream = stream.map[EmitCode](
               { eltt =>
                 EmitCode(
@@ -1022,7 +1263,7 @@ object EmitStream {
               close0 = Some(aggCleanup),
               setup = Some(cInit))
 
-            SizedStream(newStream, len)
+            SizedStream(setup, newStream, len)
           }
 
         case StreamLeftJoinDistinct(leftIR, rightIR, leftName, rightName, compIR, joinIR) =>
@@ -1043,8 +1284,9 @@ object EmitStream {
               coerce[Int](compt.v))
           }
 
-          emitStream(leftIR, env).flatMap { case SizedStream(leftStream, leftLen) =>
-            emitStream(rightIR, env).map { case SizedStream(rightStream, _) =>
+          emitStream(leftIR, env).flatMap { case SizedStream(leftSetup, leftStream, leftLen) =>
+            emitStream(rightIR, env).map { ss =>
+              val rightStream = ss.getStream
               val newStream = leftJoinRightDistinct(
                 mb,
                 lEltType, leftStream,
@@ -1058,7 +1300,7 @@ object EmitStream {
                     joint.pv)
                 }
 
-              SizedStream(newStream, leftLen)
+              SizedStream(leftSetup, newStream, leftLen)
             }
           }
 

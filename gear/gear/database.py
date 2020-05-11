@@ -4,6 +4,7 @@ import pymysql
 import aiomysql
 import logging
 import functools
+import ssl
 
 from hailtop.utils import sleep_and_backoff, LoggingTimer
 
@@ -13,7 +14,8 @@ log = logging.getLogger('gear.database')
 
 # 1213 - Deadlock found when trying to get lock; try restarting transaction
 # 2003 - Can't connect to MySQL server on ...
-retry_codes = (1213, 2003)
+# 2013 - Lost connection to MySQL server during query ([Errno 104] Connection reset by peer)
+retry_codes = (1213, 2003, 2013)
 
 
 def retry_transient_mysql_errors(f):
@@ -51,18 +53,55 @@ async def aexit(acontext_manager, exc_type=None, exc_val=None, exc_tb=None):
     return await acontext_manager.__aexit__(exc_type, exc_val, exc_tb)
 
 
-@retry_transient_mysql_errors
-async def create_database_pool(config_file=None, autocommit=True, maxsize=10):
+def get_sql_config(config_file=None):
     if config_file is None:
-        config_file = os.environ.get('HAIL_DATABASE_CONFIG_FILE', '/sql-config/sql-config.json')
+        config_file = os.environ.get('HAIL_DATABASE_CONFIG_FILE',
+                                     '/sql-config/sql-config.json')
     with open(config_file, 'r') as f:
         sql_config = json.loads(f.read())
+    check_sql_config(sql_config)
+    return sql_config
+
+
+def check_sql_config(sql_config):
+    assert sql_config is not None
+    for key in ('ssl-cert', 'ssl-key', 'ssl-ca', 'ssl-mode'):
+        assert sql_config.get(key) is not None, key
+    for key in ('ssl-cert', 'ssl-key', 'ssl-ca'):
+        if not os.path.isfile(sql_config[key]):
+            raise ValueError(f'specified {key}, {sql_config[key]} does not exist')
+    log.info(f'using tls and verifying server certificates for MySQL')
+
+
+database_ssl_context = None
+
+
+def get_database_ssl_context(sql_config=None):
+    global database_ssl_context
+    if database_ssl_context is None:
+        if sql_config is None:
+            sql_config = get_sql_config()
+        database_ssl_context = ssl.create_default_context(
+            cafile=sql_config['ssl-ca'])
+        database_ssl_context.load_cert_chain(sql_config['ssl-cert'],
+                                             keyfile=sql_config['ssl-key'],
+                                             password=None)
+        database_ssl_context.verify_mode = ssl.CERT_REQUIRED
+        database_ssl_context.check_hostname = False
+    return database_ssl_context
+
+
+@retry_transient_mysql_errors
+async def create_database_pool(config_file=None, autocommit=True, maxsize=10):
+    sql_config = get_sql_config(config_file)
+    ssl_context = get_database_ssl_context(sql_config)
+    assert ssl_context is not None
     return await aiomysql.create_pool(
         maxsize=maxsize,
         # connection args
         host=sql_config['host'], user=sql_config['user'], password=sql_config['password'],
         db=sql_config.get('db'), port=sql_config['port'], charset='utf8',
-        cursorclass=aiomysql.cursors.DictCursor, autocommit=autocommit)
+        ssl=ssl_context, cursorclass=aiomysql.cursors.DictCursor, autocommit=autocommit)
 
 
 class TransactionAsyncContextManager:

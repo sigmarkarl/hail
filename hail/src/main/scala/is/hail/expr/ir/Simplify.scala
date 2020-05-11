@@ -179,15 +179,15 @@ object Simplify {
     case ApplyBinaryPrimOp(Subtract(), I32(0), x) => x
     case ApplyBinaryPrimOp(Subtract(), x, I32(0)) => x
 
-    case ApplyIR("indexArray", Seq(a, i@I32(v))) if v >= 0 =>
+    case ApplyIR("indexArray", _, Seq(a, i@I32(v))) if v >= 0 =>
       ArrayRef(a, i)
 
-    case ApplyIR("contains", Seq(CastToArray(x), element)) if x.typ.isInstanceOf[TSet] => invoke("contains", TBoolean, x, element)
+    case ApplyIR("contains", _, Seq(CastToArray(x), element)) if x.typ.isInstanceOf[TSet] => invoke("contains", TBoolean, x, element)
 
-    case ApplyIR("contains", Seq(Literal(t, v), element)) if t.isInstanceOf[TArray] =>
+    case ApplyIR("contains", _, Seq(Literal(t, v), element)) if t.isInstanceOf[TArray] =>
       invoke("contains", TBoolean, Literal(TSet(t.asInstanceOf[TArray].elementType), v.asInstanceOf[IndexedSeq[_]].toSet), element)
 
-    case ApplyIR("contains", Seq(ToSet(x), element)) if x.typ.isInstanceOf[TArray] => invoke("contains", TBoolean, x, element)
+    case ApplyIR("contains", _, Seq(ToSet(x), element)) if x.typ.isInstanceOf[TArray] => invoke("contains", TBoolean, x, element)
 
     case x: ApplyIR if x.inline || x.body.size < 10 => x.explicitNode
 
@@ -199,6 +199,8 @@ object Simplify {
 
     case ArrayLen(ArraySort(a, _, _, _)) => ArrayLen(ToArray(a))
 
+    case ArrayLen(ToArray(MakeStream(args, _))) => I32(args.length)
+      
     case ArrayRef(MakeArray(args, _), I32(i), _) if i >= 0 && i < args.length => args(i)
 
     case StreamFilter(a, _, True()) => a
@@ -226,6 +228,8 @@ object Simplify {
     case ToStream(ToArray(s)) if s.typ.isInstanceOf[TStream] => s
 
     case ToStream(Let(name, value, ToArray(x))) if x.typ.isInstanceOf[TStream] => Let(name, value, x)
+
+    case ArrayLen(ToArray(s)) if s.typ.isInstanceOf[TStream] => foldIR(s, 0){ case (acc, _) => acc + 1}
 
     case NDArrayShape(NDArrayMap(nd, _, _)) => NDArrayShape(nd)
 
@@ -327,7 +331,7 @@ object Simplify {
       val rw = fieldNames.foldLeft[IR](Let(name, old, rewrite(body))) { case (comb, fieldName) =>
         Let(newFieldRefs(fieldName).name, newFieldMap(fieldName), comb)
       }
-      FoldConstants(ForwardLets(rw)).asInstanceOf[IR]
+      ForwardLets[IR](rw)
 
     case SelectFields(old, fields) if coerce[TStruct](old.typ).fieldNames sameElements fields =>
       old
@@ -401,8 +405,8 @@ object Simplify {
     case MatrixCount(MatrixAnnotateRowsTable(child, _, _, _)) => MatrixCount(child)
     case MatrixCount(MatrixRepartition(child, _, _)) => MatrixCount(child)
     case MatrixCount(MatrixRename(child, _, _, _, _)) => MatrixCount(child)
-    case TableCount(TableRead(_, false, r: MatrixBGENReader)) if r.includedVariants.isEmpty =>
-      I64(r.fileMetadata.map(_.nVariants).sum)
+    case TableCount(TableRead(_, false, r: MatrixBGENReader)) if r.params.includedVariants.isEmpty =>
+      I64(r.nVariants)
 
     // TableGetGlobals should simplify very aggressively
     case TableGetGlobals(child) if child.typ.globalType == TStruct.empty => MakeStruct(FastSeq())
@@ -422,7 +426,6 @@ object Simplify {
               g2.typ.asInstanceOf[TStruct].fields.map(f => f.name -> (GetField(Ref(g2s, g2.typ), f.name): IR)))))
     case TableGetGlobals(x@TableMultiWayZipJoin(children, _, globalName)) =>
       MakeStruct(FastSeq(globalName -> MakeArray(children.map(TableGetGlobals), TArray(children.head.typ.globalType))))
-    case TableGetGlobals(TableZipUnchecked(left, _)) => TableGetGlobals(left)
     case TableGetGlobals(TableLeftJoinRightDistinct(child, _, _)) => TableGetGlobals(child)
     case TableGetGlobals(TableMapRows(child, _)) => TableGetGlobals(child)
     case TableGetGlobals(TableMapGlobals(child, newGlobals)) =>
@@ -506,7 +509,7 @@ object Simplify {
     //           ArrayAgg(GetField(Ref(uid, rowsAndGlobal.typ), "rows"), "row", query)))
     //   }
 
-    case ApplyIR("annotate", Seq(s, MakeStruct(fields))) =>
+    case ApplyIR("annotate", _, Seq(s, MakeStruct(fields))) =>
       InsertFields(s, fields)
 
     // simplify Boolean equality
@@ -569,7 +572,7 @@ object Simplify {
 
     case TableFilter(TableFilter(t, p1), p2) =>
       TableFilter(t,
-        ApplySpecial("land", Array(p1, p2), TBoolean))
+        ApplySpecial("land", Array.empty[Type], Array(p1, p2), TBoolean))
 
     case TableFilter(TableKeyBy(child, key, isSorted), p) if canRepartition => TableKeyBy(TableFilter(child, p), key, isSorted)
     case TableFilter(TableRepartition(child, n, strategy), p) => TableRepartition(TableFilter(child, p), n, strategy)
@@ -744,12 +747,6 @@ object Simplify {
 
     case TableParallelize(TableCollect(child), _) if isDeterministicallyRepartitionable(child) => child
 
-    case TableZipUnchecked(left, right) if left.typ.rowType.size == 0 =>
-      if (left.typ.globalType.size == 0)
-        right
-      else
-        TableMapGlobals(right, TableGetGlobals(left))
-
     // push down filter intervals nodes
     case TableFilterIntervals(TableFilter(child, pred), intervals, keep) =>
       TableFilter(TableFilterIntervals(child, intervals, keep), pred)
@@ -792,10 +789,10 @@ object Simplify {
       //   TableKeyBy(TableFilter(child, pred), keys, isSorted)
 
     case TableFilterIntervals(TableRead(t, false, tr: TableNativeReader), intervals, true) if canRepartition
-      && tr.spec.indexed(tr.path)
-      && tr.options.forall(_.filterIntervals)
+      && tr.spec.indexed
+      && tr.filterIntervals
       && SemanticVersion(tr.spec.file_version) >= SemanticVersion(1, 3, 0) =>
-      val newOpts = tr.options match {
+      val newOpts = tr.params.options match {
         case None =>
           val pt = t.keyType
           NativeReaderOptions(Interval.union(intervals.toArray, pt.ordering.intervalEndpointOrdering), pt, true)
@@ -805,10 +802,10 @@ object Simplify {
             Interval.intersection(Interval.union(preIntervals.toArray, iord), Interval.union(intervals.toArray, iord), iord),
             intervalPointType, true)
       }
-      TableRead(t, false, TableNativeReader(tr.path, Some(newOpts), tr.spec))
+      TableRead(t, false, new TableNativeReader(TableNativeReaderParameters(tr.params.path, Some(newOpts)), tr.spec))
 
     case TableFilterIntervals(TableRead(t, false, tr: TableNativeZippedReader), intervals, true) if canRepartition
-      && tr.specLeft.indexed(tr.pathLeft)
+      && tr.specLeft.indexed
       && tr.options.forall(_.filterIntervals)
       && SemanticVersion(tr.specLeft.file_version) >= SemanticVersion(1, 3, 0) =>
       val newOpts = tr.options match {
@@ -822,7 +819,6 @@ object Simplify {
             intervalPointType, true)
       }
       TableRead(t, false, TableNativeZippedReader(tr.pathLeft, tr.pathRight, Some(newOpts), tr.specLeft, tr.specRight))
-
   }
 
   private[this] def matrixRules(canRepartition: Boolean): PartialFunction[MatrixIR, MatrixIR] = {
@@ -866,11 +862,11 @@ object Simplify {
 
     case MatrixFilterCols(m, True()) => m
 
-    case MatrixFilterRows(MatrixFilterRows(child, pred1), pred2) => MatrixFilterRows(child, ApplySpecial("land", FastSeq(pred1, pred2), TBoolean))
+    case MatrixFilterRows(MatrixFilterRows(child, pred1), pred2) => MatrixFilterRows(child, ApplySpecial("land", FastSeq(), FastSeq(pred1, pred2), TBoolean))
 
-    case MatrixFilterCols(MatrixFilterCols(child, pred1), pred2) => MatrixFilterCols(child, ApplySpecial("land", FastSeq(pred1, pred2), TBoolean))
+    case MatrixFilterCols(MatrixFilterCols(child, pred1), pred2) => MatrixFilterCols(child, ApplySpecial("land", FastSeq(), FastSeq(pred1, pred2), TBoolean))
 
-    case MatrixFilterEntries(MatrixFilterEntries(child, pred1), pred2) => MatrixFilterEntries(child, ApplySpecial("land", FastSeq(pred1, pred2), TBoolean))
+    case MatrixFilterEntries(MatrixFilterEntries(child, pred1), pred2) => MatrixFilterEntries(child, ApplySpecial("land", FastSeq(), FastSeq(pred1, pred2), TBoolean))
 
     case MatrixMapGlobals(MatrixMapGlobals(child, ng1), ng2) =>
       val uid = genUID()
@@ -907,8 +903,8 @@ object Simplify {
     case MatrixColsHead(MatrixChooseCols(child, oldIndices), n) => MatrixChooseCols(child, oldIndices.take(n))
     case MatrixColsHead(MatrixColsHead(child, n1), n2) => MatrixColsHead(child, math.min(n1, n2))
     case MatrixColsHead(MatrixFilterRows(child, pred), n) => MatrixFilterRows(MatrixColsHead(child, n), pred)
-    case MatrixColsHead(MatrixRead(t, dr, dc, MatrixRangeReader(nRows, nCols, nPartitions)), n) =>
-      MatrixRead(t, dr, dc, MatrixRangeReader(nRows, math.min(nCols, n), nPartitions))
+    case MatrixColsHead(MatrixRead(t, dr, dc, r: MatrixRangeReader), n) =>
+      MatrixRead(t, dr, dc, MatrixRangeReader(r.params.nRows, math.min(r.params.nCols, n), r.params.nPartitions))
     case MatrixColsHead(MatrixMapRows(child, newRow), n) if !Mentions.inAggOrScan(newRow, "sa") =>
       MatrixMapRows(MatrixColsHead(child, n), newRow)
     case MatrixColsHead(MatrixMapGlobals(child, newGlobals), n) => MatrixMapGlobals(MatrixColsHead(child, n), newGlobals)

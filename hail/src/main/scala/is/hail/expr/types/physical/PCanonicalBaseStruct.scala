@@ -7,6 +7,11 @@ import is.hail.expr.types.BaseStruct
 import is.hail.utils._
 
 abstract class PCanonicalBaseStruct(val types: Array[PType]) extends PBaseStruct {
+  if (!types.forall(_.isRealizable)) {
+    throw new AssertionError(
+      s"found non realizable type(s) ${types.filter(!_.isRealizable).mkString(", ")} in ${types.mkString(", ")}")
+  }
+
   val (missingIdx: Array[Int], nMissing: Int) = BaseStruct.getMissingIndexAndCount(types.map(_.required))
   val nMissingBytes: Int = UnsafeUtils.packBitsToBytes(nMissing)
   val byteOffsets: Array[Long] = new Array[Long](size)
@@ -132,7 +137,7 @@ abstract class PCanonicalBaseStruct(val types: Array[PType]) extends PBaseStruct
         val dstFieldAddress = this.fieldOffset(dstStructAddress, i)
         dstFieldType match {
           case t@(_: PBinary | _: PArray) =>
-            Region.storeAddress(dstFieldAddress, t.copyFromType(region, dstFieldType, Region.loadAddress(dstFieldAddress), deepCopy = true))
+            Region.storeAddress(dstFieldAddress, t.copyFromAddress(region, dstFieldType, Region.loadAddress(dstFieldAddress), deepCopy = true))
           case t: PCanonicalBaseStruct =>
             t.deepPointerCopy(region, dstFieldAddress)
         }
@@ -158,18 +163,15 @@ abstract class PCanonicalBaseStruct(val types: Array[PType]) extends PBaseStruct
   }
 
   def copyFromTypeAndStackValue(mb: EmitMethodBuilder[_], region: Value[Region], srcPType: PType, stackValue: Code[_], deepCopy: Boolean): Code[_] =
-    this.copyFromType(mb, region, srcPType, stackValue.asInstanceOf[Code[Long]], deepCopy)
+    copyFromType(mb, region, srcPType, stackValue.asInstanceOf[Code[Long]], deepCopy)
 
-  def copyFromType(region: Region, srcPType: PType, srcStructAddress: Long, deepCopy: Boolean): Long = {
-    val sourceType = srcPType.asInstanceOf[PBaseStruct]
+  def _copyFromAddress(region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Long = {
+    if (equalModuloRequired(srcPType) && !deepCopy)
+      return srcAddress
 
-    if (this == sourceType && !deepCopy)
-      srcStructAddress
-    else {
-      val newAddr = allocate(region)
-      constructAtAddress(newAddr, region, sourceType, srcStructAddress, deepCopy)
-      newAddr
-    }
+    val newAddr = allocate(region)
+    constructAtAddress(newAddr, region, srcPType.asInstanceOf[PBaseStruct], srcAddress, deepCopy)
+    newAddr
   }
 
   def constructAtAddress(mb: EmitMethodBuilder[_], addr: Code[Long], region: Value[Region], srcPType: PType, srcAddress: Code[Long], deepCopy: Boolean): Code[Unit] = {
@@ -203,7 +205,7 @@ abstract class PCanonicalBaseStruct(val types: Array[PType]) extends PBaseStruct
 
   def constructAtAddress(addr: Long, region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Unit = {
     val srcStruct = srcPType.asInstanceOf[PBaseStruct]
-    if (srcStruct == this) {
+    if (equalModuloRequired(srcStruct)) {
       Region.copyFrom(srcAddress, addr, byteSize)
       if (deepCopy)
         deepPointerCopy(region, addr)
@@ -211,34 +213,34 @@ abstract class PCanonicalBaseStruct(val types: Array[PType]) extends PBaseStruct
       initialize(addr, setMissing = true)
       var idx = 0
       while (idx < types.length) {
-        val dest = types(idx)
-        val src = srcStruct.types(idx)
-        assert(dest.required <= src.required)
-
         if (srcStruct.isFieldDefined(srcAddress, idx)) {
           setFieldPresent(addr, idx)
-          dest.constructAtAddress(fieldOffset(addr, idx), region, src, srcStruct.loadField(srcAddress, idx), deepCopy)
-        }
+          types(idx).constructAtAddress(
+            fieldOffset(addr, idx), region, srcStruct.types(idx), srcStruct.loadField(srcAddress, idx), deepCopy)
+        } else
+          assert(!fieldRequired(idx))
         idx += 1
       }
     }
   }
 
-  override def load(src: Code[Long]): PCode =
+  override def load(src: Code[Long]): PCanonicalBaseStructCode =
     new PCanonicalBaseStructCode(this, src)
 }
 
 object PCanonicalBaseStructSettable {
-  def apply(cb: EmitCodeBuilder, pt: PBaseStruct, name: String, sb: SettableBuilder): PCanonicalBaseStructSettable = {
+  def apply(sb: SettableBuilder, pt: PCanonicalBaseStruct, name: String): PCanonicalBaseStructSettable = {
     new PCanonicalBaseStructSettable(pt, sb.newSettable(name))
   }
 }
 
 class PCanonicalBaseStructSettable(
-  val pt: PBaseStruct,
+  val pt: PCanonicalBaseStruct,
   val a: Settable[Long]
 ) extends PBaseStructValue with PSettable {
   def get: PBaseStructCode = new PCanonicalBaseStructCode(pt, a)
+
+  def settableTuple(): IndexedSeq[Settable[_]] = FastIndexedSeq(a)
 
   def loadField(cb: EmitCodeBuilder, fieldIdx: Int): IEmitCode = {
     IEmitCode(cb,
@@ -249,13 +251,24 @@ class PCanonicalBaseStructSettable(
   def store(pv: PCode): Code[Unit] = {
     a := pv.asInstanceOf[PCanonicalBaseStructCode].a
   }
+
+  def apply[T](i: Int): Value[T] =
+    new Value[T] {
+      def get: Code[T] = coerce[T](Region.loadIRIntermediate(pt.types(i))(pt.loadField(a, i)))
+    }
+
+  def isFieldMissing(fieldIdx: Int): Code[Boolean] = {
+    this.pt.isFieldMissing(a, fieldIdx)
+  }
 }
 
-class PCanonicalBaseStructCode(val pt: PBaseStruct, val a: Code[Long]) extends PBaseStructCode {
+class PCanonicalBaseStructCode(val pt: PCanonicalBaseStruct, val a: Code[Long]) extends PBaseStructCode {
   def code: Code[_] = a
 
+  def codeTuple(): IndexedSeq[Code[_]] = FastIndexedSeq(a)
+
   def memoize(cb: EmitCodeBuilder, name: String, sb: SettableBuilder): PBaseStructValue = {
-    val s = PCanonicalBaseStructSettable(cb, pt, name, sb)
+    val s = PCanonicalBaseStructSettable(sb, pt, name)
     cb.assign(s, this)
     s
   }

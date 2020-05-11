@@ -12,8 +12,8 @@ import is.hail.utils._
 case object EBinaryOptional extends EBinary(false)
 case object EBinaryRequired extends EBinary(true)
 
-class EBinary(override val required: Boolean) extends EType {
-  def _buildEncoder(pt: PType, mb: EmitMethodBuilder[_], v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
+class EBinary(override val required: Boolean) extends EFundamentalType {
+  def _buildFundamentalEncoder(pt: PType, mb: EmitMethodBuilder[_], v: Value[_], out: Value[OutputBuffer]): Code[Unit] = {
     val addr = coerce[Long](v)
     val len = mb.newLocal[Int]("len")
     val bT = pt.asInstanceOf[PBinary]
@@ -23,7 +23,7 @@ class EBinary(override val required: Boolean) extends EType {
       out.writeBytes(bT.bytesAddress(addr), len))
   }
 
-  def _buildDecoder(
+  def _buildFundamentalDecoder(
     pt: PType,
     mb: EmitMethodBuilder[_],
     region: Value[Region],
@@ -50,12 +50,14 @@ class EBinary(override val required: Boolean) extends EType {
   override def _compatible(pt: PType): Boolean = pt.isInstanceOf[PBinary]
 
   def _decodedPType(requestedType: Type): PType = requestedType match {
-    case TBinary => PBinary(required)
-    case TString => PString(required)
+    case TBinary => PCanonicalBinary(required)
+    case TString => PCanonicalString(required)
   }
 
   def _asIdent = "binary"
   def _toPretty = "EBinary"
+
+  def setRequired(newRequired: Boolean): EBinary = EBinary(newRequired)
 }
 
 object EBinary {

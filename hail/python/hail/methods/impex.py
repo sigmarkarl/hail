@@ -1,7 +1,7 @@
 import json
 
 from hail.typecheck import *
-from hail.utils.java import Env, joption, FatalError, jindexed_seq_args, jset_args
+from hail.utils.java import Env, FatalError, jindexed_seq_args
 from hail.utils import wrap_to_list
 from hail.utils.misc import plural
 from hail.matrixtable import MatrixTable
@@ -14,8 +14,6 @@ from hail.methods.misc import require_biallelic, require_row_key_variant, requir
 import hail as hl
 
 from typing import List
-
-_cached_importvcfs = None
 
 
 def locus_interval_expr(contig, start, end, includes_start, includes_end,
@@ -166,7 +164,7 @@ def export_gen(dataset, output, precision=4, gp=None, id1=None, id2=None,
            gp=nullable(expr_array(expr_float64)),
            varid=nullable(expr_str),
            rsid=nullable(expr_str),
-           parallel=nullable(str))
+           parallel=nullable(ExportType.checker))
 def export_bgen(mt, output, gp=None, varid=None, rsid=None, parallel=None):
     """Export MatrixTable as :class:`.MatrixTable` as BGEN 1.2 file with 8
     bits of per probability.  Also writes SAMPLE file.
@@ -216,6 +214,8 @@ def export_bgen(mt, output, gp=None, varid=None, rsid=None, parallel=None):
         if 'rsid' in mt.row and mt.rsid.dtype == tstr:
             rsid = mt.rsid
 
+    parallel = ExportType.default(parallel)
+
     l = mt.locus
     a = mt.alleles
     gen_exprs = {'varid': expr_or_else(varid, hl.delimit([l.contig, hl.str(l.position), a[0], a[1]], ':')),
@@ -232,7 +232,7 @@ def export_bgen(mt, output, gp=None, varid=None, rsid=None, parallel=None):
 
     Env.backend().execute(MatrixWrite(mt._mir, MatrixBGENWriter(
         output,
-        Env.hail().utils.ExportType.getExportType(parallel))))
+        parallel)))
 
 
 @typecheck(dataset=MatrixTable,
@@ -380,7 +380,7 @@ def export_plink(dataset, output, call=None, fam_id=None, ind_id=None, pat_id=No
 @typecheck(dataset=MatrixTable,
            output=str,
            append_to_header=nullable(str),
-           parallel=nullable(enumeration('separate_header', 'header_per_shard')),
+           parallel=nullable(ExportType.checker),
            metadata=nullable(dictof(str, dictof(str, dictof(str, str)))))
 def export_vcf(dataset, output, append_to_header=None, parallel=None, metadata=None):
     """Export a :class:`.MatrixTable` as a VCF file.
@@ -507,9 +507,11 @@ def export_vcf(dataset, output, append_to_header=None, parallel=None, metadata=N
         hl.utils.java.warn('export_vcf: ignored the following fields:' + ignored_str)
         dataset = dataset.drop(*(f for f, _ in fields_dropped))
 
+    parallel = ExportType.default(parallel)
+
     writer = MatrixVCFWriter(output,
                              append_to_header,
-                             Env.hail().utils.ExportType.getExportType(parallel),
+                             parallel,
                              metadata)
     Env.backend().execute(MatrixWrite(dataset._mir, writer))
 
@@ -880,7 +882,7 @@ def import_fam(path, quant_pheno=False, delimiter=r'\\s+', missing='NA') -> Tabl
     -------
     :class:`.Table`
     """
-    type_and_data = json.loads(Env.jutils().importFamJSON(path, quant_pheno, delimiter, missing))
+    type_and_data = json.loads(Env.jutils().importFamJSON(Env.spark_backend('import_fam').fs._jfs, path, quant_pheno, delimiter, missing))
     typ = hl.dtype(type_and_data['type'])
     return hl.Table.parallelize(
         hl.tarray(typ)._convert_from_json_na(type_and_data['data']), typ, key=['id'])
@@ -930,10 +932,11 @@ def grep(regex, path, max_count=100, *, show=True):
     ---
     :obj:`dict` of :obj:`str` to :obj:`list` of :obj:`str`
     """
+    jfs = Env.spark_backend('grep').fs._jfs
     if show:
-        Env.hc()._jhc.grepPrint(regex, jindexed_seq_args(path), max_count)
+        Env.backend()._jhc.grepPrint(jfs, regex, jindexed_seq_args(path), max_count)
     else:
-        jarr = Env.hc()._jhc.grepReturn(regex, jindexed_seq_args(path), max_count)
+        jarr = Env.backend()._jhc.grepReturn(jfs, regex, jindexed_seq_args(path), max_count)
         return {x._1(): list(x._2()) for x in jarr}
 
 
@@ -1122,8 +1125,8 @@ def import_bgen(path,
 
             if len(variants.dtype) == 0 or not variants.dtype._is_prefix_of(expected_vtype):
                 raise TypeError("'import_bgen' requires the expression type for 'variants' is a non-empty prefix of the BGEN key type: \n" +
-                                 f"\tFound: {repr(variants.dtype)}\n" +
-                                  f"\tExpected: {repr(expected_vtype)}\n")
+                                f"\tFound: {repr(variants.dtype)}\n"
+                                + f"\tExpected: {repr(expected_vtype)}\n")
 
             uid = Env.get_uid()
             fnames = list(variants.dtype)
@@ -1749,7 +1752,9 @@ def import_matrix_table(paths,
            a2_reference=bool,
            reference_genome=nullable(reference_genome_type),
            contig_recoding=nullable(dictof(str, str)),
-           skip_invalid_loci=bool)
+           skip_invalid_loci=bool,
+           n_partitions=nullable(int),
+           block_size=nullable(int))
 def import_plink(bed, bim, fam,
                  min_partitions=None,
                  delimiter='\\\\s+',
@@ -1758,7 +1763,9 @@ def import_plink(bed, bim, fam,
                  a2_reference=True,
                  reference_genome='default',
                  contig_recoding=None,
-                 skip_invalid_loci=False) -> MatrixTable:
+                 skip_invalid_loci=False,
+                 n_partitions=None,
+                 block_size=None) -> MatrixTable:
     """Import a PLINK dataset (BED, BIM, FAM) as a :class:`.MatrixTable`.
 
     Examples
@@ -1838,7 +1845,7 @@ def import_plink(bed, bim, fam,
         PLINK FAM file.
 
     min_partitions : :obj:`int`, optional
-        Number of partitions.
+        Minimum number of partitions.  Useful in conjunction with `block_size`.
 
     missing : :obj:`str`
         String used to denote missing values **only** for the phenotype field.
@@ -1868,9 +1875,17 @@ def import_plink(bed, bim, fam,
     skip_invalid_loci : :obj:`bool`
         If ``True``, skip loci that are not consistent with `reference_genome`.
 
+    n_partitions : :obj:`int`, optional
+        Number of partitions.  If both `n_partitions` and `block_size`
+        are specified, `n_partitions` will be used.
+
+    block_size : :obj:`int`, optional
+        Block size, in MB.  Default: 128MB blocks.
+
     Returns
     -------
     :class:`.MatrixTable`
+
     """
 
     if contig_recoding is None:
@@ -1884,9 +1899,10 @@ def import_plink(bed, bim, fam,
         else:
             contig_recoding = {}
 
-    reader = MatrixPLINKReader(bed, bim, fam, min_partitions, missing, delimiter,
-                               quant_pheno, a2_reference, reference_genome, contig_recoding,
-                               skip_invalid_loci)
+    reader = MatrixPLINKReader(bed, bim, fam,
+                               n_partitions, block_size, min_partitions,
+                               missing, delimiter, quant_pheno, a2_reference, reference_genome,
+                               contig_recoding, skip_invalid_loci)
     return MatrixTable(MatrixRead(reader, drop_cols=False, drop_rows=False))
 
 
@@ -2196,16 +2212,12 @@ def import_gvcfs(path,
 
     rg = reference_genome.name if reference_genome else None
 
-    global _cached_importvcfs
-    if _cached_importvcfs is None:
-        _cached_importvcfs = Env.hail().io.vcf.ImportVCFs
-
     if partitions is not None:
         partitions, partitions_type = hl.utils._dumps_partitions(partitions, hl.tstruct(locus=hl.tlocus(rg), alleles=hl.tarray(hl.tstr)))
     else:
         partitions_type = None
 
-    vector_ref_s = _cached_importvcfs.pyApply(
+    vector_ref_s = Env.spark_backend('import_vcfs')._jbackend.pyImportVCFs(
         wrap_to_list(path),
         wrap_to_list(call_fields),
         entry_float_type._parsable_string(),

@@ -145,8 +145,6 @@ final case class TStruct(fields: IndexedSeq[Field]) extends TBaseStruct {
     (t.asInstanceOf[TStruct], f)
   }
 
-  def updateKey(key: String, sig: Type): TStruct = updateKey(key, fieldIdx(key), sig)
-
   def updateKey(key: String, i: Int, sig: Type): TStruct = {
     assert(fieldIdx.contains(key))
 
@@ -364,6 +362,9 @@ final case class TStruct(fields: IndexedSeq[Field]) extends TBaseStruct {
     (t, selectF)
   }
 
+  def typeAfterSelectNames(keep: IndexedSeq[String]): TStruct =
+    new TStruct(keep.map(i => fields(fieldIdx(i))))
+
   def typeAfterSelect(keep: IndexedSeq[Int]): TStruct =
     TStruct(keep.map(i => fieldNames(i) -> types(i)): _*)
 
@@ -377,4 +378,18 @@ final case class TStruct(fields: IndexedSeq[Field]) extends TBaseStruct {
   }
 
   def toEnv: Env[Type] = Env(fields.map(f => (f.name, f.typ)): _*)
+
+
+  override def valueSubsetter(subtype: Type): Any => Any = {
+    if (this == subtype)
+      return identity
+
+    val subStruct = subtype.asInstanceOf[TStruct]
+    val subsetFields = subStruct.fields.map(f => (fieldIdx(f.name), fieldType(f.name).valueSubsetter(f.typ)))
+
+    { (a: Any) =>
+      val r = a.asInstanceOf[Row]
+      Row.fromSeq(subsetFields.map { case (i, subset) => subset(r.get(i)) })
+    }
+  }
 }

@@ -3,8 +3,10 @@ package is.hail.io.gen
 import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.backend.BroadcastValue
+import is.hail.backend.spark.SparkBackend
 import is.hail.expr.ir.{ExecuteContext, LowerMatrixIR, MatrixHybridReader, MatrixRead, MatrixReader, MatrixValue, TableRead, TableValue}
-import is.hail.expr.types.MatrixType
+import is.hail.expr.types.{MatrixType, TableType}
+import is.hail.expr.types.physical.{PStruct, PType}
 import is.hail.expr.types.virtual._
 import is.hail.io.bgen.LoadBgen
 import is.hail.io.vcf.LoadVCF
@@ -17,6 +19,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.Row
 import org.apache.spark.broadcast.Broadcast
+import org.json4s.{DefaultFormats, Extraction, Formats, JObject, JValue}
 
 case class GenResult(file: String, nSamples: Int, nVariants: Int, rdd: RDD[(Annotation, Iterable[Annotation])])
 
@@ -104,7 +107,67 @@ object LoadGen {
   }
 }
 
-case class MatrixGENReader(
+object MatrixGENReader {
+  def fromJValue(ctx: ExecuteContext, jv: JValue): MatrixGENReader = {
+    val fs = ctx.fs
+
+    implicit val formats: Formats = DefaultFormats
+    val params = jv.extract[MatrixGENReaderParameters]
+
+    params.files.foreach { input =>
+      if (!fs.stripCodecExtension(input).endsWith(".gen"))
+        fatal(s"gen inputs must end in .gen[.bgz], found $input")
+    }
+
+    if (params.files.isEmpty)
+      fatal(s"arguments refer to no files: ${ params.files.mkString(",") }")
+
+    val referenceGenome = params.rg.map(ReferenceGenome.getReference)
+
+    referenceGenome.foreach(ref => ref.validateContigRemap(params.contigRecoding))
+
+    val samples = LoadBgen.readSampleFile(fs, params.sampleFile)
+    val nSamples = samples.length
+
+    // FIXME: can't specify multiple chromosomes
+    val results = params.files.map(f => LoadGen(f, params.sampleFile, SparkBackend.sparkContext("MatrixGENReader.fromJValue"), fs, referenceGenome.map(_.broadcast), params.nPartitions,
+      params.tolerance, params.chromosome, params.contigRecoding, params.skipInvalidLoci))
+
+    val unequalSamples = results.filter(_.nSamples != nSamples).map(x => (x.file, x.nSamples))
+    if (unequalSamples.nonEmpty)
+      fatal(
+        s"""The following GEN files did not contain the expected number of samples $nSamples:
+           |  ${ unequalSamples.map(x => s"""(${ x._2 } ${ x._1 }""").mkString("\n  ") }""".stripMargin)
+
+    val noVariants = results.filter(_.nVariants == 0).map(_.file)
+    if (noVariants.nonEmpty)
+      fatal(
+        s"""The following GEN files contain no variants:
+           |  ${ noVariants.mkString("\n  ") })""".stripMargin)
+
+    val nVariants = results.map(_.nVariants).sum
+
+    info(s"Number of GEN files parsed: ${ results.length }")
+    info(s"Number of variants in all GEN files: $nVariants")
+    info(s"Number of samples in GEN files: $nSamples")
+
+    def fullMatrixType: MatrixType = MatrixType(
+      globalType = TStruct.empty,
+      colKey = Array("s"),
+      colType = TStruct("s" -> TString),
+      rowKey = Array("locus", "alleles"),
+      rowType = TStruct(
+        "locus" -> TLocus.schemaFromRG(referenceGenome),
+        "alleles" -> TArray(TString),
+        "rsid" -> TString, "varid" -> TString),
+      entryType = TStruct("GT" -> TCall,
+        "GP" -> TArray(TFloat64)))
+
+    new MatrixGENReader(params, fullMatrixType, samples, results)
+  }
+}
+
+case class MatrixGENReaderParameters(
   files: Array[String],
   sampleFile: String,
   chromosome: Option[String],
@@ -112,67 +175,33 @@ case class MatrixGENReader(
   tolerance: Double,
   rg: Option[String],
   contigRecoding: Map[String, String],
-  skipInvalidLoci: Boolean) extends MatrixHybridReader {
+  skipInvalidLoci: Boolean)
 
-  files.foreach { input =>
-    if (!HailContext.get.fs.stripCodecExtension(input).endsWith(".gen"))
-      fatal(s"gen inputs must end in .gen[.bgz], found $input")
-  }
+class MatrixGENReader(
+  val params: MatrixGENReaderParameters,
+  val fullMatrixType: MatrixType,
+  samples: Array[String],
+  results: Array[GenResult]
+) extends MatrixHybridReader {
+  def pathsUsed: Seq[String] = params.files
 
-  if (files.isEmpty)
-    fatal(s"arguments refer to no files: ${ files.mkString(",") }")
-
-  private val referenceGenome = rg.map(ReferenceGenome.getReference)
-
-  referenceGenome.foreach(ref => ref.validateContigRemap(contigRecoding))
-
-  private val samples = LoadBgen.readSampleFile(HailContext.get.fs, sampleFile)
-  private val nSamples = samples.length
-
-  // FIXME: can't specify multiple chromosomes
-  private val results = files.map(f => LoadGen(f, sampleFile, HailContext.get.sc, HailContext.fs, referenceGenome.map(_.broadcast), nPartitions,
-    tolerance, chromosome, contigRecoding, skipInvalidLoci))
-
-  private val unequalSamples = results.filter(_.nSamples != nSamples).map(x => (x.file, x.nSamples))
-  if (unequalSamples.nonEmpty)
-    fatal(
-      s"""The following GEN files did not contain the expected number of samples $nSamples:
-         |  ${ unequalSamples.map(x => s"""(${ x._2 } ${ x._1 }""").mkString("\n  ") }""".stripMargin)
-
-  private val noVariants = results.filter(_.nVariants == 0).map(_.file)
-  if (noVariants.nonEmpty)
-    fatal(
-      s"""The following GEN files contain no variants:
-         |  ${ noVariants.mkString("\n  ") })""".stripMargin)
-
-  private val nVariants = results.map(_.nVariants).sum
-
-  info(s"Number of GEN files parsed: ${ results.length }")
-  info(s"Number of variants in all GEN files: $nVariants")
-  info(s"Number of samples in GEN files: $nSamples")
+  def nSamples: Int = samples.length
 
   def columnCount: Option[Int] = Some(nSamples)
 
   def partitionCounts: Option[IndexedSeq[Long]] = None
 
-  def fullMatrixType: MatrixType = MatrixType(
-    globalType = TStruct.empty,
-    colKey = Array("s"),
-    colType = TStruct("s" -> TString),
-    rowKey = Array("locus", "alleles"),
-    rowType = TStruct(
-      "locus" -> TLocus.schemaFromRG(referenceGenome),
-      "alleles" -> TArray(TString),
-      "rsid" -> TString, "varid" -> TString),
-    entryType = TStruct("GT" -> TCall,
-      "GP" -> TArray(TFloat64)))
+  def rowAndGlobalPTypes(context: ExecuteContext, requestedType: TableType): (PStruct, PStruct) = {
+    requestedType.canonicalRowPType -> PType.canonical(requestedType.globalType).asInstanceOf[PStruct]
+  }
 
   def apply(tr: TableRead, ctx: ExecuteContext): TableValue = {
+    val sc = SparkBackend.sparkContext("MatrixGENReader.apply")
     val rdd =
       if (tr.dropRows)
-        HailContext.get.sc.emptyRDD[(Annotation, Iterable[Annotation])]
+        sc.emptyRDD[(Annotation, Iterable[Annotation])]
       else
-        HailContext.get.sc.union(results.map(_.rdd))
+        sc.union(results.map(_.rdd))
 
     val requestedType = tr.typ
     val requestedRowType = requestedType.rowType
@@ -192,12 +221,10 @@ case class MatrixGENReader(
     val gpType = requestedEntryType.fieldOption("GP").map(_.typ)
 
     val localRVDType = tr.typ.canonicalRVDType
-    val rvd = RVD.coerce(
+    val rvd = RVD.coerce(ctx,
       localRVDType,
       ContextRDD.weaken(rdd).cmapPartitions { (ctx, it) =>
-        val region = ctx.region
-        val rvb = new RegionValueBuilder(region)
-        val rv = RegionValue(region)
+        val rvb = ctx.rvb
 
         it.map { case (va, gs) =>
 
@@ -223,14 +250,25 @@ case class MatrixGENReader(
             rvb.endArray()
           }
           rvb.endStruct()
-          rv.setOffset(rvb.end())
-          rv
+
+          rvb.end()
         }
-      },
-      ctx)
+      })
 
-    val globalValue = makeGlobalValue(ctx, requestedType, samples.map(Row(_)))
+    val globalValue = makeGlobalValue(ctx, requestedType.globalType, samples.map(Row(_)))
 
-    TableValue(tr.typ, globalValue, rvd)
+    TableValue(ctx, tr.typ, globalValue, rvd)
+  }
+
+  override def toJValue: JValue = {
+    implicit val formats: Formats = DefaultFormats
+    decomposeWithName(params, "MatrixGENReader")
+  }
+
+  override def hashCode(): Int = params.hashCode()
+
+  override def equals(that: Any): Boolean = that match {
+    case that: MatrixGENReader => params == that.params
+    case _ => false
   }
 }

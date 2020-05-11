@@ -35,7 +35,7 @@ class ValueIRTests(unittest.TestCase):
             resource('backward_compatability/1.0.0/matrix_table/0.hmt'), None, False),
             False, False)
 
-        block_matrix_read = ir.BlockMatrixRead(ir.BlockMatrixNativeReader('fake_file_path'))
+        block_matrix_read = ir.BlockMatrixRead(ir.BlockMatrixNativeReader(resource('blockmatrix_example/0')))
 
         value_irs = [
             i, ir.I64(5), ir.F32(3.14), ir.F64(3.14), s, ir.TrueIR(), ir.FalseIR(), ir.Void(),
@@ -101,17 +101,17 @@ class ValueIRTests(unittest.TestCase):
             ir.MatrixToValueApply(matrix_read, {'name': 'ForceCountMatrixTable'}),
             ir.TableAggregate(table, ir.MakeStruct([('foo', ir.ApplyAggOp('Collect', [], [ir.I32(0)]))])),
             ir.TableWrite(table, ir.TableNativeWriter(new_temp_file(), False, True, "fake_codec_spec$$")),
-            ir.TableWrite(table, ir.TableTextWriter(new_temp_file(), None, True, 0, ",")),
+            ir.TableWrite(table, ir.TableTextWriter(new_temp_file(), None, True, "concatenated", ",")),
             ir.MatrixAggregate(matrix_read, ir.MakeStruct([('foo', ir.ApplyAggOp('Collect', [], [ir.I32(0)]))])),
             ir.MatrixWrite(matrix_read, ir.MatrixNativeWriter(new_temp_file(), False, False, "", None, None)),
             ir.MatrixWrite(matrix_read, ir.MatrixNativeWriter(new_temp_file(), False, False, "",
                                                               '[{"start":{"row_idx":0},"end":{"row_idx": 10},"includeStart":true,"includeEnd":false}]',
                                                               hl.dtype('array<interval<struct{row_idx:int32}>>'))),
-            ir.MatrixWrite(matrix_read, ir.MatrixVCFWriter(new_temp_file(), None, False, None)),
+            ir.MatrixWrite(matrix_read, ir.MatrixVCFWriter(new_temp_file(), None, ir.ExportType.CONCATENATED, None)),
             ir.MatrixWrite(matrix_read, ir.MatrixGENWriter(new_temp_file(), 4)),
             ir.MatrixWrite(matrix_read, ir.MatrixPLINKWriter(new_temp_file())),
             ir.MatrixMultiWrite([matrix_read, matrix_read], ir.MatrixNativeMultiWriter(new_temp_file(), False, False)),
-            ir.BlockMatrixWrite(block_matrix_read, ir.BlockMatrixNativeWriter('fake_file_path', False, False, False)),
+            ir.BlockMatrixWrite(block_matrix_read, ir.BlockMatrixNativeWriter('fake.bm', False, False, False)),
             ir.LiftMeOut(ir.I32(1)),
             ir.BlockMatrixWrite(block_matrix_read, ir.BlockMatrixPersistWriter('x', 'MEMORY_ONLY')),
             ir.UnpersistBlockMatrix(block_matrix_read),
@@ -119,6 +119,7 @@ class ValueIRTests(unittest.TestCase):
 
         return value_irs
 
+    @skip_unless_spark_backend()
     def test_parses(self):
         env = {'c': hl.tbool,
                'a': hl.tarray(hl.tint32),
@@ -132,9 +133,8 @@ class ValueIRTests(unittest.TestCase):
                't': hl.ttuple(hl.tint32, hl.tint64, hl.tfloat64),
                'call': hl.tcall,
                'x': hl.tint32}
-        env = {name: t._parsable_string() for name, t in env.items()}
         for x in self.value_irs():
-            Env.hail().expr.ir.IRParser.parse_value_ir(str(x), env, {})
+            Env.spark_backend('ValueIRTests.test_parses')._parse_value_ir(str(x), env)
 
     def test_copies(self):
         for x in self.value_irs():
@@ -144,7 +144,6 @@ class ValueIRTests(unittest.TestCase):
 
 
 class TableIRTests(unittest.TestCase):
-
     def table_irs(self):
         b = ir.TrueIR()
         table_read = ir.TableRead(
@@ -155,7 +154,7 @@ class TableIRTests(unittest.TestCase):
             ir.MatrixNativeReader(resource('backward_compatability/1.0.0/matrix_table/0.hmt'), None, False),
             False, False)
 
-        block_matrix_read = ir.BlockMatrixRead(ir.BlockMatrixNativeReader('fake_file_path'))
+        block_matrix_read = ir.BlockMatrixRead(ir.BlockMatrixNativeReader(resource('blockmatrix_example/0')))
 
         aa = hl.literal([[0.00],[0.01],[0.02]])._ir
 
@@ -192,6 +191,7 @@ class TableIRTests(unittest.TestCase):
                     ('foo', ir.NA(hl.tarray(hl.tint32)))])),
             ir.TableRange(100, 10),
             ir.TableRepartition(table_read, 10, ir.RepartitionStrategy.COALESCE),
+            ir.TableGroupWithinPartitions(table_read, 'grouped', 3),
             ir.TableUnion(
                 [ir.TableRange(100, 10), ir.TableRange(50, 10)]),
             ir.TableExplode(table_read, ['mset']),
@@ -209,9 +209,10 @@ class TableIRTests(unittest.TestCase):
 
         return table_irs
 
+    @skip_unless_spark_backend()
     def test_parses(self):
         for x in self.table_irs():
-            Env.hail().expr.ir.IRParser.parse_table_ir(str(x))
+            Env.spark_backend('TableIRTests.test_parses')._parse_table_ir(str(x))
 
 
 class MatrixIRTests(unittest.TestCase):
@@ -269,10 +270,11 @@ class MatrixIRTests(unittest.TestCase):
 
         return matrix_irs
 
+    @skip_unless_spark_backend()
     def test_parses(self):
         for x in self.matrix_irs():
             try:
-                Env.hail().expr.ir.IRParser.parse_matrix_ir(str(x))
+                Env.spark_backend('MatrixIRTests.test_parses')._parse_matrix_ir(str(x))
             except Exception as e:
                 raise ValueError(str(x)) from e
 
@@ -344,9 +346,10 @@ class BlockMatrixIRTests(unittest.TestCase):
             slice_bm
         ]
 
+    @skip_unless_spark_backend()
     def test_parses(self):
         for x in self.blockmatrix_irs():
-            Env.hail().expr.ir.IRParser.parse_blockmatrix_ir(str(x))
+            Env.spark_backend('BlockMatrixIRTests.test_parses')._parse_blockmatrix_ir(str(x))
 
 
 class ValueTests(unittest.TestCase):

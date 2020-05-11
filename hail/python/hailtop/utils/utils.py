@@ -1,3 +1,4 @@
+import os
 import errno
 import random
 import logging
@@ -5,6 +6,7 @@ import asyncio
 import aiohttp
 from aiohttp import web
 import urllib3
+import secrets
 import socket
 import requests
 import google.auth.exceptions
@@ -20,6 +22,35 @@ RETRY_FUNCTION_SCRIPT = """function retry() {
         (sleep 2 && "$@") ||
         (sleep 5 && "$@")
 }"""
+
+
+def flatten(xxs):
+    return [x for xs in xxs for x in xs]
+
+
+def first_extant_file(*files):
+    for f in files:
+        if f is not None and os.path.isfile(f):
+            return f
+    return None
+
+
+def secret_alnum_string(n=22, *, case=None):
+    # 22 characters is math.log(62 ** 22, 2) == ~130 bits of randomness. OWASP
+    # recommends at least 128 bits:
+    # https://owasp.org/www-community/vulnerabilities/Insufficient_Session-ID_Length
+    numbers = '0123456789'
+    upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    lower = 'abcdefghijklmnopqrstuvwxyz'
+    if case is None:
+        alphabet = numbers + upper + lower
+    elif case == 'upper':
+        alphabet = numbers + upper
+    elif case == 'lower':
+        alphabet = numbers + lower
+    else:
+        raise ValueError(f'invalid argument for case {case}')
+    return ''.join([secrets.choice(alphabet) for _ in range(n)])
 
 
 def grouped(n, ls):
@@ -161,6 +192,11 @@ class WaitableSharedPool:
         await self._done.wait()
 
 
+RETRYABLE_HTTP_STATUS_CODES = {408, 500, 502, 503, 504}
+if os.environ.get('HAIL_DONT_RETRY_500') == '1':
+    RETRYABLE_HTTP_STATUS_CODES.remove(500)
+
+
 def is_transient_error(e):
     # observed exceptions:
     #
@@ -206,16 +242,16 @@ def is_transient_error(e):
     #
     # aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host batch.pr-6925-default-s24o4bgat8e8:80 ssl:None [Connect call failed ('10.36.7.86', 80)]
     if isinstance(e, aiohttp.ClientResponseError) and (
-            e.status in (408, 500, 502, 503, 504)):
+            e.status in RETRYABLE_HTTP_STATUS_CODES):
         # nginx returns 502 if it cannot connect to the upstream server
         # 408 request timeout, 500 internal server error, 502 bad gateway
         # 503 service unavailable, 504 gateway timeout
         return True
-    if isinstance(e, aiohttp.ClientOSError) and (
-            e.errno == errno.ETIMEDOUT or
-            e.errno == errno.ECONNREFUSED or
-            e.errno == errno.EHOSTUNREACH or
-            e.errno == errno.ECONNRESET):
+    if (isinstance(e, aiohttp.ClientOSError)
+            and (e.errno == errno.ETIMEDOUT
+                 or e.errno == errno.ECONNREFUSED
+                 or e.errno == errno.EHOSTUNREACH
+                 or e.errno == errno.ECONNRESET)):
         return True
     if isinstance(e, aiohttp.ServerTimeoutError):
         return True
@@ -225,11 +261,11 @@ def is_transient_error(e):
         return True
     if isinstance(e, aiohttp.client_exceptions.ClientConnectorError):
         return is_transient_error(e.os_error)
-    if isinstance(e, OSError) and (
-            e.errno == errno.ETIMEDOUT or
-            e.errno == errno.ECONNREFUSED or
-            e.errno == errno.EHOSTUNREACH or
-            e.errno == errno.ECONNRESET):
+    if (isinstance(e, OSError)
+            and (e.errno == errno.ETIMEDOUT
+                 or e.errno == errno.ECONNREFUSED
+                 or e.errno == errno.EHOSTUNREACH
+                 or e.errno == errno.ECONNRESET)):
         return True
     if isinstance(e, urllib3.exceptions.ReadTimeoutError):
         return True
@@ -323,6 +359,22 @@ async def request_raise_transient_errors(session, method, url, **kwargs):
             log.exception('request failed with transient exception: {method} {url}')
             raise web.HTTPServiceUnavailable()
         raise
+
+
+def retry_response_returning_functions(fun, *args, **kwargs):
+    delay = 0.1
+    errors = 0
+    response = sync_retry_transient_errors(
+        fun, *args, **kwargs)
+    while response.status_code in RETRYABLE_HTTP_STATUS_CODES:
+        errors += 1
+        if errors % 10 == 0:
+            log.warning(f'encountered {errors} bad status codes, most recent '
+                        f'one was {response.status_code}', exc_info=True)
+        response = sync_retry_transient_errors(
+            fun, *args, **kwargs)
+        delay = sync_sleep_and_backoff(delay)
+    return response
 
 
 async def collect_agen(agen):

@@ -79,13 +79,18 @@ package object ir {
 
   private[ir] def coerce[T <: PType](x: PType): T = types.coerce[T](x)
 
-  def invoke(name: String, rt: Type, args: IR*): IR = IRFunctionRegistry.lookupConversion(name, rt, args.map(_.typ)) match {
-    case Some(f) => f(args)
-    case None => fatal(s"no conversion found for $name(${args.map(_.typ).mkString(", ")}) => $rt")
+  private[ir] def coerce[T <: BaseTypeWithRequiredness](x: BaseTypeWithRequiredness): T = types.coerce[T](x)
+
+  def invoke(name: String, rt: Type, typeArgs: Array[Type], args: IR*): IR = IRFunctionRegistry.lookupConversion(name, rt, typeArgs, args.map(_.typ)) match {
+    case Some(f) => f(typeArgs, args)
+    case None => fatal(s"no conversion found for $name(${typeArgs.mkString(", ")}, ${args.map(_.typ).mkString(", ")}) => $rt")
   }
 
-  def invokeSeeded(name: String, rt: Type, args: IR*): IR = IRFunctionRegistry.lookupConversion(name, rt, args.init.map(_.typ)) match {
-    case Some(f) => f(args)
+  def invoke(name: String, rt: Type, args: IR*): IR =
+    invoke(name, rt, Array.empty[Type], args:_*)
+
+  def invokeSeeded(name: String, rt: Type, args: IR*): IR = IRFunctionRegistry.lookupConversion(name, rt, Array.empty[Type], args.init.map(_.typ)) match {
+    case Some(f) => f(Array.empty[Type], args)
     case None => fatal(s"no conversion found for $name(${args.map(_.typ).mkString(", ")}) => $rt")
   }
 
@@ -108,10 +113,43 @@ package object ir {
     case TFloat64 => F64(0d)
   }
 
+  def bindIRs(values: IR*)(body: Seq[Ref] => IR): IR = {
+    val valuesArray = values.toArray
+    val refs = values.map(v => Ref(genUID(), v.typ))
+    values.indices.foldLeft(body(refs)) { case (acc, i) => Let(refs(i).name, valuesArray(i), acc) }
+  }
 
-  def mapIR(stream: IR)(f: IR => IR): IR = {
+  def bindIR(v: IR)(body: Ref => IR): IR = {
+    val ref = Ref(genUID(), v.typ)
+    Let(ref.name, v, body(ref))
+  }
+
+  def maxIR(a: IR, b: IR): IR = {
+    If(a > b, a, b)
+  }
+
+  def minIR(a: IR, b: IR): IR = {
+    If(a < b, a, b)
+  }
+
+  def mapIR(stream: IR)(f: Ref => IR): IR = {
     val ref = Ref(genUID(), coerce[TStream](stream.typ).elementType)
     StreamMap(stream, ref.name, f(ref))
+  }
+
+  def flatMapIR(stream: IR)(f: Ref => IR): IR = {
+    val ref = Ref(genUID(), coerce[TStream](stream.typ).elementType)
+    StreamFlatMap(stream, ref.name, f(ref))
+  }
+
+  def foldIR(stream: IR, zero: IR)(f: (Ref, Ref) => IR): IR = {
+    val elt = Ref(genUID(), coerce[TStream](stream.typ).elementType)
+    val accum = Ref(genUID(), zero.typ)
+    StreamFold(stream, zero, accum.name, elt.name, f(accum, elt))
+  }
+
+  def streamSumIR(stream: IR): IR = {
+    foldIR(stream, 0){ case (accum, elt) => accum + elt}
   }
 
   def rangeIR(n: IR): IR = StreamRange(0, n, 1)
@@ -121,4 +159,16 @@ package object ir {
   implicit def toRichIndexedSeqEmitSettable(s: IndexedSeq[EmitSettable]): RichIndexedSeqEmitSettable = new RichIndexedSeqEmitSettable(s)
 
   implicit def emitValueToCode(ev: EmitValue): EmitCode = ev.get
+
+  implicit def toCodeParamType(ti: TypeInfo[_]): CodeParamType = CodeParamType(ti)
+
+  implicit def toEmitParamType(pt: PType): EmitParamType = EmitParamType(pt)
+
+  implicit def toCodeParam(c: Code[_]): CodeParam = CodeParam(c)
+
+  implicit def valueToCodeParam(v: Value[_]): CodeParam = CodeParam(v)
+
+  implicit def toEmitParam(ec: EmitCode): EmitParam = EmitParam(ec)
+
+  implicit def emitValueToEmitParam(ev: EmitValue): EmitParam = EmitParam(ev)
 }

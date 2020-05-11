@@ -989,6 +989,17 @@ class Tests(unittest.TestCase):
         self.assertAlmostEqual(r.multiple_p_value, 0.6331017)
         self.assertAlmostEqual(r.n, 5)
 
+        # swapping the intercept and t.x
+        r = t.aggregate(hl.struct(linreg=hl.agg.linreg(t.y, [t.x, 1]))).linreg
+        self.assertAlmostEqual(r.beta[1], 0.14069227)
+        self.assertAlmostEqual(r.beta[0], 0.32744807)
+        self.assertAlmostEqual(r.standard_error[1], 0.59410817)
+        self.assertAlmostEqual(r.standard_error[0], 0.61833778)
+        self.assertAlmostEqual(r.t_stat[1], 0.23681254)
+        self.assertAlmostEqual(r.t_stat[0], 0.52956181)
+        self.assertAlmostEqual(r.p_value[1], 0.82805147)
+        self.assertAlmostEqual(r.p_value[0], 0.63310173)
+
         # weighted OLS
         t = t.add_index()
         r = t.aggregate(hl.struct(
@@ -2629,6 +2640,12 @@ class Tests(unittest.TestCase):
         li_parsed = hl.parse_locus_interval('(1:20-20)', invalid_missing=True)
         self.assertTrue(hl.eval(li_parsed) is None)
 
+    def test_locus_window_type(self):
+        locus = hl.parse_locus('chr16:1231231', reference_genome='GRCh38')
+        assert locus.dtype.reference_genome.name == 'GRCh38'
+        i = locus.window(10, 10)
+        assert i.dtype.point_type.reference_genome.name == 'GRCh38'
+
     def test_reference_genome_fns(self):
         self.assertTrue(hl.eval(hl.is_valid_contig('1', 'GRCh37')))
         self.assertFalse(hl.eval(hl.is_valid_contig('chr1', 'GRCh37')))
@@ -2846,6 +2863,12 @@ class Tests(unittest.TestCase):
         assert_min_reps_to(['GCTAA', 'GCAAA', 'G'], ['GCTAA', 'GCAAA', 'G'])
         assert_min_reps_to(['GCTAA', 'GCAAA', 'GCCAA'], ['T', 'A', 'C'], pos_change=2)
         assert_min_reps_to(['GCTAA', 'GCAAA', 'GCCAA', '*'], ['T', 'A', 'C', '*'], pos_change=2)
+
+    def test_min_rep_error(self):
+        with pytest.raises(hl.utils.FatalError, match='min_rep: found null allele'):
+            hl.eval(hl.min_rep(hl.locus('1', 100), ['A', hl.null('str')]))
+        with pytest.raises(hl.utils.FatalError, match='min_rep: expect at least one allele'):
+            hl.eval(hl.min_rep(hl.locus('1', 100), hl.empty_array('str')))
 
     def assert_evals_to(self, e, v):
         assert_evals_to(e, v)
@@ -3311,3 +3334,23 @@ class Tests(unittest.TestCase):
         assert np.allclose(hl.eval(np.float32(3.4)), 3.4)
         assert np.allclose(hl.eval(np.float64(8.89)), 8.89)
         assert hl.eval(np.str("cat")) == "cat"
+
+    def test_array_struct_error(self):
+        a = hl.array([hl.struct(a=5)])
+        with pytest.raises(AttributeError, match='ArrayStructExpression instance has no field, method, or property'):
+            a.x
+
+    def test_parse_json(self):
+        values = [
+            hl.null('int32'),
+            hl.null('str'),
+            hl.null('struct{a:int32,b:str}'),
+            hl.locus('1', 10000),
+            hl.set({'x', 'y'}),
+            hl.array([1, 2, hl.null('int32')]),
+            hl.call(0, 2, phased=True),
+            hl.locus_interval('1', 10000, 10005),
+            hl.struct(foo='bar'),
+            hl.tuple([1, 2, 'str'])
+        ]
+        assert hl.eval(hl._compare(hl.tuple(values), hl.tuple(hl.parse_json(hl.json(v), v.dtype) for v in values)) == 0)

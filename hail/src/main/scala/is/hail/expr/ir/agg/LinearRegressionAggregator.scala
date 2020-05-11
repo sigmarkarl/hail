@@ -3,7 +3,7 @@ package is.hail.expr.ir.agg
 import breeze.linalg.{DenseMatrix, DenseVector, diag, inv}
 import is.hail.annotations.{Region, RegionValueBuilder, StagedRegionValueBuilder, UnsafeRow}
 import is.hail.asm4s._
-import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitMethodBuilder}
+import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder, EmitMethodBuilder}
 import is.hail.expr.types.physical._
 import is.hail.utils.FastIndexedSeq
 
@@ -87,8 +87,8 @@ class LinearRegressionAggregator(yt: PFloat64, xt: PCanonicalArray) extends Stag
 
   override def resultType: PType = LinearRegressionAggregator.resultType
 
-  def createState(cb: EmitClassBuilder[_]): State =
-    new TypedRegionBackedAggState(stateType, cb)
+  def createState(cb: EmitCodeBuilder): State =
+    new TypedRegionBackedAggState(stateType, cb.emb.ecb)
 
   def initOpF(state: State)(mb: EmitMethodBuilder[_], k: Code[Int], k0: Code[Int]): Code[Unit] =
     Code.memoize(k, "lra_init_k", k0, "lra_init_k0") { (k, k0) =>
@@ -110,10 +110,10 @@ class LinearRegressionAggregator(yt: PFloat64, xt: PCanonicalArray) extends Stag
           k0))
     }
 
-  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
-    val _initOpF = state.cb.wrapInEmitMethod[Int, Int, Unit]("linregInitOp", initOpF(state))
+  protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
+    val _initOpF = state.kb.wrapInEmitMethod[Int, Int, Unit]("linregInitOp", initOpF(state))
     val Array(kt, k0t) = init
-    (Code(kt.setup, kt.m) || Code(k0t.setup, k0t.m)).mux(
+    cb += (Code(kt.setup, kt.m) || Code(k0t.setup, k0t.m)).mux(
       Code._fatal[Unit]("linreg: init args may not be missing"),
       _initOpF(coerce[Int](kt.v), coerce[Int](k0t.v)))
   }
@@ -159,14 +159,14 @@ class LinearRegressionAggregator(yt: PFloat64, xt: PCanonicalArray) extends Stag
           i += 1,
           xptr := xptr + scalar.byteSize))))
 
-      xt.anyMissing(mb, x).mux(Code._empty, body)
+      xt.hasMissingValues(x).mux(Code._empty, body)
     }
   }
 
-  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
-    val _seqOpF = state.cb.wrapInEmitMethod[Double, Long, Unit]("linregSeqOp", seqOpF(state))
+  protected def _seqOp(cb: EmitCodeBuilder, state: State, seq: Array[EmitCode]): Unit = {
+    val _seqOpF = state.kb.wrapInEmitMethod[Double, Long, Unit]("linregSeqOp", seqOpF(state))
     val Array(y, x) = seq
-    (Code(y.setup, y.m) || Code(x.setup, x.m)).mux(
+    cb += (Code(y.setup, y.m) || Code(x.setup, x.m)).mux(
       Code._empty,
       _seqOpF(coerce[Double](y.v), coerce[Long](x.v)))
   }
@@ -207,14 +207,14 @@ class LinearRegressionAggregator(yt: PFloat64, xt: PCanonicalArray) extends Stag
         optr := optr + scalar.byteSize))))
   }
 
-  def combOp(state: State, other: State, dummy: Boolean): Code[Unit] = {
-    state.cb.wrapInEmitMethod[Unit]("linregCombOp", combOpF(state, other))
+  protected def _combOp(cb: EmitCodeBuilder, state: State, other: State): Unit = {
+    cb += state.kb.wrapInEmitMethod[Unit]("linregCombOp", combOpF(state, other))
   }
 
-  def result(state: State, srvb: StagedRegionValueBuilder, dummy: Boolean): Code[Unit] = {
-    val res = state.cb.genFieldThisRef[Long]()
-    coerce[Unit](Code(
-      res := Code.invokeScalaObject[Region, Long, Long, Int, Long](LinearRegressionAggregator.getClass, "computeResult",
+  protected def _result(cb: EmitCodeBuilder, state: State, srvb: StagedRegionValueBuilder): Unit = {
+    val res = state.kb.genFieldThisRef[Long]()
+    cb += coerce[Unit](Code(
+      res := Code.invokeScalaObject4[Region, Long, Long, Int, Long](LinearRegressionAggregator.getClass, "computeResult",
         srvb.region,
         stateType.loadField(state.off, 0),
         stateType.loadField(state.off, 1),

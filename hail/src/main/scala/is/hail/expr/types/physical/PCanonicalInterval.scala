@@ -4,6 +4,7 @@ import is.hail.annotations._
 import is.hail.asm4s._
 import is.hail.expr.ir.{EmitCodeBuilder, EmitMethodBuilder, IEmitCode}
 import is.hail.expr.types.virtual.{TInterval, Type}
+import is.hail.utils.FastIndexedSeq
 
 final case class PCanonicalInterval(pointType: PType, override val required: Boolean = false) extends PInterval {
     def _asIdent = s"interval_of_${pointType.asIdent}"
@@ -14,7 +15,7 @@ final case class PCanonicalInterval(pointType: PType, override val required: Boo
       sb.append("]")
     }
 
-    override val representation: PStruct = PStruct(
+    override val representation: PStruct = PCanonicalStruct(
       required,
       "start" -> pointType,
       "end" -> pointType,
@@ -60,7 +61,7 @@ final case class PCanonicalInterval(pointType: PType, override val required: Boo
 }
 
 object PCanonicalIntervalSettable {
-  def apply(sb: SettableBuilder, pt: PInterval, name: String): PCanonicalIntervalSettable = {
+  def apply(sb: SettableBuilder, pt: PCanonicalInterval, name: String): PCanonicalIntervalSettable = {
     new PCanonicalIntervalSettable(pt,
       sb.newSettable[Long](s"${ name }_a"),
       sb.newSettable[Boolean](s"${ name }_includes_start"),
@@ -69,12 +70,14 @@ object PCanonicalIntervalSettable {
 }
 
 class PCanonicalIntervalSettable(
-  val pt: PInterval,
+  val pt: PCanonicalInterval,
   a: Settable[Long],
   val includesStart: Settable[Boolean],
   val includesEnd: Settable[Boolean]
 ) extends PIntervalValue with PSettable {
   def get: PIntervalCode = new PCanonicalIntervalCode(pt, a)
+
+  def settableTuple(): IndexedSeq[Settable[_]] = FastIndexedSeq(a, includesStart, includesEnd)
 
   def loadStart(cb: EmitCodeBuilder): IEmitCode =
     IEmitCode(cb,
@@ -94,8 +97,10 @@ class PCanonicalIntervalSettable(
   }
 }
 
-class PCanonicalIntervalCode(val pt: PInterval, val a: Code[Long]) extends PIntervalCode {
+class PCanonicalIntervalCode(val pt: PCanonicalInterval, val a: Code[Long]) extends PIntervalCode {
   def code: Code[_] = a
+
+  def codeTuple(): IndexedSeq[Code[_]] = FastIndexedSeq(a)
 
   def includesStart(): Code[Boolean] = pt.includesStart(a)
 

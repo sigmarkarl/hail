@@ -20,45 +20,45 @@ class MonoidAggregator(monoid: StagedMonoidSpec) extends StagedAggregator {
   val typ: PType = monoid.typ
   val resultType: PType = typ.setRequired(monoid.neutral.isDefined)
 
-  def createState(cb: EmitClassBuilder[_]): State =
-    new PrimitiveRVAState(Array(typ.setRequired(monoid.neutral.isDefined)), cb)
+  def createState(cb: EmitCodeBuilder): State =
+    new PrimitiveRVAState(Array(typ.setRequired(monoid.neutral.isDefined)), cb.emb.ecb)
 
-  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
+  protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     assert(init.length == 0)
     val (mOpt, v, _) = state.fields(0)
-    (mOpt, monoid.neutral) match {
+    cb += { (mOpt, monoid.neutral) match {
       case (Some(m), _)  => m.store(true)
       case (_, Some(v0)) => v.storeAny(v0)
-    }
+    }}
   }
 
-  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
+  protected def _seqOp(cb: EmitCodeBuilder, state: State, seq: Array[EmitCode]): Unit = {
     val Array(elt) = seq
     val (mOpt, v, _) = state.fields(0)
-    val eltm = state.cb.genFieldThisRef[Boolean]()
-    val eltv = state.cb.genFieldThisRef()(typeToTypeInfo(typ))
-    Code(elt.setup,
+    val eltm = state.kb.genFieldThisRef[Boolean]()
+    val eltv = state.kb.genFieldThisRef()(typeToTypeInfo(typ))
+    cb += Code(elt.setup,
       eltm := elt.m,
       eltm.mux(Code._empty, eltv := elt.value),
       combine(mOpt, v, Some(eltm), eltv)
     )
   }
 
-  def combOp(state: State, other: State, dummy: Boolean): Code[Unit] = {
+  protected def _combOp(cb: EmitCodeBuilder, state: State, other: State): Unit = {
     val (m1, v1, _) = state.fields(0)
     val (m2, v2, _) = other.fields(0)
-    combine(m1, v1, m2.map(_.load), v2.load)
+    cb += combine(m1, v1, m2.map(_.load), v2.load)
   }
 
-  def result(state: State, srvb: StagedRegionValueBuilder, dummy: Boolean): Code[Unit] = {
+  protected def _result(cb: EmitCodeBuilder, state: State, srvb: StagedRegionValueBuilder): Unit = {
     val (mOpt, v, _) = state.fields(0)
-    mOpt match {
+    cb += { mOpt match {
       case None => srvb.addIRIntermediate(typ)(v)
       case Some(m) =>
         m.mux(
           srvb.setMissing(),
           srvb.addIRIntermediate(typ)(v))
-    }
+    }}
   }
 
   private def combine(
@@ -100,10 +100,10 @@ class ComparisonMonoid(val typ: PType, val functionName: String) extends StagedM
   def neutral: Option[Code[_]] = None
 
   private def cmp[T](v1: Code[T], v2: Code[T])(implicit tct: ClassTag[T]): Code[T] =
-    Code.invokeStatic[Math,T,T,T](functionName, v1, v2)
+    Code.invokeStatic2[Math,T,T,T](functionName, v1, v2)
 
   private def nancmp[T](v1: Code[T], v2: Code[T])(implicit tct: ClassTag[T]): Code[T] =
-    Code.invokeScalaObject[T,T,T](UtilFunctions.getClass, "nan" + functionName, v1, v2)
+    Code.invokeScalaObject2[T,T,T](UtilFunctions.getClass, "nan" + functionName, v1, v2)
 
   def apply(v1: Code[_], v2: Code[_]): Code[_] = typ match {
     case _: PInt32 => cmp[Int](coerce(v1), coerce(v2))

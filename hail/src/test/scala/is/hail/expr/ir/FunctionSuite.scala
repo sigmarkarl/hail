@@ -27,14 +27,14 @@ class ScalaTestCompanion {
 
 object TestRegisterFunctions extends RegistryFunctions {
   def registerAll() {
-    registerIR("addone", TInt32, TInt32)(ApplyBinaryPrimOp(Add(), _, I32(1)))
+    registerIR1("addone", TInt32, TInt32)((_, a) => ApplyBinaryPrimOp(Add(), a, I32(1)))
     registerJavaStaticFunction("compare", Array(TInt32, TInt32), TInt32, null)(classOf[java.lang.Integer], "compare")
     registerScalaFunction("foobar1", Array(), TInt32, null)(ScalaTestObject.getClass, "testFunction")
     registerScalaFunction("foobar2", Array(), TInt32, null)(ScalaTestCompanion.getClass, "testFunction")
-    registerCode[Int, Int]("testCodeUnification", tnum("x"), tv("x", "int32"), tv("x"), null) {
+    registerCode2[Int, Int]("testCodeUnification", tnum("x"), tv("x", "int32"), tv("x"), null) {
       case (_, rt, (aT, a: Code[Int]), (bT, b: Code[Int])) => a + b
     }
-    registerCode("testCodeUnification2", tv("x"), tv("x"), null) { case (_, rt, (aT, a: Code[Long])) => a }
+    registerCode1("testCodeUnification2", tv("x"), tv("x"), null) { case (_, rt, (aT, a: Code[Long])) => a }
   }
 }
 
@@ -45,8 +45,10 @@ class FunctionSuite extends HailSuite {
 
   TestRegisterFunctions.registerAll()
 
-  def lookup(meth: String, rt: Type, types: Type*)(irs: IR*): IR =
-    IRFunctionRegistry.lookupConversion(meth, rt, types).get(irs)
+  def lookup(meth: String, rt: Type, types: Type*)(irs: IR*): IR = {
+    val l = IRFunctionRegistry.lookupConversion(meth, rt, types).get
+    l(Seq(), irs)
+  }
 
   @Test
   def testCodeFunction() {
@@ -96,15 +98,15 @@ class FunctionSuite extends HailSuite {
 
   @Test
   def testFunctionBuilderGetOrDefine() {
-    val fb = EmitFunctionBuilder[Int]("foo")
+    val fb = EmitFunctionBuilder[Int](ctx, "foo")
     val i = fb.genFieldThisRef[Int]()
-    val mb1 = fb.getOrGenMethod("foo", "foo", Array[TypeInfo[_]](), UnitInfo) { mb =>
+    val mb1 = fb.getOrGenEmitMethod("foo", "foo", FastIndexedSeq[ParamType](), UnitInfo) { mb =>
       mb.emit(i := i + 1)
     }
-    val mb2 = fb.getOrGenMethod("foo", "foo", Array[TypeInfo[_]](), UnitInfo) { mb =>
+    val mb2 = fb.getOrGenEmitMethod("foo", "foo", FastIndexedSeq[ParamType](), UnitInfo) { mb =>
       mb.emit(i := i - 100)
     }
-    fb.emit(Code(i := 0, mb1.invoke(), mb2.invoke(), i))
+    fb.emit(Code(i := 0, mb1.invokeCode(), mb2.invokeCode(), i))
     Region.scoped { r =>
 
       assert(fb.resultWithIndex().apply(0, r)() == 2)
@@ -112,7 +114,7 @@ class FunctionSuite extends HailSuite {
   }
 
   @Test def testFunctionBuilderWrapVoids() {
-    val fb = EmitFunctionBuilder[Int]("foo")
+    val fb = EmitFunctionBuilder[Int](ctx, "foo")
     val i = fb.genFieldThisRef[Int]()
 
     val codes = Array(
@@ -124,7 +126,11 @@ class FunctionSuite extends HailSuite {
       i := i + 6
     )
 
-    fb.emit(Code(i := 0, fb.wrapVoids(codes, "foo", 2), i))
+    fb.emitWithBuilder { cb =>
+      cb.assign(i, 0)
+      fb.wrapVoids(cb, codes.map(x => (cb: EmitCodeBuilder) => cb += x), "foo", 2)
+      i
+    }
     Region.smallScoped { r =>
       assert(fb.resultWithIndex().apply(0, r).apply() == 21)
 
@@ -132,20 +138,25 @@ class FunctionSuite extends HailSuite {
   }
 
   @Test def testFunctionBuilderWrapVoidsWithArgs() {
-    val fb = EmitFunctionBuilder[Int]("foo")
+    val fb = EmitFunctionBuilder[Int](ctx, "foo")
     val i = fb.newLocal[Int]()
     val j = fb.genFieldThisRef[Int]()
 
-    val codes = Array[Seq[Code[_]] => Code[Unit]](
-      { case Seq(ii: Code[Int@unchecked]) => j := j + const(1) * ii },
-      { case Seq(ii: Code[Int@unchecked]) => j := j + const(2) * ii },
-      { case Seq(ii: Code[Int@unchecked]) => j := j + const(3) * ii },
-      { case Seq(ii: Code[Int@unchecked]) => j := j + const(4) * ii },
-      { case Seq(ii: Code[Int@unchecked]) => j := j + const(5) * ii },
-      { case Seq(ii: Code[Int@unchecked]) => j := j + const(6) * ii }
+    val codes = Array[(EmitCodeBuilder, Seq[Code[_]]) => Unit](
+      { case (cb, Seq(ii: Code[Int@unchecked])) => cb += (j := j + const(1) * ii) },
+      { case (cb, Seq(ii: Code[Int@unchecked])) => cb += (j := j + const(2) * ii) },
+      { case (cb, Seq(ii: Code[Int@unchecked])) => cb += (j := j + const(3) * ii) },
+      { case (cb, Seq(ii: Code[Int@unchecked])) => cb += (j := j + const(4) * ii) },
+      { case (cb, Seq(ii: Code[Int@unchecked])) => cb += (j := j + const(5) * ii) },
+      { case (cb, Seq(ii: Code[Int@unchecked])) => cb += (j := j + const(6) * ii) }
     )
 
-    fb.emit(Code(j := 0, i := 1, fb.wrapVoidsWithArgs(codes, "foo", Array(IntInfo), Array(i.load()), 2), j))
+    fb.emitWithBuilder { cb =>
+      cb.assign(j, 0)
+      cb.assign(i, 1)
+      fb.wrapVoidsWithArgs(cb, codes, "foo", Array(IntInfo), Array(i.load()), 2)
+      j
+    }
     Region.smallScoped { r =>
       assert(fb.resultWithIndex().apply(0, r).apply() == 21)
     }

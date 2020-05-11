@@ -1,7 +1,7 @@
 package is.hail.sparkextras
 
 import is.hail.annotations._
-import is.hail.rvd.{RVD, RVDContext, RVDPartitioner, RVDType}
+import is.hail.rvd.{PartitionBoundOrdering, RVD, RVDContext, RVDPartitioner, RVDType}
 import is.hail.utils._
 import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
@@ -18,7 +18,7 @@ class OrderedDependency[T](
 }
 
 object RepartitionedOrderedRDD2 {
-  def apply(prev: RVD, newRangeBounds: IndexedSeq[Interval]): ContextRDD[RegionValue] =
+  def apply(prev: RVD, newRangeBounds: IndexedSeq[Interval]): ContextRDD[Long] =
     ContextRDD(new RepartitionedOrderedRDD2(prev, newRangeBounds))
 }
 
@@ -28,10 +28,11 @@ object RepartitionedOrderedRDD2 {
   * needed.
   */
 class RepartitionedOrderedRDD2 private (prev: RVD, newRangeBounds: IndexedSeq[Interval])
-  extends RDD[ContextRDD.ElementType[RegionValue]](prev.crdd.sparkContext, Nil) { // Nil since we implement getDependencies
+  extends RDD[ContextRDD.ElementType[Long]](prev.crdd.sparkContext, Nil) { // Nil since we implement getDependencies
 
-  val prevCRDD: ContextRDD[RegionValue] = prev.boundary.crdd
+  val prevCRDD: ContextRDD[Long] = prev.boundary.crdd
   val typ: RVDType = prev.typ
+  val kOrd: ExtendedOrdering = PartitionBoundOrdering(typ.kType.virtualType)
   val oldPartitionerBc: Broadcast[RVDPartitioner] = prev.partitioner.broadcast(prevCRDD.sparkContext)
   val newRangeBoundsBc: Broadcast[IndexedSeq[Interval]] = prevCRDD.sparkContext.broadcast(newRangeBounds)
 
@@ -46,9 +47,9 @@ class RepartitionedOrderedRDD2 private (prev: RVD, newRangeBounds: IndexedSeq[In
     }
   }
 
-  override def compute(partition: Partition, context: TaskContext): Iterator[RVDContext => Iterator[RegionValue]] = {
+  override def compute(partition: Partition, context: TaskContext): Iterator[RVDContext => Iterator[Long]] = {
     val ordPartition = partition.asInstanceOf[RepartitionedOrderedRDD2Partition]
-    val pord = typ.kType.virtualType.ordering.intervalEndpointOrdering
+    val pord = kOrd.intervalEndpointOrdering
     val range = ordPartition.range
     val ur = new UnsafeRow(typ.rowType)
     val key = new KeyedRow(ur, typ.kFieldIdx)
@@ -57,11 +58,11 @@ class RepartitionedOrderedRDD2 private (prev: RVD, newRangeBounds: IndexedSeq[In
       ordPartition.parents.iterator
         .flatMap { parentPartition =>
           prevCRDD.iterator(parentPartition, context).flatMap(_(ctx))
-        }.dropWhile { rv =>
-          ur.set(rv)
+        }.dropWhile { ptr =>
+          ur.set(ctx.r, ptr)
           pord.lt(key, range.left)
-        }.takeWhile { rv =>
-          ur.set(rv)
+        }.takeWhile { ptr =>
+          ur.set(ctx.r, ptr)
           pord.lteq(key, range.right)
         }
     }

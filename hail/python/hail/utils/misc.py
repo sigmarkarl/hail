@@ -1,8 +1,10 @@
 import atexit
 import datetime
+import string
 import difflib
 import shutil
 import tempfile
+import secrets
 from collections import defaultdict, Counter
 from random import Random
 import json
@@ -15,7 +17,7 @@ import numpy as np
 import hail
 import hail as hl
 from hail.typecheck import enumeration, typecheck, nullable
-from hail.utils.java import Env, joption, error
+from hail.utils.java import Env, error
 
 
 @typecheck(n_rows=int, n_cols=int, n_partitions=nullable(int))
@@ -152,8 +154,17 @@ def local_path_uri(path):
     return 'file://' + path
 
 
-def new_temp_file(suffix=None, prefix=None, n_char=10):
-    return Env.hc()._jhc.getTemporaryFile(n_char, joption(prefix), joption(suffix))
+def new_temp_file(prefix=None, extension=None):
+    tmpdir = Env.hc()._tmpdir
+    alphabet = string.ascii_letters + string.digits
+    token = ''.join([secrets.choice(alphabet) for _ in range(22)])
+
+    f = token
+    if prefix is not None:
+        f = f'{prefix}-{f}'
+    if extension is not None:
+        f = f'{f}.{extension}'
+    return f'{tmpdir}/{f}'
 
 
 def new_local_temp_dir(suffix=None, prefix=None, dir=None):
@@ -196,7 +207,7 @@ def get_obj_metadata(obj):
     from hail.matrixtable import MatrixTable, GroupedMatrixTable
     from hail.table import Table, GroupedTable
     from hail.utils import Struct
-    from hail.expr.expressions import StructExpression
+    from hail.expr.expressions import StructExpression, ArrayStructExpression, SetStructExpression
 
     def table_error(index_obj):
         def fmt_field(field):
@@ -231,6 +242,10 @@ def get_obj_metadata(obj):
         return 'Struct', Struct, struct_error(obj), False
     elif isinstance(obj, StructExpression):
         return 'StructExpression', StructExpression, struct_error(obj), True
+    elif isinstance(obj, ArrayStructExpression):
+        return 'ArrayStructExpression', StructExpression, struct_error(obj), True
+    elif isinstance(obj, SetStructExpression):
+        return 'SetStructExpression', StructExpression, struct_error(obj), True
     else:
         raise NotImplementedError(obj)
 
@@ -536,8 +551,8 @@ def parsable_strings(strs):
 
 def _dumps_partitions(partitions, row_key_type):
     parts_type = partitions.dtype
-    if not (isinstance(parts_type, hl.tarray) and
-            isinstance(parts_type.element_type, hl.tinterval)):
+    if not (isinstance(parts_type, hl.tarray)
+            and isinstance(parts_type.element_type, hl.tinterval)):
         raise ValueError(f'partitions type invalid: {parts_type} must be array of intervals')
 
     point_type = parts_type.element_type.point_type

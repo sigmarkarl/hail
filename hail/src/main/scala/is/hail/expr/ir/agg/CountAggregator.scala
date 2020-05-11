@@ -2,7 +2,7 @@ package is.hail.expr.ir.agg
 
 import is.hail.annotations.StagedRegionValueBuilder
 import is.hail.asm4s._
-import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitFunctionBuilder}
+import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder}
 import is.hail.expr.types.physical._
 
 object CountAggregator extends StagedAggregator {
@@ -10,29 +10,28 @@ object CountAggregator extends StagedAggregator {
 
   val resultType: PType = PInt64(true)
 
-  def createState(cb: EmitClassBuilder[_]): State = new PrimitiveRVAState(Array(PInt64(true)), cb)
+  def createState(cb: EmitCodeBuilder): State = new PrimitiveRVAState(Array(PInt64(true)), cb.emb.ecb)
 
-  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
+  protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     assert(init.length == 0)
     val (_, v, _) = state.fields(0)
-    v.storeAny(0L)
+    cb.assignAny(v, 0L)
   }
 
-  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
+  protected def _seqOp(cb: EmitCodeBuilder, state: State, seq: Array[EmitCode]): Unit = {
     assert(seq.length == 0)
     val (_, v, _) = state.fields(0)
-    v.storeAny(coerce[Long](v) + 1L)
+    cb.assignAny(v, coerce[Long](v) + 1L)
   }
 
-  def combOp(state: State, other: State, dummy: Boolean): Code[Unit] = {
+  protected def _combOp(cb: EmitCodeBuilder, state: State, other: State): Unit = {
     val (_, v1, _) = state.fields(0)
     val (_, v2, _) = other.fields(0)
-    v1.storeAny(coerce[Long](v1) + coerce[Long](v2))
+    cb.assignAny(v1, coerce[Long](v1) + coerce[Long](v2))
   }
 
-  def result(state: State, srvb: StagedRegionValueBuilder, dummy: Boolean): Code[Unit] = {
+  protected def _result(cb: EmitCodeBuilder, state: State, srvb: StagedRegionValueBuilder): Unit = {
     val (_, v, _) = state.fields(0)
-    srvb.addLong(coerce[Long](v))
+    cb += srvb.addLong(coerce[Long](v))
   }
 }
-

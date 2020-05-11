@@ -1,14 +1,15 @@
 package is.hail.expr.ir
 
 import is.hail.HailSuite
-import is.hail.annotations.{BroadcastIndexedSeq, BroadcastRow}
 import is.hail.expr.Nat
 import is.hail.expr.types._
+import is.hail.expr.types.physical.PStruct
 import is.hail.expr.types.virtual._
 import is.hail.methods.{ForceCountMatrixTable, ForceCountTable}
-import is.hail.rvd.{RVD, RVDType}
+import is.hail.rvd.RVD
 import is.hail.utils._
 import org.apache.spark.sql.Row
+import org.json4s.JValue
 import org.testng.annotations.{DataProvider, Test}
 
 import scala.collection.mutable
@@ -86,29 +87,37 @@ class PruneSuite extends HailSuite {
         Row(FastIndexedSeq(Row("hi", FastIndexedSeq(Row(1)), "bye", Row(2, FastIndexedSeq(Row("bar"))), "foo")), Row(5, 10))),
       None),
     FastIndexedSeq("3"),
-    false).execute(ctx), ctx)
+    false).execute(ctx))
 
   lazy val tr = TableRead(tab.typ, false, new TableReader {
+
+    def pathsUsed: Seq[String] = FastSeq()
+
     def apply(tr: TableRead, ctx: ExecuteContext): TableValue = ???
 
     def partitionCounts: Option[IndexedSeq[Long]] = ???
 
+    def rowAndGlobalPTypes(ctx: ExecuteContext, requestedType: TableType): (PStruct, PStruct) = ???
+
     def fullType: TableType = tab.typ
   })
 
-  val mType = MatrixType(
+  lazy val mType = MatrixType(
     TStruct("g1" -> TInt32, "g2" -> TFloat64),
     FastIndexedSeq("ck"),
     TStruct("ck" -> TString, "c2" -> TInt32, "c3" -> TArray(TStruct("cc" -> TInt32))),
     FastIndexedSeq("rk"),
     TStruct("rk" -> TInt32, "r2" -> TStruct("x" -> TInt32), "r3" -> TArray(TStruct("rr" -> TInt32))),
     TStruct("e1" -> TFloat64, "e2" -> TFloat64))
-  val mat = MatrixLiteral(mType,
-    RVD.empty(sc, mType.canonicalTableType.canonicalRVDType),
+  lazy val mat = MatrixLiteral(ctx,
+    mType,
+    RVD.empty(mType.canonicalTableType.canonicalRVDType),
     Row(1, 1.0),
     FastIndexedSeq(Row("1", 2, FastIndexedSeq(Row(3)))))
 
-  val mr = MatrixRead(mat.typ, false, false, new MatrixReader {
+  lazy val mr = MatrixRead(mat.typ, false, false, new MatrixReader {
+    def pathsUsed: Seq[String] = FastSeq()
+
     override def columnCount: Option[Int] = None
 
     def partitionCounts: Option[IndexedSeq[Long]] = None
@@ -116,9 +125,11 @@ class PruneSuite extends HailSuite {
     def fullMatrixType: MatrixType = mat.typ
 
     def lower(mr: MatrixRead): TableIR = ???
+
+    def toJValue: JValue = ???
   })
 
-  val emptyTableDep = TableType(TStruct.empty, FastIndexedSeq(), TStruct.empty)
+  lazy val emptyTableDep = TableType(TStruct.empty, FastIndexedSeq(), TStruct.empty)
 
   def tableRefBoolean(tt: TableType, fields: String*): IR = {
     var let: IR = True()
@@ -436,7 +447,7 @@ class PruneSuite extends HailSuite {
   }
 
   @Test def testMatrixAnnotateRowsTableMemo() {
-    val tl = TableLiteral(Interpret(MatrixRowsTable(mat), ctx), ctx)
+    val tl = TableLiteral(Interpret(MatrixRowsTable(mat), ctx))
     val mart = MatrixAnnotateRowsTable(mat, tl, "foo", product=false)
     checkMemo(mart, subsetMatrixTable(mart.typ, "va.foo.r3", "va.r3"),
       Array(subsetMatrixTable(mat.typ, "va.r3"), subsetTable(tl.typ, "row.r3")))
@@ -445,7 +456,7 @@ class PruneSuite extends HailSuite {
   @Test def testCollectColsByKeyMemo() {
     val ccbk = MatrixCollectColsByKey(mat)
     checkMemo(ccbk,
-      subsetMatrixTable(ccbk.typ, "g.e2", "sa.c2"),
+      subsetMatrixTable(ccbk.typ, "g.e2", "sa.c2", "NO_COL_KEY"),
       Array(subsetMatrixTable(mat.typ, "g.e2", "sa.c2")))
   }
 
@@ -566,9 +577,27 @@ class PruneSuite extends HailSuite {
     checkMemo(ArrayLen(arr), TInt32, Array(TArray(empty)))
   }
 
+  @Test def testStreamTakeMemo() {
+    checkMemo(StreamTake(st, I32(2)), TStream(justA), Array(TStream(justA), null))
+  }
+
+  @Test def testStreamDropMemo() {
+    checkMemo(StreamDrop(st, I32(2)), TStream(justA), Array(TStream(justA), null))
+  }
+
   @Test def testStreamMapMemo() {
     checkMemo(StreamMap(st, "foo", Ref("foo", ref.typ)),
       TStream(justB), Array(TStream(justB), null))
+  }
+
+  @Test def testStreamGroupedMemo() {
+    checkMemo(StreamGrouped(st, I32(2)),
+              TStream(TStream(justB)), Array(TStream(justB), null))
+  }
+
+  @Test def testStreamGroupByKeyMemo() {
+    checkMemo(StreamGroupByKey(st, FastIndexedSeq("a")),
+              TStream(TStream(justB)), Array(TStream(TStruct("a" -> TInt32, "b" -> TInt32)), null))
   }
 
   @Test def testStreamZipMemo() {
@@ -726,6 +755,20 @@ class PruneSuite extends HailSuite {
       TArray(TArray(TStruct("a" -> TInt32))),
       Array(TArray(TStruct("a" -> TInt32)),
         TArray(TStruct("a" -> TInt32))))
+  }
+
+  @Test def testCDAMemo() {
+    val ctxT = TStruct("a" -> TInt32, "b" -> TString)
+    val globT = TStruct("c" -> TInt64, "d" -> TFloat64)
+    val x = CollectDistributedArray(
+      NA(TStream(ctxT)),
+      NA(globT),
+      "ctx",
+      "glob",
+      MakeTuple.ordered(FastSeq(Ref("ctx", ctxT), Ref("glob", globT))))
+
+    checkMemo(x, TArray(TTuple(ctxT.typeAfterSelectNames(Array("a")), globT.typeAfterSelectNames(Array("c")))),
+      Array(TStream(ctxT.typeAfterSelectNames(Array("a"))), globT.typeAfterSelectNames(Array("c")), null))
   }
 
   @Test def testTableCountMemo() {
@@ -987,7 +1030,7 @@ class PruneSuite extends HailSuite {
   }
 
   @Test def testMatrixAnnotateRowsTableRebuild() {
-    val tl = TableLiteral(Interpret(MatrixRowsTable(mat), ctx), ctx)
+    val tl = TableLiteral(Interpret(MatrixRowsTable(mat), ctx))
     val mart = MatrixAnnotateRowsTable(mat, tl, "foo", product=false)
     checkRebuild(mart, subsetMatrixTable(mart.typ),
       (_: BaseIR, r: BaseIR) => {
@@ -1038,7 +1081,7 @@ class PruneSuite extends HailSuite {
     checkRebuild(AggLet("foo", NA(ref.typ),
       ApplyAggOp(FastIndexedSeq(), FastIndexedSeq(
         SelectFields(Ref("foo", ref.typ), Seq("a"))),
-        AggSignature(Collect(), FastIndexedSeq(), FastIndexedSeq(ref.typ))), false), subsetTS("b"),
+        AggSignature(Collect(), FastIndexedSeq(), FastIndexedSeq(ref.typ))), false), TArray(subsetTS("a")),
       (_: BaseIR, r: BaseIR) => {
         val ir = r.asInstanceOf[AggLet]
         ir.value.typ == subsetTS("a")
@@ -1053,12 +1096,44 @@ class PruneSuite extends HailSuite {
       })
   }
 
+  @Test def testStreamTakeRebuild() {
+    checkRebuild(StreamTake(MakeStream(Seq(NA(ts)), TStream(ts)), I32(2)), TStream(subsetTS("b")),
+                 (_: BaseIR, r: BaseIR) => {
+                   val ir = r.asInstanceOf[StreamTake]
+                   ir.a.typ == TStream(subsetTS("b"))
+                 })
+  }
+
+  @Test def testStreamDropRebuild() {
+    checkRebuild(StreamDrop(MakeStream(Seq(NA(ts)), TStream(ts)), I32(2)), TStream(subsetTS("b")),
+                 (_: BaseIR, r: BaseIR) => {
+                   val ir = r.asInstanceOf[StreamDrop]
+                   ir.a.typ == TStream(subsetTS("b"))
+                 })
+  }
+
   @Test def testStreamMapRebuild() {
     checkRebuild(StreamMap(MakeStream(Seq(NA(ts)), TStream(ts)), "x", Ref("x", ts)), TStream(subsetTS("b")),
       (_: BaseIR, r: BaseIR) => {
         val ir = r.asInstanceOf[StreamMap]
         ir.a.typ == TStream(subsetTS("b"))
       })
+  }
+
+  @Test def testStreamGroupedRebuild() {
+    checkRebuild(StreamGrouped(MakeStream(Seq(NA(ts)), TStream(ts)), I32(2)), TStream(TStream(subsetTS("b"))),
+      (_: BaseIR, r: BaseIR) => {
+        val ir = r.asInstanceOf[StreamGrouped]
+        ir.a.typ == TStream(subsetTS("b"))
+      })
+  }
+
+  @Test def testStreamGroupByKeyRebuild() {
+    checkRebuild(StreamGroupByKey(MakeStream(Seq(NA(ts)), TStream(ts)), FastIndexedSeq("a")), TStream(TStream(subsetTS("b"))),
+                 (_: BaseIR, r: BaseIR) => {
+                   val ir = r.asInstanceOf[StreamGroupByKey]
+                   ir.a.typ == TStream(subsetTS("a", "b"))
+                 })
   }
 
   @Test def testStreamZipRebuild() {
@@ -1164,6 +1239,29 @@ class PruneSuite extends HailSuite {
       })
   }
 
+  @Test def testCDARebuild() {
+    val ctxT = TStruct("a" -> TInt32, "b" -> TString)
+    val globT = TStruct("c" -> TInt64, "d" -> TFloat64)
+    val x = CollectDistributedArray(
+      NA(TStream(ctxT)),
+      NA(globT),
+      "ctx",
+      "glob",
+      MakeTuple.ordered(FastSeq(Ref("ctx", ctxT), Ref("glob", globT))))
+
+    val selectedCtxT = ctxT.typeAfterSelectNames(Array("a"))
+    val selectedGlobT = globT.typeAfterSelectNames(Array("c"))
+    checkRebuild(x, TArray(TTuple(selectedCtxT, selectedGlobT)), (_: BaseIR, r: BaseIR) => {
+      r == CollectDistributedArray(
+        NA(TStream(selectedCtxT)),
+        NA(selectedGlobT),
+        "ctx",
+        "glob",
+        MakeTuple.ordered(FastSeq(Ref("ctx", selectedCtxT), Ref("glob", selectedGlobT))))
+    })
+  }
+
+
   @Test def testTableAggregateRebuild() {
     val ta = TableAggregate(tr, tableRefBoolean(tr.typ, "row.2"))
     checkRebuild(ta, TBoolean,
@@ -1258,5 +1356,65 @@ class PruneSuite extends HailSuite {
       s"""Failure, supertype relationship not met
          | supertype: ${ t1.toPrettyString(0, true) }
          | subtype:   ${ t2.toPrettyString(0, true) }""".stripMargin)
+  }
+
+  @Test def testApplyScanOp() {
+    val x = Ref("x", TInt32)
+    val y = Ref("y", TInt32)
+    val collectScan = ApplyScanOp(
+      FastIndexedSeq(),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(Collect(), FastSeq(), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(collectScan, TArray(TStruct("y" -> TInt32)), { (_: BaseIR, reb: BaseIR) => reb.typ == TArray(TStruct("y" -> TInt32))})
+
+    val takeScan = ApplyScanOp(
+      FastIndexedSeq(I32(1)),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(Take(), FastSeq(TInt32), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(takeScan, TArray(TStruct("y" -> TInt32)), { (_: BaseIR, reb: BaseIR) => reb.typ == TArray(TStruct("y" -> TInt32))})
+
+    val prevnn = ApplyScanOp(
+      FastIndexedSeq(),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(PrevNonnull(), FastSeq(), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(prevnn, TStruct("y" -> TInt32), { (_: BaseIR, reb: BaseIR) => reb.typ == TStruct("y" -> TInt32)})
+
+    val takeByScan = ApplyScanOp(
+      FastIndexedSeq(I32(1)),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y))), MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(TakeBy(), FastSeq(TInt32), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32), TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(takeByScan, TArray(TStruct("y" -> TInt32)), { (_: BaseIR, reb: BaseIR) =>
+      val s = reb.asInstanceOf[ApplyScanOp]
+      s.seqOpArgs == FastIndexedSeq(MakeStruct(FastSeq(("y", y))), MakeStruct(FastSeq(("x", x), ("y", y))))})
+  }
+
+  @Test def testApplyAggOp() {
+    val x = Ref("x", TInt32)
+    val y = Ref("y", TInt32)
+    val collectAgg = ApplyAggOp(
+      FastIndexedSeq(),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(Collect(), FastSeq(), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(collectAgg, TArray(TStruct("y" -> TInt32)), { (_: BaseIR, reb: BaseIR) => reb.typ == TArray(TStruct("y" -> TInt32))})
+
+    val takeAgg = ApplyAggOp(
+      FastIndexedSeq(I32(1)),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(Take(), FastSeq(TInt32), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(takeAgg, TArray(TStruct("y" -> TInt32)), { (_: BaseIR, reb: BaseIR) => reb.typ == TArray(TStruct("y" -> TInt32))})
+
+    val prevnn = ApplyAggOp(
+      FastIndexedSeq(),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(PrevNonnull(), FastSeq(), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(prevnn, TStruct("y" -> TInt32), { (_: BaseIR, reb: BaseIR) => reb.typ == TStruct("y" -> TInt32)})
+
+    val takeByAgg = ApplyAggOp(
+      FastIndexedSeq(I32(1)),
+      FastIndexedSeq(MakeStruct(FastSeq(("x", x), ("y", y))), MakeStruct(FastSeq(("x", x), ("y", y)))),
+      AggSignature(TakeBy(), FastSeq(TInt32), FastSeq(TStruct("x" -> TInt32, "y" -> TInt32), TStruct("x" -> TInt32, "y" -> TInt32))))
+    checkRebuild(takeByAgg, TArray(TStruct("y" -> TInt32)), { (_: BaseIR, reb: BaseIR) =>
+      val a = reb.asInstanceOf[ApplyAggOp]
+      a.seqOpArgs == FastIndexedSeq(MakeStruct(FastSeq(("y", y))), MakeStruct(FastSeq(("x", x), ("y", y))))})
   }
 }

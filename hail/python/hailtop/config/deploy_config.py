@@ -2,6 +2,7 @@ import os
 import json
 import logging
 from aiohttp import web
+from hailtop.utils import first_extant_file
 
 log = logging.getLogger('gear')
 
@@ -13,10 +14,12 @@ class DeployConfig:
 
     @staticmethod
     def from_config_file(config_file=None):
-        if not config_file:
-            config_file = os.environ.get(
-                'HAIL_DEPLOY_CONFIG_FILE', os.path.expanduser('~/.hail/deploy-config.json'))
-        if os.path.isfile(config_file):
+        config_file = first_extant_file(
+            config_file,
+            os.environ.get('HAIL_DEPLOY_CONFIG_FILE'),
+            os.path.expanduser('~/.hail/deploy-config.json'),
+            '/deploy-config/deploy-config.json')
+        if config_file is not None:
             with open(config_file, 'r') as f:
                 config = json.loads(f.read())
         else:
@@ -44,7 +47,8 @@ class DeployConfig:
         return self._service_namespace.get(service, self._default_ns)
 
     def scheme(self, base_scheme='http'):
-        return (base_scheme + 's') if self._location == 'external' else base_scheme
+        # FIXME: should depend on ssl context
+        return (base_scheme + 's') if self._location in ('external', 'k8s') else base_scheme
 
     def domain(self, service):
         ns = self.service_ns(service)

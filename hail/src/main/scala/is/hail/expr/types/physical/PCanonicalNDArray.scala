@@ -2,7 +2,7 @@ package is.hail.expr.types.physical
 
 import is.hail.annotations.{Region, StagedRegionValueBuilder, UnsafeOrdering}
 import is.hail.asm4s.{Code, MethodBuilder, _}
-import is.hail.expr.ir.EmitMethodBuilder
+import is.hail.expr.ir.{EmitCodeBuilder, EmitMethodBuilder}
 import is.hail.expr.types.virtual.{TNDArray, Type}
 import is.hail.utils.FastIndexedSeq
 
@@ -17,29 +17,26 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     sb.append(s",$nDims]")
   }
 
-  @transient lazy val flags = new StaticallyKnownField(PInt32Required, off => Region.loadInt(representation.loadField(off, "flags")))
-  @transient lazy val offset = new StaticallyKnownField(
-    PInt32Required,
-    off => Region.loadInt(representation.loadField(off, "offset"))
-  )
   @transient lazy val shape = new StaticallyKnownField(
     PCanonicalTuple(true, Array.tabulate(nDims)(_ => PInt64Required):_*): PTuple,
     off => representation.loadField(off, "shape")
   )
+
+  def loadShape(off: Code[Long], idx: Int): Code[Long] =
+    shape.pType.types(idx).load(shape.pType.fieldOffset(shape.load(off), idx)).tcode[Long]
+
   @transient lazy val strides = new StaticallyKnownField(
     PCanonicalTuple(true, Array.tabulate(nDims)(_ => PInt64Required):_*): PTuple,
     (off) => representation.loadField(off, "strides")
   )
 
   @transient lazy val data: StaticallyKnownField[PArray, Long] = new StaticallyKnownField(
-    PArray(elementType, required = true),
+    PCanonicalArray(elementType, required = true),
     off => representation.loadField(off, "data")
   )
 
   lazy val representation: PStruct = {
-    PStruct(required,
-      ("flags", flags.pType),
-      ("offset", offset.pType),
+    PCanonicalStruct(required,
       ("shape", shape.pType),
       ("strides", strides.pType),
       ("data", data.pType))
@@ -67,7 +64,24 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     ))
   }
 
-  def makeDefaultStridesBuilder(sourceShapeArray: IndexedSeq[Code[Long]], mb: EmitMethodBuilder[_]): StagedRegionValueBuilder => Code[Unit] = { srvb =>
+  def makeColumnMajorStridesBuilder(sourceShapeArray: IndexedSeq[Code[Long]], mb: EmitMethodBuilder[_]): StagedRegionValueBuilder => Code[Unit] = { srvb =>
+    val runningProduct = mb.newLocal[Long]()
+    val tempShapeStorage = mb.newLocal[Long]()
+    Code(
+      srvb.start(),
+      runningProduct := elementType.byteSize,
+      Code.foreach(0 until nDims){ index =>
+        Code(
+          srvb.addLong(runningProduct),
+          srvb.advance(),
+          tempShapeStorage := sourceShapeArray(index),
+          runningProduct := runningProduct * (tempShapeStorage > 0L).mux(tempShapeStorage, 1L)
+        )
+      }
+    )
+  }
+
+  def makeRowMajorStridesBuilder(sourceShapeArray: IndexedSeq[Code[Long]], mb: EmitMethodBuilder[_]): StagedRegionValueBuilder => Code[Unit] = { srvb =>
     val runningProduct = mb.newLocal[Long]()
     val tempShapeStorage = mb.newLocal[Long]()
     val computedStrides = (0 until nDims).map(_ => mb.genFieldThisRef[Long]())
@@ -113,7 +127,7 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     Region.loadIRIntermediate(data.pType.elementType)(getElementAddress(indices, ndAddress, mb))
   }
 
-  def outOfBounds(indices: IndexedSeq[Code[Long]], nd: Value[Long], mb: EmitMethodBuilder[_]): Code[Boolean] = {
+  def outOfBounds(indices: IndexedSeq[Value[Long]], nd: Value[Long], mb: EmitMethodBuilder[_]): Code[Boolean] = {
     val shapeTuple = new CodePTuple(shape.pType, new Value[Long] {
       def get: Code[Long] = shape.load(nd)
     })
@@ -163,48 +177,11 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
     (createShape, newIndices)
   }
 
-  def copyRowMajorToColumnMajor(rowMajorAddress: Code[Long], targetAddress: Code[Long], nRows: Code[Long], nCols: Code[Long], mb: EmitMethodBuilder[_]): Code[Unit] = {
-    Code.memoize(nRows, "pcndarr_tocol_n_rows", nCols, "pcndarr_tocol_n_cols") { (nRows, nCols) =>
-      val rowIndex = mb.genFieldThisRef[Long]()
-      val colIndex = mb.genFieldThisRef[Long]()
-      val rowMajorCoord = nCols * rowIndex + colIndex
-      val colMajorCoord = nRows * colIndex + rowIndex
-      val rowMajorFirstElementAddress = this.data.pType.firstElementOffset(rowMajorAddress, (nRows * nCols).toI)
-      val targetFirstElementAddress = this.data.pType.firstElementOffset(targetAddress, (nRows * nCols).toI)
-      val currentElement = Region.loadDouble(rowMajorFirstElementAddress + rowMajorCoord * 8L)
-
-      Code.forLoop(rowIndex := 0L, rowIndex < nRows, rowIndex := rowIndex + 1L,
-        Code.forLoop(colIndex := 0L, colIndex < nCols, colIndex := colIndex + 1L,
-          Region.storeDouble(targetFirstElementAddress + colMajorCoord * 8L, currentElement)))
-    }
-  }
-
-  def copyColumnMajorToRowMajor(colMajorAddress: Code[Long], targetAddress: Code[Long], nRows: Code[Long], nCols: Code[Long], mb: EmitMethodBuilder[_]): Code[Unit] = {
-    Code.memoize(nRows, "pcndarr_torow_n_rows", nCols, "pcndarr_torow_n_cols") { (nRows, nCols) =>
-      val rowIndex = mb.genFieldThisRef[Long]()
-      val colIndex = mb.genFieldThisRef[Long]()
-      val rowMajorCoord = nCols * rowIndex + colIndex
-      val colMajorCoord = nRows * colIndex + rowIndex
-      val colMajorFirstElementAddress = this.data.pType.firstElementOffset(colMajorAddress, (nRows * nCols).toI)
-      val targetFirstElementAddress = this.data.pType.firstElementOffset(targetAddress, (nRows * nCols).toI)
-      val currentElement = Region.loadDouble(colMajorFirstElementAddress + colMajorCoord * 8L)
-
-      Code.forLoop(rowIndex := 0L, rowIndex < nRows, rowIndex := rowIndex + 1L,
-        Code.forLoop(colIndex := 0L, colIndex < nCols, colIndex := colIndex + 1L,
-          Region.storeDouble(targetFirstElementAddress + rowMajorCoord * 8L, currentElement)))
-    }
-  }
-
-  def construct(flags: Code[Int], offset: Code[Int], shapeBuilder: (StagedRegionValueBuilder => Code[Unit]),
-    stridesBuilder: (StagedRegionValueBuilder => Code[Unit]), data: Code[Long], mb: EmitMethodBuilder[_]): Code[Long] = {
+  override def construct(shapeBuilder: StagedRegionValueBuilder => Code[Unit], stridesBuilder: StagedRegionValueBuilder => Code[Unit], data: Code[Long], mb: EmitMethodBuilder[_]): Code[Long] = {
     val srvb = new StagedRegionValueBuilder(mb, this.representation)
 
     Code(Code(FastIndexedSeq(
       srvb.start(),
-      srvb.addInt(flags),
-      srvb.advance(),
-      srvb.addInt(offset),
-      srvb.advance(),
       srvb.addBaseStruct(this.shape.pType, shapeBuilder),
       srvb.advance(),
       srvb.addBaseStruct(this.strides.pType, stridesBuilder),
@@ -225,12 +202,10 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
   def copyFromTypeAndStackValue(mb: EmitMethodBuilder[_], region: Value[Region], srcPType: PType, stackValue: Code[_], deepCopy: Boolean): Code[_] =
     this.copyFromType(mb, region, srcPType, stackValue.asInstanceOf[Code[Long]], deepCopy)
 
-  def copyFromType(region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Long  = {
+  def _copyFromAddress(region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Long  = {
     val sourceNDPType = srcPType.asInstanceOf[PNDArray]
-
-    assert(this.elementType == sourceNDPType.elementType && this.nDims == sourceNDPType.nDims)
-
-    this.representation.copyFromType(region, sourceNDPType.representation, srcAddress, deepCopy)
+    assert(elementType == sourceNDPType.elementType && nDims == sourceNDPType.nDims)
+    representation.copyFromAddress(region, sourceNDPType.representation, srcAddress, deepCopy)
   }
 
   override def deepRename(t: Type) = deepRenameNDArray(t.asInstanceOf[TNDArray])
@@ -245,4 +220,49 @@ final case class PCanonicalNDArray(elementType: PType, nDims: Int, required: Boo
 
   def constructAtAddress(addr: Long, region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Unit =
     throw new NotImplementedError("constructAtAddress should only be called on fundamental types; PCanonicalNDarray is not fundamental")
+}
+
+object PCanonicalNDArraySettable {
+  def apply(cb: EmitCodeBuilder, pt: PCanonicalNDArray, name: String, sb: SettableBuilder): PCanonicalNDArraySettable = {
+    new PCanonicalNDArraySettable(pt, sb.newSettable(name))
+  }
+}
+
+class PCanonicalNDArraySettable(val pt: PCanonicalNDArray, val a: Settable[Long]) extends PNDArrayValue with PSettable {
+  //FIXME: Rewrite apply to not require a methodBuilder, meaning also rewrite loadElementToIRIntermediate
+  def apply(indices: IndexedSeq[Value[Long]], mb: EmitMethodBuilder[_]): Value[_] = {
+    assert(indices.size == pt.nDims)
+    new Value[Any] {
+      override def get: Code[Any] = pt.loadElementToIRIntermediate(indices, a, mb)
+    }
+  }
+
+  def settableTuple(): IndexedSeq[Settable[_]] = FastIndexedSeq(a)
+
+  override def get: PCode = new PCanonicalNDArrayCode(pt, a)
+
+  override def store(pv: PCode): Code[Unit] = a := pv.asInstanceOf[PCanonicalNDArrayCode].a
+
+  override def outOfBounds(indices: IndexedSeq[Value[Long]], mb: EmitMethodBuilder[_]): Code[Boolean] = {
+    pt.outOfBounds(indices, a, mb)
+  }
+}
+
+class PCanonicalNDArrayCode(val pt: PCanonicalNDArray, val a: Code[Long]) extends PNDArrayCode {
+
+  override def code: Code[_] = a
+
+  override def codeTuple(): IndexedSeq[Code[_]] = FastIndexedSeq(a)
+
+  override def store(mb: EmitMethodBuilder[_], r: Value[Region], dst: Code[Long]): Code[Unit] = ???
+
+  def memoize(cb: EmitCodeBuilder, name: String, sb: SettableBuilder): PNDArrayValue = {
+    val s = PCanonicalNDArraySettable(cb, pt, name, sb)
+    cb.assign(s, this)
+    s
+  }
+
+  override def memoize(cb: EmitCodeBuilder, name: String): PNDArrayValue = memoize(cb, name, cb.localBuilder)
+
+  override def memoizeField(cb: EmitCodeBuilder, name: String): PValue = memoize(cb, name, cb.fieldBuilder)
 }

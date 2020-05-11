@@ -75,9 +75,6 @@ class ReferenceGenomeSuite extends HailSuite {
     assert(rg.compare("Y", "X") > 0)
     assert(rg.compare("Y", "MT") < 0)
 
-    assert(rg.compare("18", "SPQR") < 0)
-    assert(rg.compare("MT", "SPQR") < 0)
-
     // Test loci
     val l1 = Locus("1", 25)
     val l2 = Locus("1", 13000)
@@ -85,11 +82,11 @@ class ReferenceGenomeSuite extends HailSuite {
   }
 
   @Test def testWriteToFile() {
-    val tmpFile = tmpDir.createTempFile("grWrite", ".json")
+    val tmpFile = ctx.createTmpPath("grWrite", "json")
 
     val rg = ReferenceGenome.GRCh37
-    rg.copy(name = "GRCh37_2").write(hc.fs, tmpFile)
-    val gr2 = ReferenceGenome.fromFile(hc, tmpFile)
+    rg.copy(name = "GRCh37_2").write(fs, tmpFile)
+    val gr2 = ReferenceGenome.fromFile(fs, tmpFile)
 
     assert((rg.contigs sameElements gr2.contigs) &&
       rg.lengths == gr2.lengths &&
@@ -107,8 +104,8 @@ class ReferenceGenomeSuite extends HailSuite {
     val rg = ReferenceGenome("test", Array("a", "b", "c"), Map("a" -> 25, "b" -> 15, "c" -> 10))
     ReferenceGenome.addReference(rg)
 
-    val fr = FASTAReader(hc, rg, fastaFile, indexFile, 3, 5)
-    val frGzip = FASTAReader(hc, rg, fastaFileGzip, indexFile, 3, 5)
+    val fr = FASTAReader(ctx, rg, fastaFile, indexFile, 3, 5)
+    val frGzip = FASTAReader(ctx, rg, fastaFileGzip, indexFile, 3, 5)
 
     object Spec extends Properties("Fasta Random") {
       property("cache gives same base as from file") = forAll(Locus.gen(rg)) { l =>
@@ -130,10 +127,10 @@ class ReferenceGenomeSuite extends HailSuite {
             val endPos = if (pos.contig != end.contig) rg.contigLength(pos.contig) else end.position
             sb ++= fr.reader.value.getSubsequenceAt(pos.contig, pos.position, endPos).getBaseString
             pos =
-              if (rg.contigsIndex(pos.contig) == rg.contigs.length - 1)
+              if (rg.contigsIndex.get(pos.contig) == rg.contigs.length - 1)
                 null
               else
-                Locus(rg.contigs(rg.contigsIndex(pos.contig) + 1), 1)
+                Locus(rg.contigs(rg.contigsIndex.get(pos.contig) + 1), 1)
           }
           sb.result()
         }
@@ -153,50 +150,50 @@ class ReferenceGenomeSuite extends HailSuite {
   }
 
   @Test def testSerializeOnFB() {
-    val grch38 = ReferenceGenome.GRCh38
-    val fb = EmitFunctionBuilder[String, Boolean]("serialize_rg")
-    val cb = fb.ecb
-    val rgfield = fb.genLazyFieldThisRef(grch38.codeSetup(cb))
-    fb.emit(rgfield.invoke[String, Boolean]("isValidContig", fb.getArg[String](1)))
+    withExecuteContext() { ctx =>
+      val grch38 = ReferenceGenome.GRCh38
+      val fb = EmitFunctionBuilder[String, Boolean](ctx, "serialize_rg")
+      val cb = fb.ecb
+      val rgfield = fb.genLazyFieldThisRef(grch38.codeSetup(ctx.localTmpdir, cb))
+      fb.emit(rgfield.invoke[String, Boolean]("isValidContig", fb.getCodeParam[String](1)))
 
-    Region.scoped { r =>
-      val f = fb.resultWithIndex()(0, r)
+      val f = fb.resultWithIndex()(0, ctx.r)
       assert(f("X") == grch38.isValidContig("X"))
     }
   }
 
   @Test def testSerializeWithFastaOnFB() {
-    val fastaFile = "src/test/resources/fake_reference.fasta"
-    val indexFile = "src/test/resources/fake_reference.fasta.fai"
+    withExecuteContext() { ctx =>
+      val fastaFile = "src/test/resources/fake_reference.fasta"
+      val indexFile = "src/test/resources/fake_reference.fasta.fai"
 
-    val rg = ReferenceGenome("test", Array("a", "b", "c"), Map("a" -> 25, "b" -> 15, "c" -> 10))
-    ReferenceGenome.addReference(rg)
-    rg.addSequence(hc, fastaFile, indexFile)
+      val rg = ReferenceGenome("test", Array("a", "b", "c"), Map("a" -> 25, "b" -> 15, "c" -> 10))
+      ReferenceGenome.addReference(rg)
+      rg.addSequence(ctx, fastaFile, indexFile)
 
-    val fb = EmitFunctionBuilder[String, Int, Int, Int, String]("serialize_rg")
-    val cb = fb.ecb
-    val rgfield = fb.genLazyFieldThisRef(rg.codeSetup(cb))
-    fb.emit(rgfield.invoke[String, Int, Int, Int, String]("getSequence", fb.getArg[String](1), fb.getArg[Int](2), fb.getArg[Int](3), fb.getArg[Int](4)))
+      val fb = EmitFunctionBuilder[String, Int, Int, Int, String](ctx, "serialize_rg")
+      val cb = fb.ecb
+      val rgfield = fb.genLazyFieldThisRef(rg.codeSetup(ctx.localTmpdir, cb))
+      fb.emit(rgfield.invoke[String, Int, Int, Int, String]("getSequence", fb.getCodeParam[String](1), fb.getCodeParam[Int](2), fb.getCodeParam[Int](3), fb.getCodeParam[Int](4)))
 
-    Region.scoped { r =>
-      val f = fb.resultWithIndex()(0, r)
+      val f = fb.resultWithIndex()(0, ctx.r)
       assert(f("a", 25, 0, 5) == rg.getSequence("a", 25, 0, 5))
     }
   }
 
   @Test def testSerializeWithLiftoverOnFB() {
-    val grch37 = ReferenceGenome.GRCh37
-    val liftoverFile = "src/test/resources/grch37_to_grch38_chr20.over.chain.gz"
+    withExecuteContext() { ctx =>
+      val grch37 = ReferenceGenome.GRCh37
+      val liftoverFile = "src/test/resources/grch37_to_grch38_chr20.over.chain.gz"
 
-    grch37.addLiftover(hc, liftoverFile, "GRCh38")
+      grch37.addLiftover(ctx, liftoverFile, "GRCh38")
 
-    val fb = EmitFunctionBuilder[String, Locus, Double, (Locus, Boolean)]("serialize_with_liftover")
-    val cb = fb.ecb
-    val rgfield = fb.genLazyFieldThisRef(grch37.codeSetup(cb))
-    fb.emit(rgfield.invoke[String, Locus, Double, (Locus, Boolean)]("liftoverLocus", fb.getArg[String](1), fb.getArg[Locus](2), fb.getArg[Double](3)))
+      val fb = EmitFunctionBuilder[String, Locus, Double, (Locus, Boolean)](ctx, "serialize_with_liftover")
+      val cb = fb.ecb
+      val rgfield = fb.genLazyFieldThisRef(grch37.codeSetup(ctx.localTmpdir, cb))
+      fb.emit(rgfield.invoke[String, Locus, Double, (Locus, Boolean)]("liftoverLocus", fb.getCodeParam[String](1), fb.getCodeParam[Locus](2), fb.getCodeParam[Double](3)))
 
-    Region.scoped { r =>
-      val f = fb.resultWithIndex()(0, r)
+      val f = fb.resultWithIndex()(0, ctx.r)
       assert(f("GRCh38", Locus("20", 60001), 0.95) == grch37.liftoverLocus("GRCh38", Locus("20", 60001), 0.95))
       grch37.removeLiftover("GRCh38")
     }

@@ -2,8 +2,9 @@ package is.hail.io.gen
 
 import is.hail.HailContext
 import is.hail.annotations.{RegionValue, UnsafeRow}
-import is.hail.expr.ir.MatrixValue
+import is.hail.expr.ir.{ExecuteContext, MatrixValue}
 import is.hail.expr.types.physical.PStruct
+import is.hail.io.fs.FS
 import is.hail.utils.ArrayBuilder
 import is.hail.variant.{ArrayGenotypeView, RegionValueVariant, View}
 import is.hail.utils._
@@ -83,8 +84,8 @@ object BgenWriter {
     bb.result()
   }
 
-  def writeSampleFile(path: String, sampleIds: IndexedSeq[String]) {
-    HailContext.fs.writeTable(path + ".sample",
+  def writeSampleFile(fs: FS, path: String, sampleIds: IndexedSeq[String]) {
+    fs.writeTable(path + ".sample",
       "ID_1 ID_2 missing" :: "0 0 0" :: sampleIds.map(s => s"$s $s 0").toList)
   }
 }
@@ -98,12 +99,12 @@ class BgenPartitionWriter(rowPType: PStruct, nSamples: Int) {
   val v = new RegionValueVariant(rowPType)
   val va = new GenAnnotationView(rowPType)
 
-  def emitVariant(rv: RegionValue): (Array[Byte], Long) = {
+  def emitVariant(rv: Long): (Array[Byte], Long) = {
     bb.clear()
 
-    gs.setRegion(rv)
-    v.setRegion(rv)
-    va.setRegion(rv)
+    gs.set(rv)
+    v.set(rv)
+    va.set(rv)
 
     val alleles = v.alleles()
     val nAlleles = alleles.length
@@ -299,35 +300,31 @@ class BgenPartitionWriter(rowPType: PStruct, nSamples: Int) {
 }
 
 object ExportBGEN {
-  def apply(mv: MatrixValue, path: String, exportType: Int): Unit = {
+  def apply(ctx: ExecuteContext, mv: MatrixValue, path: String, exportType: String): Unit = {
     val colValues = mv.colValues.javaValue
 
     val sampleIds = colValues.map(_.asInstanceOf[Row].getString(0))
     val partitionSizes = mv.rvd.countPerPartition()
-    val nPartitions = partitionSizes.length
     val nVariants = partitionSizes.sum
     val nSamples = colValues.length
 
     val localRVRowPType = mv.rvRowPType
 
-    val header = BgenWriter.headerBlock(sampleIds, nVariants)
-
-    val hc = HailContext.get
-    val fs = HailContext.fs
-    val bcFS = HailContext.fsBc
+    val fs = ctx.fs
+    val bcFS = fs.broadcast
 
     fs.delete(path, recursive = true)
 
     val parallelOutputPath =
       if (exportType == ExportType.CONCATENATED)
-        fs.getTemporaryFile(hc.tmpDir)
+        ctx.createTmpPath("export-bgen-concatenated")
       else
         path + ".bgen"
     fs.mkDir(parallelOutputPath)
 
     val d = digitsNeeded(mv.rvd.getNumPartitions)
 
-    val (files, droppedPerPart) = mv.rvd.crdd.boundary.mapPartitionsWithIndex { case (i: Int, it: Iterator[RegionValue]) =>
+    val (files, droppedPerPart) = mv.rvd.crdd.mapPartitionsWithIndex { case (i: Int, it: Iterator[Long]) =>
       val context = TaskContext.get
       val pf =
         parallelOutputPath + "/" +
@@ -347,8 +344,8 @@ object ExportBGEN {
             BgenWriter.headerBlock(sampleIds, partitionSizes(i)))
         }
 
-        it.foreach { rv =>
-          val (b, d) = bpw.emitVariant(rv)
+        it.foreach { ptr =>
+          val (b, d) = bpw.emitVariant(ptr)
           out.write(b)
           dropped += d
         }
@@ -392,6 +389,6 @@ object ExportBGEN {
       fs.delete(parallelOutputPath, recursive = true)
     }
 
-    BgenWriter.writeSampleFile(path, sampleIds)
+    BgenWriter.writeSampleFile(fs, path, sampleIds)
   }
 }

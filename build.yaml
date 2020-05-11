@@ -90,6 +90,8 @@ steps:
      mkdir repo
      cd repo
      {{ code.checkout_script }}
+     make -C hail python/hail/hail_version python/hail/hail_pip_version
+     git rev-parse HEAD > git_version
    outputs:
      - from: /io/repo/auth/sql
        to: /repo/auth/
@@ -99,14 +101,71 @@ steps:
        to: /repo/batch/
      - from: /io/repo/batch/test
        to: /repo/batch/
-     - from: /io/repo/pipeline/test
-       to: /repo/pipeline/
      - from: /io/repo/notebook/sql
        to: /repo/notebook/
      - from: /io/repo/hail/python/hailtop
        to: /repo/hailtop/
+     - from: /io/repo/hail/python/test
+       to: /repo/test/
+     - from: /io/repo/hail/python/cluster-tests/
+       to: /repo/hail/python/cluster-tests
+     - from: /io/repo/hail/python/hail/hail_version
+       to: /hail_version
+     - from: /io/repo/hail/python/hail/hail_pip_version
+       to: /hail_pip_version
+     - from: /io/repo/git_version
+       to: /git_version
    dependsOn:
      - base_image
+ - kind: buildImage
+   name: create_certs_image
+   dockerFile: tls/Dockerfile
+   contextPath: tls
+   publishAs: create_certs_image
+   dependsOn:
+     - base_image
+ - kind: runImage
+   name: create_ssl_config_hail_root
+   image:
+     valueFrom: create_certs_image.image
+   script: |
+     openssl req -new -x509 -subj /CN=hail-root -nodes -newkey rsa:4096 -keyout hail-root-key.pem -out hail-root-cert.pem
+     kubectl create secret generic -n {{ default_ns.name }} ssl-config-hail-root \
+             --from-file=hail-root-key.pem \
+             --from-file=hail-root-cert.pem
+   serviceAccount:
+     name: admin
+     namespace:
+       valueFrom: default_ns.name
+   scopes:
+    - test
+   dependsOn:
+    - default_ns
+    - create_certs_image
+ - kind: runImage
+   name: create_certs
+   image:
+     valueFrom: create_certs_image.image
+   script: |
+     set -ex
+     python3 create_certs.py \
+             {{ default_ns.name }} \
+             config.yaml \
+             /ssl-config-hail-root/hail-root-key.pem \
+             /ssl-config-hail-root/hail-root-cert.pem
+   serviceAccount:
+     name: admin
+     namespace:
+       valueFrom: default_ns.name
+   secrets:
+     - name: ssl-config-hail-root
+       namespace:
+         valueFrom: default_ns.name
+       mountPath: /ssl-config-hail-root
+   dependsOn:
+     - default_ns
+     - create_certs_image
+     - create_ssl_config_hail_root
  - kind: runImage
    name: check_gear
    image:
@@ -173,6 +232,8 @@ steps:
    migrations:
     - name: initial
       script: /io/sql/initial.sql
+    - name: copy-paste-tokens
+      script: /io/sql/copy-paste-tokens.sql
    inputs:
     - from: /repo/auth/sql
       to: /io/
@@ -223,13 +284,14 @@ steps:
    namespace:
      valueFrom: default_ns.name
    config: admin-pod/admin-pod.yaml
-   scope:
+   scopes:
     - deploy
     - dev
    dependsOn:
     - default_ns
     - service_base_image
     - create_deploy_config
+    - create_certs
  - kind: runImage
    name: create_session_key
    image:
@@ -263,7 +325,6 @@ steps:
      valueFrom: service_base_image.image
    script: |
      set -ex
-     export HAIL_DEPLOY_CONFIG_FILE=/deploy-config/deploy-config.json
      # create accounts
      mkdir /user-tokens
      cat > create-session.py <<EOF
@@ -273,16 +334,20 @@ steps:
      from hailtop.config import get_deploy_config
      from hailtop.auth import get_tokens
      from hailtop.utils import async_to_blocking
-     from gear import create_database_pool, insert_user, create_session
+     from gear import Database, insert_user, create_session
      async def main():
-         dbpool = await create_database_pool()
-         tokens = get_tokens()
-         user_spec = json.loads(sys.argv[1])
-         user_id = await insert_user(dbpool, user_spec)
-         deploy_config = get_deploy_config()
-         auth_ns = deploy_config.service_ns('auth')
-         tokens[auth_ns] = await create_session(dbpool, user_id)
-         tokens.write()
+         db = Database()
+         try:
+             await db.async_init()
+             tokens = get_tokens()
+             user_spec = json.loads(sys.argv[1])
+             user_id = await insert_user(db, user_spec)
+             deploy_config = get_deploy_config()
+             auth_ns = deploy_config.service_ns('auth')
+             tokens[auth_ns] = await create_session(db, user_id)
+             tokens.write()
+         finally:
+             await db.async_close()
      async_to_blocking(main())
      EOF
      # batch, auth gsa keys
@@ -519,10 +584,36 @@ steps:
    publishAs: query
    inputs:
      - from: /hail.jar
-       to: /hail.jar
+       to: /query/hail.jar
    dependsOn:
      - service_base_image
      - build_hail
+ - kind: runImage
+   name: check_query
+   image:
+     valueFrom: query_image.image
+   script: |
+     set -ex
+     python3 -m flake8 query
+     python3 -m pylint --rcfile pylintrc query
+   dependsOn:
+     - query_image
+ - kind: deploy
+   name: deploy_query_sa
+   namespace:
+     valueFrom: default_ns.name
+   config: query/service-account.yaml
+   dependsOn:
+    - default_ns
+ - kind: deploy
+   name: deploy_query_sa_batch_pods
+   namespace:
+     valueFrom: batch_pods_ns.name
+   config: query/service-account-batch-pods.yaml
+   dependsOn:
+    - default_ns
+    - batch_pods_ns
+    - deploy_query_sa
  - kind: deploy
    name: deploy_query
    namespace:
@@ -534,7 +625,11 @@ steps:
       for: alive
    dependsOn:
     - default_ns
+    - batch_pods_ns
     - query_image
+    - deploy_query_sa
+    - deploy_query_sa_batch_pods
+    - create_certs
  - kind: buildImage
    name: hail_repl_image
    dockerFile: hail/Dockerfile.hail-repl
@@ -651,7 +746,7 @@ steps:
      export PYSPARK_SUBMIT_ARGS="--driver-memory 6g pyspark-shell"
      export PYTEST_SPLITS=5
      export PYTEST_SPLIT_INDEX=0
-     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+     python3 -m pytest --ignore=test/hailtop/batch/ --log-cli-level=INFO -s -vv --instafail --durations=50 test
    inputs:
      - from: /wheel-container.tar
        to: /io/wheel-container.tar
@@ -684,7 +779,7 @@ steps:
      export PYSPARK_SUBMIT_ARGS="--driver-memory 6g pyspark-shell"
      export PYTEST_SPLITS=5
      export PYTEST_SPLIT_INDEX=1
-     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+     python3 -m pytest --ignore=test/hailtop/batch/ --log-cli-level=INFO -s -vv --instafail --durations=50 test
    inputs:
      - from: /wheel-container.tar
        to: /io/wheel-container.tar
@@ -717,7 +812,7 @@ steps:
      export PYSPARK_SUBMIT_ARGS="--driver-memory 6g pyspark-shell"
      export PYTEST_SPLITS=5
      export PYTEST_SPLIT_INDEX=2
-     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+     python3 -m pytest --ignore=test/hailtop/batch/ --log-cli-level=INFO -s -vv --instafail --durations=50 test
    inputs:
      - from: /wheel-container.tar
        to: /io/wheel-container.tar
@@ -750,7 +845,7 @@ steps:
      export PYSPARK_SUBMIT_ARGS="--driver-memory 6g pyspark-shell"
      export PYTEST_SPLITS=5
      export PYTEST_SPLIT_INDEX=3
-     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+     python3 -m pytest --ignore=test/hailtop/batch/ --log-cli-level=INFO -s -vv --instafail --durations=50 test
    inputs:
      - from: /wheel-container.tar
        to: /io/wheel-container.tar
@@ -783,7 +878,7 @@ steps:
      export PYSPARK_SUBMIT_ARGS="--driver-memory 6g pyspark-shell"
      export PYTEST_SPLITS=5
      export PYTEST_SPLIT_INDEX=4
-     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 test
+     python3 -m pytest --ignore=test/hailtop/batch/ --log-cli-level=INFO -s -vv --instafail --durations=50 test
    inputs:
      - from: /wheel-container.tar
        to: /io/wheel-container.tar
@@ -827,11 +922,11 @@ steps:
        | pandoc -o python/hail/docs/change_log.rst
      make -C www
      make -C python/hail/docs BUILDDIR=_build clean html
-     make -C python/hailtop/pipeline/docs BUILDDIR=_build clean html
+     make -C python/hailtop/batch/docs BUILDDIR=_build clean html
      mkdir -p www/docs
      rm -f www/*.md
      mv python/hail/docs/_build/html www/docs/0.2
-     mv python/hailtop/pipeline/docs/_build/html www/docs/pipeline
+     mv python/hailtop/batch/docs/_build/html www/docs/batch
      HAIL_CACHE_VERSION=$(cat python/hail/hail_version)
      find www -iname *.html -type f -exec sed -i -e "s/\.css/\.css\?v\=$HAIL_CACHE_VERSION/" {} +;
      tar czf /io/www.tar.gz www
@@ -854,6 +949,10 @@ steps:
    namespace:
      valueFrom: default_ns.name
    config: router/deployment.yaml
+   wait:
+     - kind: Service
+       name: router
+       for: alive
    link:
     - www
     - notebook
@@ -861,15 +960,21 @@ steps:
    dependsOn:
     - default_ns
     - router_image
+    - create_certs
  - kind: deploy
    name: deploy_site
    namespace:
      valueFrom: default_ns.name
    config: site/deployment.yaml
+   wait:
+    - kind: Service
+      name: site
+      for: alive
    dependsOn:
     - default_ns
     - site_image
     - deploy_router
+    - create_certs
  - kind: deploy
    name: deploy_scorecard
    namespace:
@@ -882,6 +987,7 @@ steps:
     - default_ns
     - scorecard_image
     - deploy_router
+    - create_certs
  - kind: runImage
    name: create_dummy_oauth2_client_secret
    image:
@@ -913,6 +1019,115 @@ steps:
     - auth_database
     - auth_image
     - create_dummy_oauth2_client_secret
+    - create_certs
+ - kind: runImage
+   name: test_auth_copy_paste_login
+   image:
+     valueFrom: service_base_image.image
+   script: |
+     set -ex
+
+     export HAIL_DEPLOY_CONFIG_FILE=/deploy-config/deploy-config.json
+
+     COPY_PASTE_TOKEN=$(hailctl curl {{ default_ns.name }} \
+                        auth /api/v1alpha/copy-paste-token \
+                        -fsSL \
+                        --retry 3 \
+                        --retry-delay 5 \
+                        -XPOST)
+     hailctl auth copy-paste-login "$COPY_PASTE_TOKEN" --namespace {{ default_ns.name }}
+
+     if hailctl auth copy-paste-login "$COPY_PASTE_TOKEN" --namespace {{ default_ns.name }}
+     then
+         echo "reusing a token should not work, but did"
+         exit 1
+     fi
+
+     COPY_PASTE_TOKEN=$(hailctl curl {{ default_ns.name }} \
+                        auth /api/v1alpha/copy-paste-token \
+                        -fsSL \
+                        --retry 3 \
+                        --retry-delay 5 \
+                        -XPOST)
+     python3 -c '
+     from hailtop.auth import copy_paste_login;
+     copy_paste_login("'$COPY_PASTE_TOKEN'", "{{ default_ns.name }}")
+     '
+
+     python3 -c '
+     from hailtop.auth import copy_paste_login;
+     import aiohttp
+     try:
+         copy_paste_login("'$COPY_PASTE_TOKEN'", "{{ default_ns.name }}")
+         print("reusing a token should not work, but did")
+         sys.exit(1)
+     except aiohttp.client_exceptions.ClientResponseError as exc:
+         assert(exc.status == 401)
+     '
+   secrets:
+    - name: test-tokens
+      namespace:
+        valueFrom: batch_pods_ns.name
+      mountPath: /user-tokens
+    - name: gce-deploy-config
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /deploy-config
+   dependsOn:
+    - default_ns
+    - create_accounts
+    - deploy_auth
+    - create_deploy_config
+    - batch_pods_ns
+    - service_base_image
+ - kind: runImage
+   name: test_auth_copy_paste_login_timeout
+   image:
+     valueFrom: service_base_image.image
+   script: |
+     set -ex
+
+     export HAIL_DEPLOY_CONFIG_FILE=/deploy-config/deploy-config.json
+
+     COPY_PASTE_TOKEN=$(hailctl curl {{ default_ns.name }} \
+                        auth /api/v1alpha/copy-paste-token \
+                        -fsSL \
+                        --retry 3 \
+                        --retry-delay 5 \
+                        -XPOST)
+     sleep $(( 5 * 60 + 1))
+     if hailctl auth copy-paste-login "$COPY_PASTE_TOKEN" --namespace {{ default_ns.name }}
+     then
+         echo "using an expired token should not work, but did"
+         exit 1
+     fi
+
+     python3 -c '
+     import aiohttp
+     from hailtop.auth import copy_paste_login;
+     try:
+         copy_paste_login("'$COPY_PASTE_TOKEN'", "{{ default_ns.name }}")
+         print("using an expired token should not work, but did")
+         sys.exit(1)
+     except aiohttp.client_exceptions.ClientResponseError as exc:
+         assert(exc.status == 401)
+     '
+   secrets:
+    - name: test-tokens
+      namespace:
+        valueFrom: batch_pods_ns.name
+      mountPath: /user-tokens
+    - name: gce-deploy-config
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /deploy-config
+   dependsOn:
+    - default_ns
+    - create_accounts
+    - deploy_auth
+    - create_deploy_config
+    - batch_pods_ns
+    - service_base_image
  - kind: runImage
    name: delete_batch_tables
    image:
@@ -963,6 +1178,8 @@ steps:
    migrations:
     - name: initial
       script: /io/sql/initial.sql
+    - name: invalidated-batches
+      script: /io/sql/invalidated-batches.sql
    inputs:
     - from: /repo/ci/sql
       to: /io/
@@ -1009,6 +1226,8 @@ steps:
       script: /io/sql/add-instance-zone.sql
     - name: add-batches-time-created-index
       script: /io/sql/add-batches-time-created-index.sql
+    - name: change-test-worker-disk-size
+      script: /io/sql/change_test_worker_disk_size.py
    inputs:
     - from: /repo/batch/sql
       to: /io/
@@ -1050,12 +1269,12 @@ steps:
     - batch_worker_image
     - batch_database
     - deploy_auth
+    - create_certs
  - kind: runImage
    name: test_batch
    image:
-     valueFrom: service_base_image.image
+     valueFrom: batch_image.image
    script: |
-     export HAIL_DEPLOY_CONFIG_FILE=/deploy-config/deploy-config.json
      export HAIL_BASE_IMAGE={{ base_image.image }}
      export CI_UTILS_IMAGE={{ ci_utils_image.image }}
      export HAIL_BATCH_PODS_NAMESPACE={{ batch_pods_ns.name }}
@@ -1074,12 +1293,18 @@ steps:
       namespace:
         valueFrom: batch_pods_ns.name
       mountPath: /user-tokens
+    - name: ssl-config-batch-tests
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /ssl-config
    dependsOn:
+    - create_deploy_config
+    - create_accounts
     - default_ns
     - batch_pods_ns
     - copy_files
     - base_image
-    - service_base_image
+    - batch_image
     - ci_utils_image
     - deploy_batch
  - kind: runImage
@@ -1157,17 +1382,17 @@ steps:
     - create_ci_test_repo
     - deploy_ci_agent
     - deploy_ci_agent_default
+    - create_certs
  - kind: runImage
    name: test_ci
    image:
      valueFrom: test_ci_image.image
    script: |
      set -ex
-     export HAIL_DEPLOY_CONFIG_FILE=/deploy-config/deploy-config.json
      export ORGANIZATION=hail-ci-test
      export REPO_NAME=ci-test-"{{ create_ci_test_repo.token }}"
      export NAMESPACE="{{ default_ns.name }}"
-     python3 -m pytest --log-cli-level=INFO -s -vv --instafail /test/
+     python3 -m pytest --tb=no --log-cli-level=INFO -s -vvl --instafail /test/
    secrets:
     - name: gce-deploy-config
       namespace:
@@ -1181,46 +1406,33 @@ steps:
       namespace:
         valueFrom: batch_pods_ns.name
       mountPath: /secret/ci-secrets
-   timeout: 1200
+    - name: ssl-config-ci-tests
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /ssl-config
+   timeout: 2400
    scopes:
     - test
     - dev
    dependsOn:
+    - create_deploy_config
+    - create_accounts
     - default_ns
     - batch_pods_ns
     - deploy_ci
     - test_ci_image
     - create_ci_test_repo
  - kind: runImage
-   name: setup_pipeline
-   image:
-     valueFrom: base_image.image
-   script: |
-     set -e
-     gcloud -q auth activate-service-account --key-file=/test-gsa-key/key.json
-     gsutil -m cp -r /io/test/resources/* gs://hail-test-dmk9z/{{ token }}/pipeline/input/
-   inputs:
-    - from: /repo/pipeline/test
-      to: /io/
-   secrets:
-    - name: test-gsa-key
-      namespace:
-        valueFrom: batch_pods_ns.name
-      mountPath: /test-gsa-key
-   dependsOn:
-    - batch_pods_ns
-    - copy_files
-    - base_image
- - kind: runImage
-   name: test_pipeline
+   name: test_hailtop_batch
    image:
      valueFrom: service_base_image.image
    script: |
-     export HAIL_DEPLOY_CONFIG_FILE=/deploy-config/deploy-config.json
-     export SCRATCH=gs://hail-test-dmk9z/{{ setup_pipeline.token }}/pipeline
-     python3 -m pytest --log-cli-level=INFO -s -vv --instafail /io/test/
+     set -ex
+
+     python3 -m hailtop.hailctl config set batch/billing_project test
+     python3 -m pytest --log-cli-level=INFO -s -vv --instafail /io/test/test/hailtop/batch/
    inputs:
-    - from: /repo/pipeline/test
+    - from: /repo/test
       to: /io/
    timeout: 1200
    secrets:
@@ -1232,21 +1444,30 @@ steps:
       namespace:
         valueFrom: batch_pods_ns.name
       mountPath: /user-tokens
+    - name: test-gsa-key
+      namespace:
+        valueFrom: batch_pods_ns.name
+      mountPath: /test-gsa-key
+    - name: ssl-config-batch-tests
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /ssl-config
    dependsOn:
+    - create_deploy_config
+    - create_accounts
     - default_ns
     - batch_pods_ns
     - copy_files
     - service_base_image
     - deploy_batch
-    - setup_pipeline
  - kind: runImage
-   name: test_pipeline_docs
+   name: test_batch_docs
    image:
-     valueFrom: base_image.image
+     valueFrom: service_base_image.image
    script: |
      set -ex
-     export HAIL_DEPLOY_CONFIG_FILE=/deploy-config/deploy-config.json
-     cd /io/hailtop/hailtop/pipeline
+     cd /io/hailtop/hailtop/batch
+     python3 -m hailtop.hailctl config set batch/billing_project test
      python3 -m pytest --instafail \
        --doctest-modules \
        --doctest-glob='*.rst' \
@@ -1261,35 +1482,17 @@ steps:
         valueFrom: batch_pods_ns.name
       mountPath: /user-tokens
    dependsOn:
+    - create_deploy_config
+    - create_accounts
     - default_ns
     - batch_pods_ns
-    - base_image
+    - service_base_image
     - copy_files
     - deploy_batch
    timeout: 1200
    inputs:
     - from: /repo/hailtop
       to: /io/
- - kind: runImage
-   name: cleanup_pipeline
-   image:
-     valueFrom: base_image.image
-   alwaysRun: true
-   script: |
-     set -e
-     gcloud -q auth activate-service-account --key-file=/test-gsa-key/key.json
-     gsutil -m rm -r gs://hail-test-dmk9z/{{ setup_pipeline.token }}/pipeline
-   secrets:
-    # hail|test-batch
-    - name: test-gsa-key
-      namespace:
-        valueFrom: batch_pods_ns.name
-      mountPath: /test-gsa-key
-   dependsOn:
-    - batch_pods_ns
-    - base_image
-    - setup_pipeline
-    - test_pipeline
  - kind: createDatabase
    name: notebook_database
    databaseName: notebook
@@ -1321,6 +1524,11 @@ steps:
     - deploy_router
     - deploy_auth
     - notebook_database
+    - create_certs
+   wait:
+    - kind: Service
+      name: notebook
+      for: alive
  - kind: deploy
    name: deploy_image_fetcher
    namespace:
@@ -1330,6 +1538,7 @@ steps:
     - default_ns
     - image_fetcher_image
     - deploy_notebook
+    - create_certs
  - kind: runImage
    name: cleanup_ci_test_repo
    image:
@@ -1362,7 +1571,7 @@ steps:
    script: |
      set -ex
      gcloud auth activate-service-account --key-file=/secrets/ci-deploy-0-1--hail-is-hail.json
-     SPARK_VERSION=2.4.0
+     SPARK_VERSION=2.4.5
      BRANCH=0.2
      SHA="{{ code.sha }}"
      GS_JAR=gs://hail-common/builds/${BRANCH}/jars/hail-${BRANCH}-${SHA}-Spark-${SPARK_VERSION}.jar
@@ -1401,6 +1610,11 @@ steps:
     - base_image
     - make_docs
     - build_hail
+ - kind: buildImage
+   name: blog_nginx_image
+   dockerFile: blog/Dockerfile.nginx
+   contextPath: blog
+   publishAs: blog_nginx
  - kind: deploy
    name: deploy_blog
    namespace:
@@ -1414,6 +1628,8 @@ steps:
    dependsOn:
     - default_ns
     - deploy_router
+    - blog_nginx_image
+    - create_certs
  - kind: runImage
    name: delete_batch_instances
    image:
@@ -1442,54 +1658,158 @@ steps:
     - base_image
     - test_batch
     - test_ci
-    - test_pipeline
- - kind: buildImage
-   name: dbuf_image
-   dockerFile: dbuf/Dockerfile
-   contextPath: dbuf
-   publishAs: dbuf
-   dependsOn:
-    - service_base_image
- - kind: deploy
-   name: deploy_dbuf
-   namespace:
-     valueFrom: default_ns.name
-   config: dbuf/deployment.yaml
-   wait:
-    - kind: Service
-      name: dbuf
-      for: alive
-      resource_type: statefulset
-   dependsOn:
-    - default_ns
-    - dbuf_image
- - kind: buildImage
-   name: test_dbuf_image
-   dockerFile: dbuf/tests/Dockerfile
-   contextPath: dbuf/tests
-   publishAs: test_dbuf
-   dependsOn:
-     - dbuf_image
+    - test_hailtop_batch
  - kind: runImage
-   name: test_dbuf
+   name: test_dataproc
    image:
-     valueFrom: test_dbuf_image.image
+     valueFrom: ci_utils_image.image
    script: |
      set -ex
-     python3 scale_test.py dbuf-0.dbuf 10 1 40000 1000
-   resources:
-     memory: "3G"
-     cpu: "1"
+
+     cd /io
+
+     gcloud auth activate-service-account --key-file=/test-dataproc-service-account-key/test-dataproc-service-account-key.json
+     gcloud config set project hail-vdc
+     gcloud config set dataproc/region us-central1
+
+     mkdir -p repo
+     cd repo
+
+     {{ code.checkout_script }}
+
+     if git ls-remote --exit-code --tags origin $(cat /io/hail_pip_version)
+     then
+         echo "tag $HAIL_PIP_VERSION already exists"
+         exit 0
+     fi
+
+     cd hail
+     make test-dataproc DEV_CLARIFIER=ci_test_dataproc/
+   dependsOn:
+     - ci_utils_image
+     - copy_files
+     - default_ns
+   inputs:
+     - from: /hail_pip_version
+       to: /io/hail_pip_version
    secrets:
-    - name: gce-deploy-config
+     - name: test-dataproc-service-account-key
+       namespace:
+         valueFrom: default_ns.name
+       mountPath: /test-dataproc-service-account-key
+   scopes:
+     - deploy
+     - dev
+ - kind: runImage
+   name: deploy
+   image:
+     valueFrom: ci_utils_image.image
+   script: |
+     set -ex
+     cd /io
+
+     gcloud auth activate-service-account --key-file=/ci-deploy-0-1--hail-is-hail/ci-deploy-0-1--hail-is-hail.json
+     cp /pypi-credentials/pypirc $HOME/.pypirc
+     printf 'Authorization: token ' > github-oauth
+     cat /hail-ci-0-1-github-oauth-token/oauth-token >>github-oauth
+     printf '#!/bin/bash\necho ' > git-askpass
+     cat /hail-ci-0-1-github-oauth-token/oauth-token >>git-askpass
+     chmod 755 git-askpass
+     export GIT_ASKPASS=/io/git-askpass
+
+     mkdir repo
+     cd repo
+     {{ code.checkout_script }}
+     cd hail
+
+     if git ls-remote --exit-code --tags origin $(cat /io/hail_pip_version)
+     then
+         echo "tag $HAIL_PIP_VERSION already exists"
+         exit 0
+     fi
+
+     make wheel upload-artifacts DEPLOY_REMOTE=origin
+
+     bash scripts/deploy.sh $(cat /io/hail_pip_version) \
+                            $(cat /io/hail_version) \
+                            $(cat /io/git_version) \
+                            origin \
+                            /io/repo/hail/build/deploy/dist/hail-*-py3-none-any.whl \
+                            /io/github-oauth
+   inputs:
+     - from: /hail_version
+       to: /io/hail_version
+     - from: /hail_pip_version
+       to: /io/hail_pip_version
+     - from: /git_version
+       to: /io/git_version
+   secrets:
+    - name: pypi-credentials
       namespace:
         valueFrom: default_ns.name
-      mountPath: /home/hail/.hail
-   timeout: 1200
+      mountPath: /pypi-credentials
+    - name: ci-deploy-0-1--hail-is-hail
+      namespace:
+        valueFrom: batch_pods_ns.name
+      mountPath: /ci-deploy-0-1--hail-is-hail
+    - name: hail-ci-0-1-github-oauth-token
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /hail-ci-0-1-github-oauth-token
+   scopes:
+    - deploy
+    - dev
+   dependsOn:
+    - test_dataproc
+    - batch_pods_ns
+    - default_ns
+    - copy_files
+    - ci_utils_image
+    - build_hail
+ - kind: buildImage
+   name: hail_public_image
+   dockerFile: docker/hail/Dockerfile
+   contextPath: docker/hail/
+   publishAs: hail-public
+   dependsOn:
+    - copy_files
+   inputs:
+     - from: /hail_pip_version
+       to: /hail_pip_version
    scopes:
     - dev
-    - test
+ - kind: runImage
+   name: test_hail_public_image
+   image:
+     valueFrom: hail_public_image.image
+   script: |
+     set -ex
+     python3 -c 'import hail as hl; hl.balding_nichols_model(3, 100, 100)._force_count_rows()'
+     python3 -c 'import numpy; import pandas; import sklearn; import matplotlib; import scipy'
+     gsutil --version
    dependsOn:
-     - default_ns
-     - deploy_dbuf
-     - test_dbuf_image
+     - hail_public_image
+   scopes:
+    - dev
+ - kind: buildImage
+   name: genetics_public_image
+   dockerFile: docker/genetics/Dockerfile
+   contextPath: docker/genetics/
+   publishAs: genetics-public
+   dependsOn:
+    - hail_public_image
+   scopes:
+    - dev
+ - kind: runImage
+   name: test_genetics_public_image
+   image:
+     valueFrom: genetics_public_image.image
+   script: |
+     set -ex
+     samtools --version
+     plink --version
+     plink2 --version
+   dependsOn:
+     - genetics_public_image
+   scopes:
+    - dev

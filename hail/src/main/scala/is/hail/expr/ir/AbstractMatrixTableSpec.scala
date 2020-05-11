@@ -1,16 +1,17 @@
 package is.hail.expr.ir
 
-import is.hail.HailContext
-import is.hail.annotations._
+import java.io.OutputStreamWriter
+
 import is.hail.expr.types._
 import is.hail.expr.types.physical.PStruct
 import is.hail.expr.types.virtual._
+import is.hail.io.fs.FS
 import is.hail.rvd._
 import is.hail.utils._
 import is.hail.variant.ReferenceGenome
 import org.json4s._
 import org.json4s.jackson.JsonMethods.parse
-import org.json4s.jackson.Serialization
+import org.json4s.jackson.{JsonMethods, Serialization}
 
 import scala.language.{existentials, implicitConversions}
 
@@ -26,11 +27,11 @@ object RelationalSpec {
     new TableTypeSerializer +
     new MatrixTypeSerializer
 
-  def readMetadata(hc: HailContext, path: String): JValue = {
-    if (!hc.fs.isDir(path))
+  def readMetadata(fs: FS, path: String): JValue = {
+    if (!fs.isDir(path))
       fatal(s"MatrixTable and Table files are directories; path '$path' is not a directory")
     val metadataFile = path + "/metadata.json.gz"
-    val jv = using(hc.fs.open(metadataFile)) { in => parse(in) }
+    val jv = using(fs.open(metadataFile)) { in => parse(in) }
 
     val fileVersion = jv \ "file_version" match {
       case JInt(rep) => SemanticVersion(rep.toInt)
@@ -46,27 +47,28 @@ object RelationalSpec {
     jv
   }
 
-  def read(hc: HailContext, path: String): RelationalSpec = {
-    val jv = readMetadata(hc, path)
-    val references = readReferences(hc, path, jv)
+  def read(fs: FS, path: String): RelationalSpec = {
+    val jv = readMetadata(fs, path)
+    val references = readReferences(fs, path, jv)
 
     references.foreach { rg =>
       if (!ReferenceGenome.hasReference(rg.name))
         ReferenceGenome.addReference(rg)
     }
 
-    jv.extract[RelationalSpec]
+    (jv \ "name").extract[String] match {
+      case "TableSpec" => TableSpec.fromJValue(fs, path, jv)
+      case "MatrixTableSpec" => MatrixTableSpec.fromJValue(fs, path, jv)
+    }
   }
 
-  def readReferences(hc: HailContext, path: String): Array[ReferenceGenome] =
-    readReferences(hc, path, readMetadata(hc, path))
+  def readReferences(fs: FS, path: String): Array[ReferenceGenome] =
+    readReferences(fs, path, readMetadata(fs, path))
 
-  def readReferences(hc: HailContext, path: String, jv: JValue): Array[ReferenceGenome] = {
+  def readReferences(fs: FS, path: String, jv: JValue): Array[ReferenceGenome] = {
     // FIXME this violates the abstraction of the serialization boundary
-    val referencesRelPath = (jv \ "references_rel_path": @unchecked) match {
-      case JString(p) => p
-    }
-    ReferenceGenome.readReferences(hc.fs, path + "/" + referencesRelPath)
+    val referencesRelPath = (jv \ "references_rel_path").extract[String]
+    ReferenceGenome.readReferences(fs, path + "/" + referencesRelPath)
   }
 }
 
@@ -83,42 +85,37 @@ abstract class RelationalSpec {
 
   def partitionCounts: Array[Long] = getComponent[PartitionCountsComponentSpec]("partition_counts").counts.toArray
 
-  def write(fs: is.hail.io.fs.FS, path: String) {
-    using(fs.create(path + "/metadata.json.gz")) { out =>
-      Serialization.write(this, out)(RelationalSpec.formats)
-    }
-  }
-
-  def indexed(path: String): Boolean
+  def indexed: Boolean
 
   def version: SemanticVersion = SemanticVersion(file_version)
+
+  def toJValue: JValue
 }
 
 case class RVDComponentSpec(rel_path: String) extends ComponentSpec {
   def absolutePath(path: String): String = path + "/" + rel_path
 
-  def rvdSpec(fs: is.hail.io.fs.FS, path: String): AbstractRVDSpec =
+  def rvdSpec(fs: FS, path: String): AbstractRVDSpec =
     AbstractRVDSpec.read(fs, absolutePath(path))
 
-  def indexed(hc: HailContext, path: String): Boolean = rvdSpec(hc.fs, path).indexed
+  def indexed(fs: FS, path: String): Boolean = rvdSpec(fs, path).indexed
 
   def read(
-    hc: HailContext,
+    ctx: ExecuteContext,
     path: String,
     requestedType: TStruct,
-    ctx: ExecuteContext,
     newPartitioner: Option[RVDPartitioner] = None,
     filterIntervals: Boolean = false
   ): RVD = {
     val rvdPath = path + "/" + rel_path
-    rvdSpec(hc.fs, path)
-      .read(hc, rvdPath, requestedType, ctx, newPartitioner, filterIntervals)
+    rvdSpec(ctx.fs, path)
+      .read(ctx, rvdPath, requestedType, newPartitioner, filterIntervals)
   }
 
-  def readLocalSingleRow(hc: HailContext, path: String, requestedType: TStruct, r: Region): (PStruct, Long) = {
+  def readLocalSingleRow(ctx: ExecuteContext, path: String, requestedType: TStruct): (PStruct, Long) = {
     val rvdPath = path + "/" + rel_path
-    rvdSpec(hc.fs, path)
-      .readLocalSingleRow(hc, rvdPath, requestedType, r)
+    rvdSpec(ctx.fs, path)
+      .readLocalSingleRow(ctx, rvdPath, requestedType)
   }
 }
 
@@ -135,24 +132,76 @@ abstract class AbstractMatrixTableSpec extends RelationalSpec {
 
   def entriesComponent: RVDComponentSpec = getComponent[RVDComponentSpec]("entries")
 
-  def indexed(path: String): Boolean = rowsComponent.indexed(HailContext.get, path)
+  def globalsSpec: AbstractTableSpec
 
-  def rowsTableSpec(path: String): AbstractTableSpec = RelationalSpec.read(HailContext.get, path).asInstanceOf[AbstractTableSpec]
-  def colsTableSpec(path: String): AbstractTableSpec = RelationalSpec.read(HailContext.get, path).asInstanceOf[AbstractTableSpec]
-  def entriesTableSpec(path: String): AbstractTableSpec = RelationalSpec.read(HailContext.get, path).asInstanceOf[AbstractTableSpec]
+  def colsSpec: AbstractTableSpec
+
+  def rowsSpec: AbstractTableSpec
+
+  def entriesSpec: AbstractTableSpec
+
+  def indexed: Boolean = rowsSpec.indexed
 }
 
-case class MatrixTableSpec(
+object MatrixTableSpec {
+  def fromJValue(fs: FS, path: String, jv: JValue): MatrixTableSpec = {
+    implicit val formats: Formats = new DefaultFormats() {
+      override val typeHints = ShortTypeHints(List(
+        classOf[ComponentSpec], classOf[RVDComponentSpec], classOf[PartitionCountsComponentSpec]))
+      override val typeHintFieldName = "name"
+    } +
+      new MatrixTypeSerializer
+    val params = jv.extract[MatrixTableSpecParameters]
+
+    val globalsSpec = RelationalSpec.read(fs, path + "/globals").asInstanceOf[AbstractTableSpec]
+
+    val colsSpec = RelationalSpec.read(fs, path + "/cols").asInstanceOf[AbstractTableSpec]
+
+    val rowsSpec = RelationalSpec.read(fs, path + "/rows").asInstanceOf[AbstractTableSpec]
+
+    // some legacy files written as MatrixTableSpec wrote the wrong type to the entries table metadata
+    var entriesSpec = RelationalSpec.read(fs, path + "/entries").asInstanceOf[TableSpec]
+    entriesSpec = TableSpec(fs, path + "/entries",
+      entriesSpec.params.copy(
+        table_type = TableType(params.matrix_type.entriesRVType, FastIndexedSeq(), params.matrix_type.globalType)))
+
+    new MatrixTableSpec(params, globalsSpec, colsSpec, rowsSpec, entriesSpec)
+  }
+}
+
+case class MatrixTableSpecParameters(
   file_version: Int,
   hail_version: String,
   references_rel_path: String,
   matrix_type: MatrixType,
-  components: Map[String, ComponentSpec]) extends AbstractMatrixTableSpec {
+  components: Map[String, ComponentSpec]) {
 
-  // some legacy files written as MatrixTableSpec wrote the wrong type to the entries table metadata
-  override def entriesTableSpec(path: String): AbstractTableSpec = {
-    val writtenETS = super.entriesTableSpec(path).asInstanceOf[TableSpec]
-    writtenETS.copy(table_type = TableType(matrix_type.entriesRVType, FastIndexedSeq(), matrix_type.globalType))
+  def write(fs: FS, path: String) {
+    using(new OutputStreamWriter(fs.create(path + "/metadata.json.gz"))) { out =>
+      out.write(JsonMethods.compact(decomposeWithName(this, "MatrixTableSpec")(RelationalSpec.formats)))
+    }
+  }
+
+}
+
+class MatrixTableSpec(
+  val params: MatrixTableSpecParameters,
+  val globalsSpec: AbstractTableSpec,
+  val colsSpec: AbstractTableSpec,
+  val rowsSpec: AbstractTableSpec,
+  val entriesSpec: AbstractTableSpec) extends AbstractMatrixTableSpec {
+  def references_rel_path: String = params.references_rel_path
+
+  def file_version: Int = params.file_version
+
+  def hail_version: String = params.hail_version
+
+  def matrix_type: MatrixType = params.matrix_type
+
+  def components: Map[String, ComponentSpec] = params.components
+
+  def toJValue: JValue = {
+    decomposeWithName(params, "MatrixTableSpec")(RelationalSpec.formats)
   }
 }
 

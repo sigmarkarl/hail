@@ -12,7 +12,7 @@ lazy val root = (project in file(".")).
   settings(
     inThisBuild(List(
       organization := "is.hail",
-      scalaVersion := "2.11.8",
+      scalaVersion := "2.11.12",
       version      := "0.2.0-SNAPSHOT"
     )),
     name := "hail",
@@ -27,17 +27,19 @@ lazy val root = (project in file(".")).
       "-deprecation",
       "-unchecked",
       "-Xlint:-infer-any",
-      "-Xlint:-unsound-match"
+      "-Xlint:-unsound-match",
+      "-target:jvm-1.8"
     ),
     libraryDependencies ++= Seq(
           "org.scalatest" %% "scalatest" % "3.0.3" % Test
+        , "com.google.cloud" % "google-cloud-storage" % "1.106.0"
         , "org.ow2.asm" % "asm" % "5.1"
         , "org.ow2.asm" % "asm-util" % "5.1"
         , "org.ow2.asm" % "asm-analysis" % "5.1"
         , "org.apache.spark" %% "spark-core" % sparkVersion % "provided"
         , "org.apache.spark" %% "spark-sql" % sparkVersion % "provided"
         , "org.apache.spark" %% "spark-mllib" % sparkVersion % "provided"
-        , "net.jpountz.lz4" % "lz4" % "1.4.0"
+        , "org.lz4" % "lz4-java" % "1.4.0"
         , "org.scalanlp" %% "breeze-natives" % si.breezeVersion
         , "com.github.samtools" % "htsjdk" % "2.21.0"
         , "org.slf4j" % "slf4j-api" % "1.7.25"
@@ -46,6 +48,8 @@ lazy val root = (project in file(".")).
         , "net.sourceforge.jdistlib" % "jdistlib" % "0.4.5"
         , "org.apache.commons" % "commons-math3" % "3.6.1"
         , "org.testng" % "testng" % "6.8.21" % Test
+        , "com.indeed" % "lsmtree-core" % "1.0.7"
+        , "com.indeed" % "util-serialization" % "1.0.30"
     ),
     unmanagedClasspath in Test += baseDirectory.value / "prebuilt" / "lib"
   )

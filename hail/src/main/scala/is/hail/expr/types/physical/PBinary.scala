@@ -5,11 +5,8 @@ import is.hail.annotations.{Region, UnsafeOrdering, _}
 import is.hail.asm4s._
 import is.hail.check.Arbitrary._
 import is.hail.check.Gen
-import is.hail.expr.ir.EmitMethodBuilder
+import is.hail.expr.ir.{EmitCodeBuilder, EmitMethodBuilder}
 import is.hail.expr.types.virtual.TBinary
-import is.hail.utils._
-
-import scala.reflect.{ClassTag, _}
 
 abstract class PBinary extends PType {
   lazy val virtualType: TBinary.type = TBinary
@@ -57,11 +54,11 @@ abstract class PBinary extends PType {
               i := 0,
               cmp := 0,
               Code.whileLoop(cmp.ceq(0) && i < lim,
-                cmp := Code.invokeStatic[java.lang.Integer, Int, Int, Int]("compare",
-                  Code.invokeStatic[java.lang.Byte, Byte, Int]("toUnsignedInt", Region.loadByte(bytesAddress(x) + i.toL)),
-                  Code.invokeStatic[java.lang.Byte, Byte, Int]("toUnsignedInt", Region.loadByte(bytesAddress(y) + i.toL))),
+                cmp := Code.invokeStatic2[java.lang.Integer, Int, Int, Int]("compare",
+                  Code.invokeStatic1[java.lang.Byte, Byte, Int]("toUnsignedInt", Region.loadByte(bytesAddress(x) + i.toL)),
+                  Code.invokeStatic1[java.lang.Byte, Byte, Int]("toUnsignedInt", Region.loadByte(bytesAddress(y) + i.toL))),
                 i += 1),
-              cmp.ceq(0).mux(Code.invokeStatic[java.lang.Integer, Int, Int, Int]("compare", l1, l2), cmp))
+              cmp.ceq(0).mux(Code.invokeStatic2[java.lang.Integer, Int, Int, Int]("compare", l1, l2), cmp))
         }
       }
     }
@@ -104,10 +101,12 @@ abstract class PBinary extends PType {
   def store(addr: Code[Long], bytes: Code[Array[Byte]]): Code[Unit]
 }
 
-object PBinary {
-  def apply(required: Boolean = false): PBinary = PCanonicalBinary(required)
+abstract class PBinaryValue extends PValue {
+  def loadLength(): Code[Int]
 
-  def unapply(t: PBinary): Option[Boolean] = PCanonicalBinary.unapply(t)
+  def loadBytes(): Code[Array[Byte]]
+
+  def loadByte(i: Code[Int]): Code[Byte]
 }
 
 abstract class PBinaryCode extends PCode {
@@ -115,7 +114,9 @@ abstract class PBinaryCode extends PCode {
 
   def loadLength(): Code[Int]
 
-  def bytesAddress(): Code[Long]
-
   def loadBytes(): Code[Array[Byte]]
+
+  def memoize(cb: EmitCodeBuilder, name: String): PBinaryValue
+
+  def memoizeField(cb: EmitCodeBuilder, name: String): PBinaryValue
 }

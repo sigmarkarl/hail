@@ -11,7 +11,7 @@ _initialized = False
 def startTestHailContext():
     global _initialized
     if not _initialized:
-        hl.init(master='local[2]', min_block_size=0, quiet=True)
+        hl.init(master='local[1]', min_block_size=0, quiet=True)
         _initialized = True
 
 
@@ -111,9 +111,10 @@ def create_all_values_datasets():
     return (create_all_values_table(), create_all_values_matrix_table())
 
 def skip_unless_spark_backend():
+    from hail.backend.spark_backend import SparkBackend
     @decorator
     def wrapper(func, *args, **kwargs):
-        if isinstance(hl.utils.java.Env.backend(), hl.backend.SparkBackend):
+        if isinstance(hl.utils.java.Env.backend(), SparkBackend):
             return func(*args, **kwargs)
         else:
             raise unittest.SkipTest('requires Spark')

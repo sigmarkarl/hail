@@ -16,6 +16,7 @@ spec:
         app: query
         hail.is/sha: "{{ code.sha }}"
     spec:
+      serviceAccountName: query
 {% if deploy %}
       priorityClassName: production
 {% endif %}
@@ -31,6 +32,8 @@ spec:
              value: "{{ global.domain }}"
            - name: HAIL_DEPLOY_CONFIG_FILE
              value: /deploy-config/deploy-config.json
+           - name: HAIL_BATCH_PODS_NAMESPACE
+             value: "{{ batch_pods_ns.name }}"
            - name: HAIL_SHA
              value: "{{ code.sha }}"
           ports:
@@ -42,13 +45,18 @@ spec:
            - name: session-secret-key
              mountPath: /session-secret-key
              readOnly: true
+           - name: ssl-config
+             mountPath: /ssl-config
+             readOnly: true
           resources:
             requests:
               memory: "3.75G"
+              cpu: "800m"
+            limits:
+              memory: "3.75G"
               cpu: "1"
           readinessProbe:
-            httpGet:
-              path: /healthcheck
+            tcpSocket:
               port: 5000
             initialDelaySeconds: 5
             periodSeconds: 5
@@ -59,17 +67,7 @@ spec:
        - name: session-secret-key
          secret:
            secretName: session-secret-key
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: query
-  labels:
-    app: query
-spec:
-  ports:
-  - port: 80
-    protocol: TCP
-    targetPort: 5000
-  selector:
-    app: query
+       - name: ssl-config
+         secret:
+           optional: false
+           secretName: ssl-config-query

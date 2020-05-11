@@ -745,7 +745,7 @@ class Tests(unittest.TestCase):
 
     def test_write_stage_locally(self):
         t = hl.utils.range_table(5)
-        f = new_temp_file(suffix='ht')
+        f = new_temp_file(extension='ht')
         t.write(f, stage_locally=True)
         t2 = hl.read_table(f)
         self.assertTrue(t._same(t2))
@@ -755,14 +755,14 @@ class Tests(unittest.TestCase):
 
     def test_read_back_same_as_exported(self):
         t, _ = create_all_values_datasets()
-        tmp_file = new_temp_file(prefix="test", suffix=".tsv")
+        tmp_file = new_temp_file(prefix="test", extension=".tsv")
         t.export(tmp_file)
         t_read_back = hl.import_table(tmp_file, types=dict(t.row.dtype)).key_by('idx')
         self.assertTrue(t.select_globals()._same(t_read_back, tolerance=1e-4, absolute=True))
 
     def test_indexed_read(self):
         t = hl.utils.range_table(2000, 10)
-        f = new_temp_file(suffix='ht')
+        f = new_temp_file(extension='ht')
         t.write(f)
         t2 = hl.read_table(f, _intervals=[
             hl.Interval(start=150, end=250, includes_start=True, includes_end=False),
@@ -991,6 +991,40 @@ class Tests(unittest.TestCase):
         self.assertEqual(inner_join.collect(), inner_join_expected)
         self.assertEqual(outer_join.collect(), outer_join_expected)
 
+    def test_joins_one_null(self):
+        tr = hl.utils.range_table(7, 1)
+        table1 = tr.key_by(new_key=tr.idx)
+        table1 = table1.select(idx1=table1.idx)
+        table2 = tr.key_by(new_key=hl.cond((tr.idx == 4) | (tr.idx == 6), hl.null(hl.tint32), tr.idx))
+        table2 = table2.select(idx2=table2.idx)
+
+        left_join = table1.join(table2, 'left')
+        right_join = table1.join(table2, 'right')
+        inner_join = table1.join(table2, 'inner')
+        outer_join = table1.join(table2, 'outer')
+
+        def row(new_key, idx1, idx2):
+            return hl.Struct(new_key=new_key, idx1=idx1, idx2=idx2)
+
+        left_join_expected = [row(0, 0, 0), row(1, 1, 1), row(2, 2, 2), row(3, 3, 3),
+                              row(4, 4, None), row(5, 5, 5), row(6, 6, None)]
+
+        right_join_expected = [row(0, 0, 0), row(1, 1, 1), row(2, 2, 2),
+                               row(3, 3, 3), row(5, 5, 5),
+                               row(None, None, 4), row(None, None, 6)]
+
+        inner_join_expected = [row(0, 0, 0), row(1, 1, 1), row(2, 2, 2), row(3, 3, 3), row(5, 5, 5)]
+
+        outer_join_expected = [row(0, 0, 0), row(1, 1, 1), row(2, 2, 2),
+                               row(3, 3, 3), row(4, 4, None),
+                               row(5, 5, 5), row(6, 6, None),
+                               row(None, None, 4), row(None, None, 6)]
+
+        self.assertEqual(left_join.collect(), left_join_expected)
+        self.assertEqual(right_join.collect(), right_join_expected)
+        self.assertEqual(inner_join.collect(), inner_join_expected)
+        self.assertEqual(outer_join.collect(), outer_join_expected)
+
     def test_partitioning_rewrite(self):
         ht = hl.utils.range_table(10, 3)
         ht1 = ht.annotate(x=hl.rand_unif(0, 1))
@@ -1031,8 +1065,8 @@ class Tests(unittest.TestCase):
         ht = hl.utils.range_table(100, 5)
         ht = ht.key_by(idx2=ht.idx // 2)
 
-        f1 = new_temp_file('ht')
-        f2 = new_temp_file('ht')
+        f1 = new_temp_file(extension='ht')
+        f2 = new_temp_file(extension='ht')
 
         ht.write(f1)
         ht.write(f2)
@@ -1155,7 +1189,7 @@ class Tests(unittest.TestCase):
         self.assertFalse(t1._same(t3))
 
     def test_rvd_key_write(self):
-        tempfile = new_temp_file(suffix='ht')
+        tempfile = new_temp_file(extension='ht')
         ht1 = hl.utils.range_table(1).key_by(foo='a', bar='b')
         ht1.write(tempfile)  # write ensures that table is written with both key fields
 
@@ -1206,7 +1240,7 @@ class Tests(unittest.TestCase):
         assert ht.fd.collect()[0] == ["e", "é"]
 
     def test_physical_key_truncation(self):
-        path = new_temp_file(suffix='ht')
+        path = new_temp_file(extension='ht')
         hl.import_vcf(resource('sample.vcf')).rows().key_by('locus').write(path)
         hl.read_table(path).select()._force_count()
 
@@ -1215,6 +1249,15 @@ class Tests(unittest.TestCase):
         ht = hl.Table.parallelize(data, hl.tstruct(x=hl.tint32), key=None, n_partitions=11)
         assert ht.naive_coalesce(4)._same(ht)
         assert ht.repartition(3, shuffle=False)._same(ht)
+
+    def test_path_collision_error(self):
+        path = new_temp_file(extension='ht')
+        ht = hl.utils.range_table(10)
+        ht.write(path)
+        ht = hl.read_table(path)
+        with pytest.raises(hl.utils.FatalError) as exc:
+            ht.write(path)
+        assert "both an input and output source" in str(exc.value)
 
 def test_large_number_of_fields(tmpdir):
     ht = hl.utils.range_table(100)
@@ -1326,7 +1369,7 @@ def test_can_process_wide_tables():
         print(f'working on width {w}')
         path = resource(f'width_scale_tests/{w}.tsv')
         ht = hl.import_table(path, impute=True)
-        out_path = new_temp_file(suffix='ht')
+        out_path = new_temp_file(extension='ht')
         ht.write(out_path)
         ht = hl.read_table(out_path)
         ht.annotate(another_field=5)._force_count()
@@ -1382,20 +1425,20 @@ def test_join_distinct_preserves_count():
 def test_write_table_containing_ndarray():
     t = hl.utils.range_table(5)
     t = t.annotate(n = hl._nd.arange(t.idx))
-    f = new_temp_file(suffix='ht')
+    f = new_temp_file(extension='ht')
     t.write(f)
     t2 = hl.read_table(f)
     assert t._same(t2)
 
 def test_group_within_partitions():
-    t = hl.utils.range_table(10).naive_coalesce(2)
+    t = hl.utils.range_table(10).repartition(2)
     t = t.annotate(sq=t.idx ** 2)
 
-    grouped1_collected = t._group_within_partitions(1).collect()
-    grouped2_collected = t._group_within_partitions(2).collect()
-    grouped3_collected = t._group_within_partitions(3).collect()
-    grouped5_collected = t._group_within_partitions(5).collect()
-    grouped6_collected = t._group_within_partitions(6).collect()
+    grouped1_collected = t._group_within_partitions("grouped_fields", 1).collect()
+    grouped2_collected = t._group_within_partitions("grouped_fields", 2).collect()
+    grouped3_collected = t._group_within_partitions("grouped_fields", 3).collect()
+    grouped5_collected = t._group_within_partitions("grouped_fields", 5).collect()
+    grouped6_collected = t._group_within_partitions("grouped_fields", 6).collect()
 
     assert len(grouped1_collected) == 10
     assert len(grouped2_collected) == 6
@@ -1409,5 +1452,27 @@ def test_group_within_partitions():
 
     # Testing after a filter
     ht = hl.utils.range_table(100).naive_coalesce(10)
-    filter_then_group = ht.filter(ht.idx % 2 == 0)._group_within_partitions(5).collect()
+    filter_then_group = ht.filter(ht.idx % 2 == 0)._group_within_partitions("grouped_fields", 5).collect()
     assert filter_then_group[0] == hl.Struct(idx=0, grouped_fields=[hl.Struct(idx=0), hl.Struct(idx=2), hl.Struct(idx=4), hl.Struct(idx=6), hl.Struct(idx=8)])
+
+
+def test_group_within_partitions_after_explode():
+    t = hl.utils.range_table(10).repartition(2)
+    t = t.annotate(arr=hl.range(0, 20))
+    t = t.explode(t.arr)
+    t = t._group_within_partitions("grouped_fields", 10)
+    assert(t._force_count() == 20)
+
+def test_group_within_partitions_after_import_vcf():
+    gt_mt = hl.import_vcf(resource('small-gt.vcf'))
+    ht = gt_mt.rows()
+    ht = ht._group_within_partitions("grouped_fields", 16)
+    ht.collect() # Just testing import without segault
+    assert True
+
+
+def test_range_annotate_range():
+    # tests left join right distinct requiredness
+    ht1 = hl.utils.range_table(10)
+    ht2 = hl.utils.range_table(5).annotate(x = 1)
+    ht1.annotate(x = ht2[ht1.idx].x)._force_count()

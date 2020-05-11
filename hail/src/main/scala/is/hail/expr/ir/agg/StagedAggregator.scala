@@ -2,7 +2,7 @@ package is.hail.expr.ir.agg
 
 import is.hail.annotations.StagedRegionValueBuilder
 import is.hail.asm4s._
-import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitFunctionBuilder}
+import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder}
 import is.hail.expr.types.physical.PType
 
 abstract class StagedAggregator {
@@ -10,18 +10,18 @@ abstract class StagedAggregator {
 
   def resultType: PType
 
-  def createState(cb: EmitClassBuilder[_]): State
+  def createState(cb: EmitCodeBuilder): State
 
-  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit]
+  protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode])
 
-  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit]
+  protected def _seqOp(cb: EmitCodeBuilder, state: State, seq: Array[EmitCode])
 
-  def combOp(state: State, other: State, dummy: Boolean): Code[Unit]
+  protected def _combOp(cb: EmitCodeBuilder, state: State, other: State)
 
-  def result(state: State, srvb: StagedRegionValueBuilder, dummy: Boolean): Code[Unit]
+  protected def _result(cb: EmitCodeBuilder, state: State, srvb: StagedRegionValueBuilder)
 
-  def initOp(state: AggregatorState, init: Array[EmitCode]): Code[Unit] = initOp(state.asInstanceOf[State], init, dummy = true)
-  def seqOp(state: AggregatorState, seq: Array[EmitCode]): Code[Unit] = seqOp(state.asInstanceOf[State], seq, dummy = true)
-  def combOp(state: AggregatorState, other: AggregatorState): Code[Unit] = combOp(state.asInstanceOf[State], other.asInstanceOf[State], dummy = true)
-  def result(state: AggregatorState, srvb: StagedRegionValueBuilder): Code[Unit] = result(state.asInstanceOf[State], srvb, dummy = true)
+  def initOp(cb: EmitCodeBuilder, state: AggregatorState, init: Array[EmitCode]) = _initOp(cb, state.asInstanceOf[State], init)
+  def seqOp(cb: EmitCodeBuilder, state: AggregatorState, seq: Array[EmitCode]) = _seqOp(cb, state.asInstanceOf[State], seq)
+  def combOp(cb: EmitCodeBuilder, state: AggregatorState, other: AggregatorState) = _combOp(cb, state.asInstanceOf[State], other.asInstanceOf[State])
+  def result(cb: EmitCodeBuilder, state: AggregatorState, srvb: StagedRegionValueBuilder) = _result(cb, state.asInstanceOf[State], srvb)
 }

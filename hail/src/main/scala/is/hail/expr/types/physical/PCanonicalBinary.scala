@@ -20,10 +20,25 @@ class PCanonicalBinary(val required: Boolean) extends PBinary {
   def copyFromTypeAndStackValue(mb: EmitMethodBuilder[_], region: Value[Region], srcPType: PType, stackValue: Code[_], deepCopy: Boolean): Code[_] =
     this.copyFromType(mb, region, srcPType, stackValue.asInstanceOf[Code[Long]], deepCopy)
 
-  def copyFromType(region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Long = {
-    val srcBinary = srcPType.asInstanceOf[PBinary]
-    constructOrCopy(region, srcBinary, srcAddress, deepCopy)
+  def _copyFromAddress(region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Long = {
+    val srcBinary = srcPType.asInstanceOf[PCanonicalBinary]
+    if (srcBinary == this) {
+      if (deepCopy) {
+        val len = srcBinary.loadLength(srcAddress)
+        val newAddr = allocate(region, len)
+        Region.copyFrom(srcAddress, newAddr, contentByteSize(len))
+        newAddr
+      } else
+        srcAddress
+    } else {
+      val len = srcBinary.loadLength(srcAddress)
+      val newAddr = allocate(region, len)
+      storeLength(newAddr, len)
+      Region.copyFrom(srcAddress + srcBinary.lengthHeaderBytes, newAddr + lengthHeaderBytes, len)
+      newAddr
+    }
   }
+
 
   override def containsPointers: Boolean = true
 
@@ -119,48 +134,52 @@ class PCanonicalBinary(val required: Boolean) extends PBinary {
 
   def constructAtAddress(addr: Long, region: Region, srcPType: PType, srcAddress: Long, deepCopy: Boolean): Unit = {
     val srcArray = srcPType.asInstanceOf[PBinary]
-    Region.storeAddress(addr, constructOrCopy(region, srcArray, srcAddress, deepCopy))
-  }
-
-  private def constructOrCopy(region: Region, srcBinary: PBinary, srcAddress: Long, deepCopy: Boolean): Long = {
-    if (srcBinary == this) {
-      if (deepCopy) {
-        val len = srcBinary.loadLength(srcAddress)
-        val newAddr = allocate(region, len)
-        Region.copyFrom(srcAddress, newAddr, contentByteSize(len))
-        newAddr
-      } else
-        srcAddress
-    } else {
-      val len = srcBinary.loadLength(srcAddress)
-      val newAddr = allocate(region, len)
-      storeLength(newAddr, len)
-      Region.copyFrom(srcAddress + srcBinary.lengthHeaderBytes, newAddr + lengthHeaderBytes, len)
-      newAddr
-    }
+    Region.storeAddress(addr, copyFromAddress(region, srcArray, srcAddress, deepCopy))
   }
 
   def setRequired(required: Boolean) = if(required == this.required) this else PCanonicalBinary(required)
 }
 
 object PCanonicalBinary {
-  def apply(required: Boolean = false): PBinary = if (required) PCanonicalBinaryRequired else PCanonicalBinaryOptional
+  def apply(required: Boolean = false): PCanonicalBinary = if (required) PCanonicalBinaryRequired else PCanonicalBinaryOptional
 
   def unapply(t: PBinary): Option[Boolean] = Option(t.required)
 }
 
-class PCanonicalBinaryCode(val pt: PBinary, a: Code[Long]) extends PBinaryCode {
-  def code: Code[_] = a
+class PCanonicalBinarySettable(val pt: PCanonicalBinary, a: Settable[Long]) extends PBinaryValue with PSettable {
+  def get: PBinaryCode = new PCanonicalBinaryCode(pt, a)
+
+  def settableTuple(): IndexedSeq[Settable[_]] = FastIndexedSeq(a)
 
   def loadLength(): Code[Int] = pt.loadLength(a)
 
-  def bytesAddress(): Code[Long] = pt.bytesAddress(a)
+  def loadBytes(): Code[Array[Byte]] = pt.loadBytes(a)
+
+  def loadByte(i: Code[Int]): Code[Byte] = Region.loadByte(pt.bytesAddress(a) + i.toL)
+
+  def store(pc: PCode): Code[Unit] = a.store(pc.asInstanceOf[PCanonicalBinaryCode].a)
+}
+
+class PCanonicalBinaryCode(val pt: PCanonicalBinary, val a: Code[Long]) extends PBinaryCode {
+  def code: Code[_] = a
+
+  def codeTuple(): IndexedSeq[Code[_]] = FastIndexedSeq(a)
+
+  def loadLength(): Code[Int] = pt.loadLength(a)
 
   def loadBytes(): Code[Array[Byte]] = pt.loadBytes(a)
 
-  def memoize(cb: EmitCodeBuilder, name: String): PValue = defaultMemoizeImpl(cb, name)
+  def memoize(cb: EmitCodeBuilder, sb: SettableBuilder, name: String): PCanonicalBinarySettable = {
+    val s = new PCanonicalBinarySettable(pt, sb.newSettable[Long](name))
+    cb.assign(s, this)
+    s
+  }
 
-  def memoizeField(cb: EmitCodeBuilder, name: String): PValue = defaultMemoizeFieldImpl(cb, name)
+  def memoize(cb: EmitCodeBuilder, name: String): PCanonicalBinarySettable =
+    memoize(cb, cb.localBuilder, name)
+
+  def memoizeField(cb: EmitCodeBuilder, name: String): PCanonicalBinarySettable =
+    memoize(cb, cb.fieldBuilder, name)
 
   def store(mb: EmitMethodBuilder[_], r: Value[Region], dst: Code[Long]): Code[Unit] = Region.storeAddress(dst, a)
 }

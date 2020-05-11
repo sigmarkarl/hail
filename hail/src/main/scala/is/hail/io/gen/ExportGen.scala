@@ -2,7 +2,7 @@ package is.hail.io.gen
 
 import is.hail.HailContext
 import is.hail.annotations.Region
-import is.hail.expr.ir.MatrixValue
+import is.hail.expr.ir.{ExecuteContext, MatrixValue}
 import is.hail.expr.types.physical.{PString, PStruct}
 import is.hail.variant.{ArrayGenotypeView, RegionValueVariant, VariantMethods, View}
 import is.hail.utils._
@@ -11,9 +11,8 @@ import org.apache.spark.sql.Row
 object ExportGen {
   val spaceRegex = """\s+""".r
 
-  def apply(mv: MatrixValue, path: String, precision: Int = 4) {
-    val hc = HailContext.get
-    val fs = hc.fs
+  def apply(ctx: ExecuteContext, mv: MatrixValue, path: String, precision: Int = 4) {
+    val fs = ctx.fs
 
     fs.writeTable(path + ".sample",
       "ID_1 ID_2 missing\n0 0 0" +: mv.colValues.javaValue.map { a =>
@@ -37,16 +36,16 @@ object ExportGen {
     val localNSamples = mv.nCols
     val fullRowType = mv.rvRowPType
 
-    mv.rvd.mapPartitions { it =>
+    mv.rvd.mapPartitions { (ctx, it) =>
       val sb = new StringBuilder
       val gpView = new ArrayGenotypeView(fullRowType)
       val v = new RegionValueVariant(fullRowType)
       val va = new GenAnnotationView(fullRowType)
 
-      it.map { rv =>
-        gpView.setRegion(rv)
-        v.setRegion(rv)
-        va.setRegion(rv)
+      it.map { ptr =>
+        gpView.set(ptr)
+        v.set(ptr)
+        va.set(ptr)
 
         val contig = v.contig()
         val alleles = v.alleles()
@@ -99,7 +98,7 @@ object ExportGen {
         }
         sb.result()
       }
-    }.writeTable(hc.fs, path + ".gen", hc.tmpDir, None)
+    }.writeTable(ctx, path + ".gen", None)
   }
 }
 
@@ -116,7 +115,7 @@ class GenAnnotationView(rowType: PStruct) extends View {
   private var cachedVarid: String = _
   private var cachedRsid: String = _
 
-  def setRegion(region: Region, offset: Long) {
+  def set(offset: Long) {
     assert(rowType.isFieldDefined(offset, varidIdx))
     assert(rowType.isFieldDefined(offset, rsidIdx))
     this.rsidOffset = rowType.loadField(offset, rsidIdx)

@@ -1,20 +1,10 @@
 package is.hail.annotations
 
 import is.hail.utils._
-import org.apache.spark.TaskContext
 
 object RegionPool {
   private lazy val thePool: ThreadLocal[RegionPool] = new ThreadLocal[RegionPool]() {
-    override def initialValue(): RegionPool = {
-      val pool = RegionPool()
-      val tc = TaskContext.get()
-      if (tc != null) {
-        tc.addTaskCompletionListener { (_: TaskContext) =>
-          pool.clear()
-        }
-      }
-      pool
-    }
+    override def initialValue(): RegionPool = RegionPool()
   }
 
   def get: RegionPool = thePool.get()
@@ -125,19 +115,13 @@ final class RegionPool private(strictMemoryCheck: Boolean, threadName: String, t
     }
 
     log.info(s"RegionPool: $context: ${readableBytes(totalAllocatedBytes)} allocated (${readableBytes(inBlocks)} blocks / " +
-      s"${readableBytes(totalAllocatedBytes - inBlocks)} chunks), thread $threadID: $threadName")
-  }
+      s"${readableBytes(totalAllocatedBytes - inBlocks)} chunks), regions.size = ${regions.size}, thread $threadID: $threadName")
+//    log.info("-----------STACK_TRACES---------")
+//    val stacks: String = regions.result().toIndexedSeq.flatMap(r => r.stackTrace.map((r.getTotalChunkMemory(), _))).foldLeft("")((a: String, b) => a + "\n" + b.toString())
+//    log.info(stacks)
+//    log.info("---------------END--------------")
 
-  def clear(): Unit = {
-    report("CLEAR")
-    var i = 0
-    while (i < regions.size) {
-      if (!regions(i).isFreed) {
-        regions(i).freeMemory()
-        reclaim(regions(i))
-      }
-      i += 1
-    }
+
   }
 
   override def finalize(): Unit = close()

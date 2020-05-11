@@ -4,9 +4,13 @@ import asyncio
 import aiohttp
 import base64
 import traceback
-from hailtop.utils import time_msecs, sleep_and_backoff, is_transient_error
 
-from .globals import complete_states, tasks
+from hailtop.utils import (
+    time_msecs, sleep_and_backoff, is_transient_error,
+    time_msecs_str, humanize_timedelta_msecs)
+from hailtop.tls import ssl_client_session
+
+from .globals import complete_states, tasks, STATUS_FORMAT_VERSION
 from .batch_configuration import KUBERNETES_TIMEOUT_IN_SECONDS, \
     KUBERNETES_SERVER_URL
 from .utils import cost_from_msec_mcpu
@@ -29,6 +33,20 @@ def batch_record_to_dict(app, record):
     else:
         state = 'running'
 
+    def _time_msecs_str(t):
+        if t:
+            return time_msecs_str(t)
+        return None
+
+    time_created = _time_msecs_str(record['time_created'])
+    time_closed = _time_msecs_str(record['time_closed'])
+    time_completed = _time_msecs_str(record['time_completed'])
+
+    if record['time_closed'] and record['time_completed']:
+        duration = humanize_timedelta_msecs(record['time_completed'] - record['time_closed'])
+    else:
+        duration = None
+
     d = {
         'id': record['id'],
         'billing_project': record['billing_project'],
@@ -39,7 +57,11 @@ def batch_record_to_dict(app, record):
         'n_completed': record['n_completed'],
         'n_succeeded': record['n_succeeded'],
         'n_failed': record['n_failed'],
-        'n_cancelled': record['n_cancelled']
+        'n_cancelled': record['n_cancelled'],
+        'time_created': time_created,
+        'time_closed': time_closed,
+        'time_completed': time_completed,
+        'duration': duration
     }
 
     attributes = json.loads(record['attributes'])
@@ -71,8 +93,13 @@ WHERE id = %s AND NOT deleted AND callback IS NOT NULL AND
 
     log.info(f'making callback for batch {batch_id}: {callback}')
 
+    if record['user'] == 'ci':
+        # only jobs from CI may use batch's TLS identity
+        make_client_session = ssl_client_session
+    else:
+        make_client_session = aiohttp.ClientSession
     try:
-        async with aiohttp.ClientSession(
+        async with make_client_session(
                 raise_for_status=True, timeout=aiohttp.ClientTimeout(total=5)) as session:
             await session.post(callback, json=batch_record_to_dict(app, record))
             log.info(f'callback for batch {batch_id} successful')
@@ -234,8 +261,8 @@ async def unschedule_job(app, record):
                 await instance.mark_healthy()
                 break
         except Exception as e:
-            if (isinstance(e, aiohttp.ClientResponseError) and
-                    e.status == 404):  # pylint: disable=no-member
+            if (isinstance(e, aiohttp.ClientResponseError)
+                    and e.status == 404):  # pylint: disable=no-member
                 await instance.mark_healthy()
                 break
             else:
@@ -377,6 +404,7 @@ async def schedule_job(app, record, instance):
         except Exception:
             log.exception('while making job config')
             status = {
+                'version': STATUS_FORMAT_VERSION,
                 'worker': None,
                 'batch_id': batch_id,
                 'job_id': job_id,

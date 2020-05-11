@@ -3,30 +3,7 @@ package is.hail.expr.types.physical
 import is.hail.annotations._
 import is.hail.asm4s.Code
 import is.hail.expr.ir.{EmitMethodBuilder, SortOrder}
-import is.hail.expr.types.BaseStruct
-import is.hail.expr.types.virtual.{Field, TStruct, Type}
-import is.hail.utils._
-import org.apache.spark.sql.Row
-
-import scala.collection.JavaConverters._
-
-object PStruct {
-  def empty(required: Boolean = false): PStruct = PCanonicalStruct.empty(required)
-
-  def apply(args: IndexedSeq[PField], required: Boolean = false) = PCanonicalStruct(args, required)
-
-  def apply(required: Boolean, args: (String, PType)*): PStruct =
-    PCanonicalStruct(required, args: _*)
-
-  def apply(args: (String, PType)*): PStruct =
-    PCanonicalStruct(false, args: _*)
-
-  def apply(names: java.util.List[String], types: java.util.List[PType], required: Boolean): PStruct =
-    PCanonicalStruct(names, types, required)
-
-  def canonical(t: Type): PStruct = PCanonicalStruct.canonical(t)
-  def canonical(t: PType): PStruct = PCanonicalStruct.canonical(t)
-}
+import is.hail.expr.types.virtual.{Field, TStruct}
 
 trait PStruct extends PBaseStruct {
   lazy val virtualType: TStruct = TStruct(fields.map(f => Field(f.name, f.typ.virtualType, f.index)))
@@ -40,27 +17,37 @@ trait PStruct extends PBaseStruct {
     CodeOrdering.rowOrdering(this, other.asInstanceOf[PStruct], mb, so)
   }
 
-  def updateKey(key: String, i: Int, sig: PType): PStruct
+  final def deleteField(key: String): PCanonicalStruct = {
+    assert(fieldIdx.contains(key))
+    val index = fieldIdx(key)
+    val newFields = Array.fill[PField](fields.length - 1)(null)
+    for (i <- 0 until index)
+      newFields(i) = fields(i)
+    for (i <- index + 1 until fields.length)
+      newFields(i - 1) = fields(i).copy(index = i - 1)
+    PCanonicalStruct(newFields, required)
+  }
 
-  def deleteField(key: String): PStruct
-
-  def appendKey(key: String, sig: PType): PStruct
+  final def appendKey(key: String, sig: PType): PCanonicalStruct = {
+    assert(!fieldIdx.contains(key))
+    val newFields = Array.fill[PField](fields.length + 1)(null)
+    for (i <- fields.indices)
+      newFields(i) = fields(i)
+    newFields(fields.length) = PField(key, sig, fields.length)
+    PCanonicalStruct(newFields, required)
+  }
 
   def rename(m: Map[String, String]): PStruct
 
-  def ++(that: PStruct): PStruct
-
   def identBase: String = "tuple"
 
-  def selectFields(names: Seq[String]): PStruct
+  final def selectFields(names: Seq[String]): PCanonicalStruct = PCanonicalStruct(required, names.map(f => f -> field(f).typ): _*)
 
-  def select(keep: IndexedSeq[String]): (PStruct, (Row) => Row)
+  final def dropFields(names: Set[String]): PCanonicalStruct = selectFields(fieldNames.filter(!names.contains(_)))
 
-  def dropFields(names: Set[String]): PStruct
+  final def typeAfterSelect(keep: IndexedSeq[Int]): PCanonicalStruct = PCanonicalStruct(required, keep.map(i => fieldNames(i) -> types(i)): _*)
 
-  def typeAfterSelect(keep: IndexedSeq[Int]): PStruct
-
-  protected val structFundamentalType: PStruct
+  val structFundamentalType: PStruct
   override lazy val fundamentalType: PStruct = structFundamentalType
 
   def loadField(offset: Code[Long], fieldName: String): Code[Long]

@@ -6,14 +6,22 @@ import is.hail.expr.ir._
 import is.hail.utils._
 import is.hail.variant.Genotype
 
-trait PValue {
+trait PValue { pValueSelf =>
   def pt: PType
 
   def get: PCode
+
+  def value: Value[_] = {
+    new Value[Any] {
+      override def get: Code[Any] = pValueSelf.get.code
+    }
+  }
 }
 
 trait PSettable extends PValue {
   def store(v: PCode): Code[Unit]
+
+  def settableTuple(): IndexedSeq[Settable[_]]
 
   def load(): PCode = get
 
@@ -24,6 +32,8 @@ abstract class PCode { self =>
   def pt: PType
 
   def code: Code[_]
+
+  def codeTuple(): IndexedSeq[Code[_]]
 
   def typeInfo: TypeInfo[_] = typeToTypeInfo(pt)
 
@@ -51,6 +61,8 @@ abstract class PCode { self =>
 
   def asCall: PCallCode = asInstanceOf[PCallCode]
 
+  def asStream: PCanonicalStreamCode = asInstanceOf[PCanonicalStreamCode]
+
   def castTo(mb: EmitMethodBuilder[_], region: Value[Region], destType: PType): PCode = {
     PCode(destType,
       destType.copyFromTypeAndStackValue(mb, region, pt, code))
@@ -62,7 +74,7 @@ abstract class PCode { self =>
     new PValue {
       val pt: PType = self.pt
 
-      private val v = cb.memoizeAny(code, name)(typeToTypeInfo(pt))
+      private val v = cb.newLocalAny(name, code)(typeToTypeInfo(pt))
 
       def get: PCode = PCode(pt, v)
     }
@@ -72,7 +84,7 @@ abstract class PCode { self =>
     new PValue {
       val pt: PType = self.pt
 
-      private val v = cb.memoizeFieldAny(code, name)(typeToTypeInfo(pt))
+      private val v = cb.newFieldAny(name, code)(typeToTypeInfo(pt))
 
       def get: PCode = PCode(pt, v)
     }
@@ -91,24 +103,60 @@ object PCode {
       new PCanonicalIndexableCode(pt, coerce[Long](code))
     case pt: PCanonicalDict =>
       new PCanonicalIndexableCode(pt, coerce[Long](code))
-
+    case pt: PSubsetStruct =>
+      new PSubsetStructCode(pt, coerce[Long](code))
     case pt: PCanonicalBaseStruct =>
       new PCanonicalBaseStructCode(pt, coerce[Long](code))
-
-    case pt: PBinary =>
+    case pt: PCanonicalBinary =>
       new PCanonicalBinaryCode(pt, coerce[Long](code))
-    case pt: PString =>
+    case pt: PCanonicalString =>
       new PCanonicalStringCode(pt, coerce[Long](code))
-    case pt: PInterval =>
+    case pt: PCanonicalInterval =>
       new PCanonicalIntervalCode(pt, coerce[Long](code))
     case pt: PCanonicalLocus =>
       new PCanonicalLocusCode(pt, coerce[Long](code))
-    case pt: PCall =>
+    case pt: PCanonicalCall =>
       new PCanonicalCallCode(pt, coerce[Int](code))
-
+    case pt: PCanonicalNDArray =>
+      new PCanonicalNDArrayCode(pt, coerce[Long](code))
     case _ =>
       new PPrimitiveCode(pt, code)
   }
 
   def _empty: PCode = PCode(PVoid, Code._empty)
+}
+
+object PSettable {
+  def apply(sb: SettableBuilder, _pt: PType, name: String): PSettable = _pt match {
+    case pt: PCanonicalArray =>
+      PCanonicalIndexableSettable(sb, pt, name)
+    case pt: PCanonicalSet =>
+      PCanonicalIndexableSettable(sb, pt, name)
+    case pt: PCanonicalDict =>
+      PCanonicalIndexableSettable(sb, pt, name)
+
+    case pt: PCanonicalBaseStruct =>
+      PCanonicalBaseStructSettable(sb, pt, name)
+
+    case pt: PCanonicalInterval =>
+      PCanonicalIntervalSettable(sb, pt, name)
+    case pt: PCanonicalLocus =>
+      PCanonicalLocusSettable(sb, pt, name)
+    case pt: PCanonicalCall =>
+      PCanonicalCallSettable(sb, pt, name)
+
+    case _ => new PSettable {
+      val pt: PType = _pt
+
+      private val v = sb.newSettable(name)(typeToTypeInfo(pt))
+
+      def settableTuple(): IndexedSeq[Settable[_]] = FastIndexedSeq(v)
+
+      def get: PCode = PCode(pt, v)
+
+      def store(pv: PCode): Code[Unit] = {
+        v.storeAny(pv.code)
+      }
+    }
+  }
 }

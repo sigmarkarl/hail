@@ -4,17 +4,16 @@ import java.io.{File, PrintWriter}
 
 import breeze.linalg.{DenseMatrix, Matrix, Vector}
 import is.hail.ExecStrategy.ExecStrategy
-import is.hail.annotations.{Annotation, Region, RegionValueBuilder, SafeRow}
+import is.hail.annotations.{Region, RegionValueBuilder, SafeRow}
+import is.hail.asm4s._
 import is.hail.backend.spark.SparkBackend
 import is.hail.expr.ir._
 import is.hail.expr.ir.{BindingEnv, MakeTuple, Subst}
 import is.hail.expr.ir.lowering.LowererUnsupportedOperation
-import is.hail.expr.types.MatrixType
-import is.hail.expr.types.physical.{PArray, PBaseStruct, PCanonicalString, PCanonicalTuple, PStruct, PTuple, PTupleField, PType}
+import is.hail.expr.types.physical.{PBaseStruct, PCanonicalArray, PType}
 import is.hail.expr.types.virtual._
-import is.hail.io.plink.MatrixPLINKReader
 import is.hail.io.vcf.MatrixVCFReader
-import is.hail.utils.{ExecutionTimer, _}
+import is.hail.utils._
 import is.hail.variant._
 import org.apache.spark.SparkException
 import org.apache.spark.sql.Row
@@ -155,7 +154,7 @@ object TestUtils {
   ): Any = {
     if (agg.isDefined || !env.isEmpty || !args.isEmpty)
       throw new LowererUnsupportedOperation("can't test with aggs or user defined args/env")
-    HailContext.sparkBackend().jvmLowerAndExecute(x, optimize = false, lowerTable = true, lowerBM = true, print = bytecodePrinter)._1
+    HailContext.sparkBackend("TestUtils.loweredExecute").jvmLowerAndExecute(x, optimize = false, lowerTable = true, lowerBM = true, print = bytecodePrinter)._1
   }
 
   def eval(x: IR): Any = eval(x, Env.empty, FastIndexedSeq(), None)
@@ -198,13 +197,13 @@ object TestUtils {
         }
       }
 
-      val argsPType = PType.canonical(argsType)
+      val argsPType = PType.canonical(argsType).setRequired(true)
       agg match {
         case Some((aggElements, aggType)) =>
           val aggElementVar = genUID()
           val aggArrayVar = genUID()
           val aggPType = PType.canonical(aggType)
-          val aggArrayPType = PArray(aggPType)
+          val aggArrayPType = PCanonicalArray(aggPType, required = true)
 
           val substAggEnv = aggType.fields.foldLeft(Env.empty[IR]) { case (env, f) =>
             env.bind(f.name, GetField(Ref(aggElementVar, aggType), f.name))
@@ -213,9 +212,10 @@ object TestUtils {
             aggElementVar,
             MakeTuple.ordered(FastSeq(rewrite(Subst(x, BindingEnv(eval = substEnv, agg = Some(substAggEnv)))))))
 
-          val (resultType2, f) = Compile[Long, Long, Long](ctx,
-            argsVar, argsPType,
-            aggArrayVar, aggArrayPType,
+          val (resultType2, f) = Compile[AsmFunction3RegionLongLongLong](ctx,
+            FastIndexedSeq((argsVar, argsPType),
+              (aggArrayVar, aggArrayPType)),
+            FastIndexedSeq(classInfo[Region], LongInfo, LongInfo), LongInfo,
             aggIR,
             print = bytecodePrinter,
             optimize = optimize)
@@ -241,13 +241,14 @@ object TestUtils {
             rvb.endArray()
             val aggOff = rvb.end()
 
-            val resultOff = f(0, region)(region, argsOff, false, aggOff, false)
+            val resultOff = f(0, region)(region, argsOff, aggOff)
             SafeRow(resultType2.asInstanceOf[PBaseStruct], resultOff).get(0)
           }
 
         case None =>
-          val (resultType2, f) = Compile[Long, Long](ctx,
-            argsVar, argsPType,
+          val (resultType2, f) = Compile[AsmFunction2RegionLongLong](ctx,
+            FastIndexedSeq((argsVar, argsPType)),
+            FastIndexedSeq(classInfo[Region], LongInfo), LongInfo,
             MakeTuple.ordered(FastSeq(rewrite(Subst(x, BindingEnv(substEnv))))),
             optimize = optimize,
             print = bytecodePrinter)
@@ -265,7 +266,7 @@ object TestUtils {
             rvb.endTuple()
             val argsOff = rvb.end()
 
-            val resultOff = f(0, region)(region, argsOff, false)
+            val resultOff = f(0, region)(region, argsOff)
             SafeRow(resultType2.asInstanceOf[PBaseStruct], resultOff).get(0)
           }
       }
@@ -331,7 +332,8 @@ object TestUtils {
 
     ExecuteContext.scoped() { ctx =>
       val filteredExecStrats: Set[ExecStrategy] =
-        if (HailContext.backend.isInstanceOf[SparkBackend]) execStrats
+        if (HailContext.backend.isInstanceOf[SparkBackend])
+          execStrats
         else {
           info("skipping interpret and non-lowering compile steps on non-spark backend")
           execStrats.intersect(ExecStrategy.backendOnly)
@@ -416,12 +418,12 @@ object TestUtils {
     assertCompiledThrows[HailException](x, regex)
   }
 
-  def assertNDEvals(nd: NDArrayIR, expected: Any)
+  def assertNDEvals(nd: IR, expected: Any)
     (implicit execStrats: Set[ExecStrategy]) {
     assertNDEvals(nd, Env.empty, FastIndexedSeq(), None, expected)
   }
 
-  def assertNDEvals(nd: NDArrayIR, expected: (Any, IndexedSeq[Long]))
+  def assertNDEvals(nd: IR, expected: (Any, IndexedSeq[Long]))
     (implicit execStrats: Set[ExecStrategy]) {
     if (expected == null)
       assertNDEvals(nd, Env.empty, FastIndexedSeq(), None, null, null)
@@ -429,21 +431,21 @@ object TestUtils {
       assertNDEvals(nd, Env.empty, FastIndexedSeq(), None, expected._2, expected._1)
   }
 
-  def assertNDEvals(nd: NDArrayIR, args: IndexedSeq[(Any, Type)], expected: Any)
+  def assertNDEvals(nd: IR, args: IndexedSeq[(Any, Type)], expected: Any)
     (implicit execStrats: Set[ExecStrategy]) {
     assertNDEvals(nd, Env.empty, args, None, expected)
   }
 
-  def assertNDEvals(nd: NDArrayIR, agg: (IndexedSeq[Row], TStruct), expected: Any)
+  def assertNDEvals(nd: IR, agg: (IndexedSeq[Row], TStruct), expected: Any)
     (implicit execStrats: Set[ExecStrategy]) {
     assertNDEvals(nd, Env.empty, FastIndexedSeq(), Some(agg), expected)
   }
 
-  def assertNDEvals(nd: NDArrayIR, env: Env[(Any, Type)], args: IndexedSeq[(Any, Type)],
+  def assertNDEvals(nd: IR, env: Env[(Any, Type)], args: IndexedSeq[(Any, Type)],
     agg: Option[(IndexedSeq[Row], TStruct)], expected: Any)
     (implicit execStrats: Set[ExecStrategy]): Unit = {
     var e: IndexedSeq[Any] = expected.asInstanceOf[IndexedSeq[Any]]
-    val dims = Array.fill(nd.typ.nDims) {
+    val dims = Array.fill(nd.typ.asInstanceOf[TNDArray].nDims) {
       val n = e.length
       if (n != 0 && e.head.isInstanceOf[IndexedSeq[_]])
         e = e.head.asInstanceOf[IndexedSeq[Any]]
@@ -452,11 +454,11 @@ object TestUtils {
     assertNDEvals(nd, Env.empty, FastIndexedSeq(), agg, dims, expected)
   }
 
-  def assertNDEvals(nd: NDArrayIR, env: Env[(Any, Type)], args: IndexedSeq[(Any, Type)],
+  def assertNDEvals(nd: IR, env: Env[(Any, Type)], args: IndexedSeq[(Any, Type)],
     agg: Option[(IndexedSeq[Row], TStruct)], dims: IndexedSeq[Long], expected: Any)
     (implicit execStrats: Set[ExecStrategy]): Unit = {
     val arrayIR = if (expected == null) nd else {
-      val refs = Array.fill(nd.typ.nDims) { Ref(genUID(), TInt32) }
+      val refs = Array.fill(nd.typ.asInstanceOf[TNDArray].nDims) { Ref(genUID(), TInt32) }
       Let("nd", nd,
         dims.zip(refs).foldRight[IR](NDArrayRef(Ref("nd", nd.typ), refs.map(Cast(_, TInt64)))) {
           case ((n, ref), accum) =>
@@ -495,7 +497,7 @@ object TestUtils {
     }
   }
 
-  def importVCF(hc: HailContext, file: String, force: Boolean = false,
+  def importVCF(ctx: ExecuteContext, file: String, force: Boolean = false,
     forceBGZ: Boolean = false,
     headerFile: Option[String] = None,
     nPartitions: Option[Int] = None,
@@ -511,7 +513,7 @@ object TestUtils {
     }
     val entryFloatType = TFloat64._toPretty
 
-    val reader = MatrixVCFReader(
+    val reader = MatrixVCFReader(ctx,
       Array(file),
       callFields,
       entryFloatType,
@@ -524,8 +526,7 @@ object TestUtils {
       forceBGZ,
       force,
       TextInputFilterAndReplace(),
-      partitionsJSON
-    )
+      partitionsJSON)
     MatrixRead(reader.fullMatrixType, dropSamples, false, reader)
   }
 }

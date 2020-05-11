@@ -18,10 +18,12 @@ from hail.ir import BlockMatrixWrite, BlockMatrixMap2, ApplyBinaryPrimOp, Ref, F
     RowIntervalSparsifier, BandSparsifier, UnpersistBlockMatrix
 from hail.ir.blockmatrix_reader import BlockMatrixNativeReader, BlockMatrixBinaryReader, BlockMatrixPersistReader
 from hail.ir.blockmatrix_writer import BlockMatrixBinaryWriter, BlockMatrixNativeWriter, BlockMatrixRectanglesWriter, BlockMatrixPersistWriter
+from hail.ir import ExportType
 from hail.table import Table
-from hail.typecheck import *
+from hail.typecheck import typecheck, typecheck_method, nullable, oneof, \
+    sliceof, sequenceof, lazy, enumeration, numeric, tupleof, func_spec
 from hail.utils import new_temp_file, new_local_temp_file, local_path_uri, storage_level
-from hail.utils.java import Env, jarray, joption
+from hail.utils.java import Env
 
 block_matrix_type = lazy()
 
@@ -220,15 +222,6 @@ class BlockMatrix(object):
 
     def __init__(self, bmir):
         self._bmir = bmir
-        self._cached_jbm = None
-
-    @property
-    def _jbm(self):
-        if self._cached_jbm is not None:
-            return self._cached_jbm
-        else:
-            self._cached_jbm = Env.spark_backend('BlockMatrix._jbm')._to_java_ir(self._bmir).pyExecute()
-            return self._cached_jbm
 
     @classmethod
     @typecheck_method(path=str)
@@ -718,11 +711,11 @@ class BlockMatrix(object):
                 mt = mt.select_cols(**compute)
             compute = {
                 '__mean': mt['__sum'] / mt['__count'],
-                '__centered_length': hl.sqrt(mt['__sum_sq'] -
-                                             (mt['__sum'] ** 2) / mt['__count']),
-                '__length': hl.sqrt(mt['__sum_sq'] +
-                                    (n_elements - mt['__count']) *
-                                    ((mt['__sum'] / mt['__count']) ** 2))
+                '__centered_length': hl.sqrt(mt['__sum_sq']
+                                             - (mt['__sum'] ** 2) / mt['__count']),
+                '__length': hl.sqrt(mt['__sum_sq']
+                                    + (n_elements - mt['__count'])
+                                    * ((mt['__sum'] / mt['__count']) ** 2))
             }
             if axis == 'rows':
                 mt = mt.select_rows(**compute)
@@ -1193,7 +1186,7 @@ class BlockMatrix(object):
         -------
         :obj:`bool`
         """
-        return Env.backend()._to_java_ir(self._bmir).typ().isSparse()
+        return Env.backend()._to_java_blockmatrix_ir(self._bmir).typ().isSparse()
 
     @property
     def T(self):
@@ -1667,7 +1660,7 @@ class BlockMatrix(object):
                delimiter=str,
                header=nullable(str),
                add_index=bool,
-               parallel=nullable(enumeration('separate_header', 'header_per_shard')),
+               parallel=nullable(ExportType.checker),
                partition_size=nullable(int),
                entries=enumeration('full', 'lower', 'strict_lower', 'upper', 'strict_upper'))
     def export(path_in, path_out, delimiter='\t', header=None, add_index=False, parallel=None,
@@ -1817,21 +1810,10 @@ class BlockMatrix(object):
             Describes which entries to export. One of:
             ``'full'``, ``'lower'``, ``'strict_lower'``, ``'upper'``, ``'strict_upper'``.
         """
-        jrm = Env.hail().linalg.RowMatrix.readBlockMatrix(Env.hc()._jhc, path_in, joption(partition_size))
+        export_type = ExportType.default(parallel)
 
-        export_type = Env.hail().utils.ExportType.getExportType(parallel)
-
-        if entries == 'full':
-            jrm.export(path_out, delimiter, joption(header), add_index, export_type)
-        elif entries == 'lower':
-            jrm.exportLowerTriangle(path_out, delimiter, joption(header), add_index, export_type)
-        elif entries == 'strict_lower':
-            jrm.exportStrictLowerTriangle(path_out, delimiter, joption(header), add_index, export_type)
-        elif entries == 'upper':
-            jrm.exportUpperTriangle(path_out, delimiter, joption(header), add_index, export_type)
-        else:
-            assert entries == 'strict_upper'
-            jrm.exportStrictUpperTriangle(path_out, delimiter, joption(header), add_index, export_type)
+        Env.spark_backend('BlockMatrix.export')._jbackend.pyExportBlockMatrix(
+            path_in, path_out, delimiter, header, add_index, export_type, partition_size, entries)
 
     @typecheck_method(rectangles=sequenceof(sequenceof(int)))
     def sparsify_rectangles(self, rectangles):
@@ -1898,8 +1880,7 @@ class BlockMatrix(object):
                 raise ValueError(f'rectangle {r} does not satisfy '
                                  f'0 <= r[0] <= r[1] <= n_rows and 0 <= r[2] <= r[3] <= n_cols')
 
-        flattened_rectangles = jarray(Env.jvm().long, list(itertools.chain(*rectangles)))
-        rectangles = hl.literal(flattened_rectangles, hl.tarray(hl.tint64))
+        rectangles = hl.literal(list(itertools.chain(*rectangles)), hl.tarray(hl.tint64))
         return BlockMatrix(
             BlockMatrixSparsify(self._bmir, rectangles._ir, RectangleSparsifier))
 
@@ -2429,20 +2410,20 @@ def _jarray_from_ndarray(nd):
     path = new_local_temp_file()
     uri = local_path_uri(path)
     nd.tofile(path)
-    return Env.hail().utils.richUtils.RichArray.importFromDoubles(Env.hc()._jhc, uri, nd.size)
+    return Env.hail().utils.richUtils.RichArray.importFromDoubles(Env.spark_backend('_jarray_from_ndarray').fs._jfs, uri, nd.size)
 
 
 def _ndarray_from_jarray(ja):
     path = new_local_temp_file()
     uri = local_path_uri(path)
-    Env.hail().utils.richUtils.RichArray.exportToDoubles(Env.hc()._jhc, uri, ja)
+    Env.hail().utils.richUtils.RichArray.exportToDoubles(Env.spark_backend('_ndarray_from_jarray').fs._jfs, uri, ja)
     return np.fromfile(path)
 
 
 def _breeze_fromfile(uri, n_rows, n_cols):
     _check_entries_size(n_rows, n_cols)
 
-    return Env.hail().utils.richUtils.RichDenseMatrixDouble.importFromDoubles(Env.hc()._jhc, uri, n_rows, n_cols, True)
+    return Env.hail().utils.richUtils.RichDenseMatrixDouble.importFromDoubles(Env.spark_backend('_breeze_fromfile').fs._jfs, uri, n_rows, n_cols, True)
 
 
 def _check_entries_size(n_rows, n_cols):

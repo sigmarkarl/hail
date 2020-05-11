@@ -142,6 +142,9 @@ def clone_or_fetch_script(repo):
 function clone() {{ ( set -e
     dir=$(mktemp -d)
     git clone {shq(repo)} $dir
+    echo $?
+    (cd $dir && git status)  # verify the clone actually worked
+    echo $?
     for x in $(ls -A $dir); do
         mv -- "$dir/$x" ./
     done
@@ -177,7 +180,7 @@ class PR(Code):
         self.source_sha_failed = None
 
         # 'error', 'success', 'failure', None
-        self._build_state = None
+        self.build_state = None
 
         # the build_state as communicated to GitHub:
         # 'failure', 'success', 'pending'
@@ -188,14 +191,14 @@ class PR(Code):
         self.target_branch.batch_changed = True
         self.target_branch.state_changed = True
 
-    @property
-    def build_state(self):
-        return self._build_state
+    def set_build_state(self, build_state):
+        if build_state != self.build_state:
+            self.build_state = build_state
 
-    @build_state.setter
-    def build_state(self, new_state):
-        if new_state != self._build_state:
-            self._build_state = new_state
+            intended_github_status = self.github_status_from_build_state()
+            if intended_github_status != self.intended_github_status:
+                self.intended_github_status = intended_github_status
+                self.target_branch.state_changed = True
 
     async def authorized(self, dbpool):
         if self.author in AUTHORIZED_USERS:
@@ -241,7 +244,7 @@ class PR(Code):
             self.sha = None
             self.batch = None
             self.source_sha_failed = None
-            self.build_state = None
+            self.set_build_state(None)
             self.target_branch.batch_changed = True
             self.target_branch.state_changed = True
 
@@ -279,8 +282,8 @@ class PR(Code):
     def github_status_from_build_state(self):
         if self.build_state == 'failure' or self.build_state == 'error':
             return 'failure'
-        if (self.build_state == 'success' and
-                self.batch.attributes['target_sha'] == self.target_branch.sha):
+        if (self.build_state == 'success'
+                and self.batch.attributes['target_sha'] == self.target_branch.sha):
             return 'success'
         return 'pending'
 
@@ -289,7 +292,9 @@ class PR(Code):
 
         log.info(f'{self.short_str()}: notify github state: {gh_status}')
         if self.batch is None or isinstance(self.batch, MergeFailureBatch):
-            target_url = f'https://ci.hail.is/watched_branches/{self.target_branch.index}/pr/{self.number}'
+            target_url = deploy_config.external_url(
+                'ci',
+                f'/watched_branches/{self.target_branch.index}/pr/{self.number}')
         else:
             assert self.batch.id is not None
             target_url = deploy_config.external_url(
@@ -306,10 +311,15 @@ class PR(Code):
             await gh_client.post(
                 f'/repos/{self.target_branch.branch.repo.short_str()}/statuses/{self.source_sha}',
                 data=data)
+        except KeyError:
+            log.exception(f'{self.short_str()}: KeyError when updating github status, this is likely due to'
+                          f'a bug in gidgethub. Gidgethub does not correctly parse and raise the too many'
+                          f'status updates error. If that is the issue, pushing a fresh commit to this PR'
+                          f'will fix the problem. {data}')
         except gidgethub.HTTPException as e:
-            log.info(f'{self.short_str()}: notify github of build state failed due to exception: {e}')
+            log.info(f'{self.short_str()}: notify github of build state failed due to exception: {data} {e}')
         except aiohttp.client_exceptions.ClientResponseError as e:
-            log.error(f'{self.short_str()}: Unexpected exception in post to github: {e}')
+            log.exception(f'{self.short_str()}: Unexpected exception in post to github: {data} {e}')
 
     async def _update_github(self, gh):
         await self._update_last_known_github_status(gh)
@@ -323,7 +333,7 @@ class PR(Code):
         if n_hail_status == 0:
             return None
         if n_hail_status == 1:
-            return hail_status[0]
+            return hail_status[0]['state']
         raise ValueError(
             f'github sent multiple status summaries for our one '
             'context {GITHUB_STATUS_CONTEXT}: {hail_status}\n\n{statuses_json}')
@@ -365,7 +375,7 @@ class PR(Code):
 
         # clear current batch
         self.batch = None
-        self.build_state = None
+        self.set_build_state(None)
 
         batch = None
         try:
@@ -413,7 +423,7 @@ mkdir -p {shq(repo_dir)}
                     'source_sha': self.source_sha,
                     'target_sha': self.target_branch.sha,
                 })
-            self.build_state = 'error'
+            self.set_build_state('error')
             self.source_sha_failed = True
             self.target_branch.state_changed = True
         finally:
@@ -421,59 +431,48 @@ mkdir -p {shq(repo_dir)}
                 log.info(f'cancelling partial test batch {batch.id}')
                 await batch.cancel()
 
-    async def _update_batch(self, batch_client):
-        if self.build_state:
-            assert self.batch
-            return
+    @staticmethod
+    async def is_invalidated_batch(batch, dbpool):
+        assert batch is not None
+        async with dbpool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute('SELECT * from invalidated_batches WHERE batch_id = %s;', batch.id)
+                row = await cursor.fetchone()
+                return row is not None
 
-        if self.batch is None:
-            # find the latest non-cancelled batch for source
-            batches = batch_client.list_batches(
-                f'test=1 '
-                f'target_branch={self.target_branch.branch.short_str()} '
-                f'source_sha={self.source_sha}')
-
-            min_batch = None
-            failed = None
-            async for b in batches:
-                try:
-                    s = await b.status()
-                except Exception as err:
-                    log.info(f'failed to get the status for batch {b.id} due to error: {err}')
-                    raise
-                if s['state'] != 'cancelled':
-                    if min_batch is None or b.id > min_batch.id:
-                        min_batch = b
-
-                    if s['state'] == 'failure':
-                        failed = True
-                    elif failed is None:
-                        failed = False
-            self.batch = min_batch
-            self.source_sha_failed = failed
-
-        if self.batch:
+    async def _update_batch(self, batch_client, dbpool):
+        # find the latest non-cancelled batch for source
+        batches = batch_client.list_batches(
+            f'test=1 '
+            f'target_branch={self.target_branch.branch.short_str()} '
+            f'source_sha={self.source_sha}')
+        min_batch = None
+        min_batch_status = None
+        async for b in batches:
+            if await self.is_invalidated_batch(b, dbpool):
+                continue
             try:
-                status = await self.batch.status()
-            except aiohttp.client_exceptions.ClientResponseError as exc:
-                if exc.status == 404:
-                    log.info(f'batch {self.batch.id} was deleted by someone')
-                    self.batch = None
-                    self.build_state = None
-                    return
-                raise exc
-            if status['complete']:
-                if status['state'] == 'success':
-                    self.build_state = 'success'
-                else:
-                    self.build_state = 'failure'
-                    self.source_sha_failed = True
-                self.target_branch.state_changed = True
+                s = await b.status()
+            except Exception as err:
+                log.info(f'failed to get the status for batch {b.id} due to error: {err}')
+                raise
+            if s['state'] != 'cancelled':
+                if min_batch is None or b.id > min_batch.id:
+                    min_batch = b
+                    min_batch_status = s
+        self.batch = min_batch
+        self.source_sha_failed = None
 
-            intended_github_status = self.github_status_from_build_state()
-            if intended_github_status != self.intended_github_status:
-                self.intended_github_status = intended_github_status
-                self.target_branch.state_chagned = True
+        if min_batch_status is None:
+            self.set_build_state(None)
+        elif min_batch_status['complete']:
+            if min_batch_status['state'] == 'success':
+                self.set_build_state('success')
+                self.source_sha_failed = False
+            else:
+                self.set_build_state('failure')
+                self.source_sha_failed = True
+            self.target_branch.state_changed = True
 
     async def _heal(self, batch_client, dbpool, on_deck, gh):
         # can't merge target if we don't know what it is
@@ -488,8 +487,8 @@ mkdir -p {shq(repo_dir)}
         if not await self.authorized(dbpool):
             return
 
-        if (not self.batch or
-                (on_deck and self.batch.attributes['target_sha'] != self.target_branch.sha)):
+        if (not self.batch
+                or (on_deck and self.batch.attributes['target_sha'] != self.target_branch.sha)):
 
             if on_deck or self.target_branch.n_running_batches < 8:
                 self.target_branch.n_running_batches += 1
@@ -500,10 +499,10 @@ mkdir -p {shq(repo_dir)}
         return self.batch is not None and self.target_branch.sha == self.batch.attributes['target_sha']
 
     def is_mergeable(self):
-        return (self.review_state == 'approved' and
-                self.build_state == 'success' and
-                self.is_up_to_date() and
-                all(label not in DO_NOT_MERGE for label in self.labels))
+        return (self.review_state == 'approved'
+                and self.build_state == 'success'
+                and self.is_up_to_date()
+                and all(label not in DO_NOT_MERGE for label in self.labels))
 
     async def merge(self, gh):
         try:
@@ -607,7 +606,7 @@ class WatchedBranch(Code):
 
                 if self.batch_changed:
                     self.batch_changed = False
-                    await self._update_batch(batch_client)
+                    await self._update_batch(batch_client, dbpool)
 
                 if self.state_changed:
                     self.state_changed = False
@@ -713,19 +712,19 @@ url: {url}
         if not self.sha:
             return
 
-        if (self.deploy_batch is None or
-                (self.deploy_state and self.deploy_batch.attributes['sha'] != self.sha)):
+        if (self.deploy_batch is None
+                or (self.deploy_state and self.deploy_batch.attributes['sha'] != self.sha)):
             async with repos_lock:
                 await self._start_deploy(batch_client)
 
-    async def _update_batch(self, batch_client):
+    async def _update_batch(self, batch_client, dbpool):
         log.info(f'update batch {self.short_str()}')
 
         if self.deployable:
             await self._update_deploy(batch_client)
 
         for pr in self.prs.values():
-            await pr._update_batch(batch_client)
+            await pr._update_batch(batch_client, dbpool)
 
     async def _heal(self, batch_client, dbpool, gh):
         log.info(f'heal {self.short_str()}')
@@ -738,8 +737,8 @@ url: {url}
         for pr in self.prs.values():
             # merge candidate if up-to-date build passing, or
             # pending but haven't failed
-            if (pr.review_state == 'approved' and
-                    (pr.build_state == 'success' or not pr.source_sha_failed)):
+            if (pr.review_state == 'approved'
+                    and (pr.build_state == 'success' or not pr.source_sha_failed)):
                 pri = pr.merge_priority()
                 is_authorized = await pr.authorized(dbpool)
                 if is_authorized and (not merge_candidate or pri > merge_candidate_pri):

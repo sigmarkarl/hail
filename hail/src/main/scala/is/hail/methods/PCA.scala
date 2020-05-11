@@ -6,7 +6,7 @@ import is.hail.annotations._
 import is.hail.expr.ir.functions.MatrixToTableFunction
 import is.hail.expr.ir.{ExecuteContext, MatrixValue, TableValue}
 import is.hail.expr.types._
-import is.hail.expr.types.physical.{PStruct, PType}
+import is.hail.expr.types.physical.{PCanonicalStruct, PStruct, PType}
 import is.hail.expr.types.virtual._
 import is.hail.rvd.{RVD, RVDContext, RVDType}
 import is.hail.sparkextras.ContextRDD
@@ -26,9 +26,6 @@ case class PCA(entryField: String, k: Int, computeLoadings: Boolean) extends Mat
   def preservesPartitionCounts: Boolean = false
 
   def execute(ctx: ExecuteContext, mv: MatrixValue): TableValue = {
-    val hc = HailContext.get
-    val sc = hc.sc
-
     if (k < 1)
       fatal(s"""requested invalid number of components: $k
                |  Expect componenents >= 1""".stripMargin)
@@ -56,15 +53,15 @@ case class PCA(entryField: String, k: Int, computeLoadings: Boolean) extends Mat
         .collect()
     }
 
-    val rowType = PStruct.canonical(TStruct(mv.typ.rowKey.zip(mv.typ.rowKeyStruct.types): _*) ++ TStruct("loadings" -> TArray(TFloat64)))
+    val rowType = PCanonicalStruct.canonical(TStruct(mv.typ.rowKey.zip(mv.typ.rowKeyStruct.types): _*) ++ TStruct("loadings" -> TArray(TFloat64)))
+      .setRequired(true)
+      .asInstanceOf[PStruct]
     val rowKeysBc = HailContext.backend.broadcast(collectRowKeys())
     val localRowKeySignature = mv.typ.rowKeyStruct.types
 
-    val crdd: ContextRDD[RegionValue] = if (computeLoadings) {
+    val crdd: ContextRDD[Long] = if (computeLoadings) {
       ContextRDD.weaken(svd.U.rows).cmapPartitions { (ctx, it) =>
-        val region = ctx.region
-        val rv = RegionValue(region)
-        val rvb = new RegionValueBuilder(region)
+        val rvb = ctx.rvb
         it.map { ir =>
           rvb.start(rowType)
           rvb.startStruct()
@@ -84,13 +81,13 @@ case class PCA(entryField: String, k: Int, computeLoadings: Boolean) extends Mat
           }
           rvb.endArray()
           rvb.endStruct()
-          rv.setOffset(rvb.end())
-          rv
+
+          rvb.end()
         }
       }
     } else
-      ContextRDD.empty(sc)
-    val rvd = RVD.coerce(RVDType(rowType, mv.typ.rowKey), crdd, ctx)
+      ContextRDD.empty()
+    val rvd = RVD.coerce(ctx, RVDType(rowType, mv.typ.rowKey), crdd)
 
     val (t1, f1) = mv.typ.globalType.insert(TArray(TFloat64), "eigenvalues")
     val (globalScoreType, f3) = mv.typ.colKeyStruct.insert(TArray(TFloat64), "scores")
@@ -118,7 +115,8 @@ case class PCA(entryField: String, k: Int, computeLoadings: Boolean) extends Mat
     }
     val newGlobal = f2(g1, globalScores)
     
-    TableValue(TableType(rowType.virtualType, mv.typ.rowKey, newGlobalType.asInstanceOf[TStruct]),
+    TableValue(ctx,
+      TableType(rowType.virtualType, mv.typ.rowKey, newGlobalType.asInstanceOf[TStruct]),
       BroadcastRow(ctx, newGlobal.asInstanceOf[Row], newGlobalType.asInstanceOf[TStruct]), rvd)
   }
 }

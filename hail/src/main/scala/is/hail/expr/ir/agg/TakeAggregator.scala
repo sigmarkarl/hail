@@ -2,24 +2,25 @@ package is.hail.expr.ir.agg
 
 import is.hail.annotations.{Region, StagedRegionValueBuilder}
 import is.hail.asm4s.{Code, _}
-import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitFunctionBuilder}
+import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder, EmitFunctionBuilder}
 import is.hail.expr.types.physical._
 import is.hail.io.{BufferSpec, InputBuffer, OutputBuffer}
 import is.hail.utils._
 
-class TakeRVAS(val eltType: PType, val resultType: PArray, val cb: EmitClassBuilder[_]) extends AggregatorState {
-  private val r: ThisFieldRef[Region] = cb.genFieldThisRef[Region]()
+class TakeRVAS(val eltType: PType, val resultType: PArray, val kb: EmitClassBuilder[_]) extends AggregatorState {
+  private val r: ThisFieldRef[Region] = kb.genFieldThisRef[Region]()
   val region: Value[Region] = r
 
-  val builder = new StagedArrayBuilder(eltType, cb, region)
-  val storageType: PTuple = PTuple(true, PInt32Required, builder.stateType)
-  private val maxSize = cb.genFieldThisRef[Int]()
+  val builder = new StagedArrayBuilder(eltType, kb, region)
+  val storageType: PCanonicalTuple = PCanonicalTuple(true, PInt32Required, builder.stateType)
+  private val maxSize = kb.genFieldThisRef[Int]()
   private val maxSizeOffset: Code[Long] => Code[Long] = storageType.loadField(_, 0)
   private val builderStateOffset: Code[Long] => Code[Long] = storageType.loadField(_, 1)
 
   def newState(off: Code[Long]): Code[Unit] = region.getNewRegion(regionSize)
 
-  def createState: Code[Unit] = region.isNull.mux(r := Region.stagedCreate(regionSize), Code._empty)
+  def createState(cb: EmitCodeBuilder): Unit =
+    cb.ifx(region.isNull, { cb.assign(r, Region.stagedCreate(regionSize)) })
 
   override def load(regionLoader: Value[Region] => Code[Unit], src: Code[Long]): Code[Unit] =
     Code.memoize(src, "take_rvas_src") { src =>
@@ -39,20 +40,17 @@ class TakeRVAS(val eltType: PType, val resultType: PArray, val cb: EmitClassBuil
           builder.storeTo(builderStateOffset(dest))))
     }
 
-  def serialize(codec: BufferSpec): Value[OutputBuffer] => Code[Unit] = {
-    { ob: Value[OutputBuffer] =>
-      Code(
-        ob.writeInt(maxSize),
-        builder.serialize(codec)(ob))
+  def serialize(codec: BufferSpec): (EmitCodeBuilder, Value[OutputBuffer]) => Unit = {
+    { (cb: EmitCodeBuilder, ob: Value[OutputBuffer]) =>
+      cb += ob.writeInt(maxSize)
+      cb += builder.serialize(codec)(ob)
     }
   }
 
-  def deserialize(codec: BufferSpec): Value[InputBuffer] => Code[Unit] = {
-    { ib: Value[InputBuffer] =>
-
-      Code(
-        maxSize := ib.readInt(),
-        builder.deserialize(codec)(ib))
+  def deserialize(codec: BufferSpec): (EmitCodeBuilder, Value[InputBuffer]) => Unit = {
+    { (cb: EmitCodeBuilder, ib: Value[InputBuffer]) =>
+      cb.assign(maxSize, ib.readInt())
+      cb += builder.deserialize(codec)(ib)
     }
   }
 
@@ -75,8 +73,8 @@ class TakeRVAS(val eltType: PType, val resultType: PArray, val cb: EmitClassBuil
     )
   }
 
-  def combine(other: TakeRVAS, dummy: Boolean): Code[Unit] = {
-    val j = cb.genFieldThisRef[Int]()
+  def combine(other: TakeRVAS): Code[Unit] = {
+    val j = kb.genFieldThisRef[Int]()
     val (eltJMissing, eltJ) = other.builder.loadElement(j)
 
     Code(
@@ -91,7 +89,7 @@ class TakeRVAS(val eltType: PType, val resultType: PArray, val cb: EmitClassBuil
     )
   }
 
-  def result(srvb: StagedRegionValueBuilder, dummy: Boolean): Code[Unit] = {
+  def result(srvb: StagedRegionValueBuilder): Code[Unit] = {
     srvb.addArray(resultType, { rvb =>
       val (eltIMissing, eltOffset) = builder.elementOffset(rvb.arrayIdx)
       Code(
@@ -105,40 +103,39 @@ class TakeRVAS(val eltType: PType, val resultType: PArray, val cb: EmitClassBuil
       })
   }
 
-  def copyFrom(src: Code[Long]): Code[Unit] = {
-    Code.memoize(src, "takervas_copy_from_src") { src =>
-      Code(
-        maxSize := Region.loadInt(maxSizeOffset(src)),
-        builder.copyFrom(builderStateOffset(src)))
-    }
+  def copyFrom(cb: EmitCodeBuilder, srcCode: Code[Long]): Unit = {
+    val src = cb.newLocal("takervas_copy_from_src", srcCode)
+    cb.assign(maxSize, Region.loadInt(maxSizeOffset(src)))
+    cb += builder.copyFrom(builderStateOffset(src))
   }
 }
 
 class TakeAggregator(typ: PType) extends StagedAggregator {
+  assert(typ.isCanonical)
 
   type State = TakeRVAS
 
-  val resultType: PArray = PArray(typ)
+  val resultType: PCanonicalArray = PCanonicalArray(typ, required = true)
 
-  def createState(cb: EmitClassBuilder[_]): State =
-    new TakeRVAS(typ, resultType, cb)
+  def createState(cb: EmitCodeBuilder): State =
+    new TakeRVAS(typ, resultType, cb.emb.ecb)
 
-  def initOp(state: State, init: Array[EmitCode], dummy: Boolean): Code[Unit] = {
+  protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     assert(init.length == 1)
     val Array(sizeTriplet) = init
-    Code(
+    cb += Code(
       sizeTriplet.setup,
       sizeTriplet.m.orEmpty(Code._fatal[Unit](s"argument 'n' for 'hl.agg.take' may not be missing")),
       state.init(coerce[Int](sizeTriplet.v))
     )
   }
 
-  def seqOp(state: State, seq: Array[EmitCode], dummy: Boolean): Code[Unit] = {
+  protected def _seqOp(cb: EmitCodeBuilder, state: State, seq: Array[EmitCode]): Unit = {
     val Array(elt: EmitCode) = seq
-    state.seqOp(elt)
+    cb += state.seqOp(elt)
   }
 
-  def combOp(state: State, other: State, dummy: Boolean): Code[Unit] = state.combine(other, dummy)
+  protected def _combOp(cb: EmitCodeBuilder, state: State, other: State): Unit = cb += state.combine(other)
 
-  def result(state: State, srvb: StagedRegionValueBuilder, dummy: Boolean): Code[Unit] = state.result(srvb, dummy)
+  protected def _result(cb: EmitCodeBuilder, state: State, srvb: StagedRegionValueBuilder): Unit = cb += state.result(srvb)
 }
