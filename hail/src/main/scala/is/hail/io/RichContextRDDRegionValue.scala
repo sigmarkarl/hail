@@ -88,12 +88,11 @@ object RichContextRDDRegionValue {
         val rowsPartPath = ExecuteContext.createTmpPathNoCleanup(localTmpdir, "write-split-staged-rows-part")
         val entriesPartPath = ExecuteContext.createTmpPathNoCleanup(localTmpdir, "write-split-staged-entries-part")
         val idxPath = rowsPartPath + ".idx"
-        val tc : TaskCompletionListener = _ => {
+        context.addTaskCompletionListener { (context: TaskContext) =>
           fs.delete(rowsPartPath, recursive = false)
           fs.delete(entriesPartPath, recursive = false)
           fs.delete(idxPath, recursive = true)
         }
-        context.addTaskCompletionListener(tc)
         (rowsPartPath, entriesPartPath, idxPath)
       } else
         (finalRowsPartPath, finalEntriesPartPath, finalIdxPath)

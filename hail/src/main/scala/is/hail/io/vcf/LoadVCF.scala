@@ -1448,10 +1448,9 @@ class PartitionedVCFRDD(
 
     // clean up
     val context = TaskContext.get
-    val tc : TaskCompletionListener = _ => {
+    context.addTaskCompletionListener { (context: TaskContext) =>
       lines.close()
     }
-    context.addTaskCompletionListener(tc)
 
     val it: Iterator[String] = new Iterator[String] {
       private var l = lines.next()
