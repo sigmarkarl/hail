@@ -168,9 +168,10 @@ private class BgenRDD(
           new IndexBgenRecordIterator(ctx, p, settings, f(p.partitionIndex, ctx.partitionRegion)).flatten
         case p: LoadBgenPartition =>
           val index: IndexReader = indexBuilder(p.fsBc.value, p.indexPath, 8)
-          context.addTaskCompletionListener { (context: TaskContext) =>
+          val tc : TaskCompletionListener = _ => {
             index.close()
           }
+          context.addTaskCompletionListener(tc)
           if (keys == null)
             new BgenRecordIteratorWithoutFilter(ctx, p, settings, f(p.partitionIndex, ctx.partitionRegion), index).flatten
           else {

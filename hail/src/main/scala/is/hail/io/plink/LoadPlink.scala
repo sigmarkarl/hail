@@ -13,6 +13,7 @@ import is.hail.io.fs.{FS, Seekable}
 import is.hail.rvd.RVDPartitioner
 import org.apache.spark.TaskContext
 import org.apache.spark.sql.Row
+import org.apache.spark.util.TaskCompletionListener
 import org.json4s.{DefaultFormats, Formats, JValue}
 
 case class FamFileConfig(isQuantPheno: Boolean = false,
@@ -347,9 +348,10 @@ class MatrixPLINKReader(
         val rvb = new RegionValueBuilder(region)
 
         val is = fsBc.value.open(bed)
-        TaskContext.get.addTaskCompletionListener { (context: TaskContext) =>
+        val tc : TaskCompletionListener = _ => {
           is.close()
         }
+        TaskContext.get.addTaskCompletionListener(tc)
         var offset = 0
 
         val input = new Array[Byte](blockLength)

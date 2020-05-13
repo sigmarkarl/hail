@@ -30,6 +30,7 @@ import scala.collection.JavaConversions._
 import scala.collection.JavaConverters._
 import scala.language.implicitConversions
 
+import org.apache.spark.util.TaskCompletionListener
 import org.json4s.{DefaultFormats, Extraction, Formats, JValue}
 
 class BufferedLineIterator(bit: BufferedIterator[String]) extends htsjdk.tribble.readers.LineIterator {
@@ -1448,9 +1449,10 @@ class PartitionedVCFRDD(
 
     // clean up
     val context = TaskContext.get
-    context.addTaskCompletionListener { (context: TaskContext) =>
+    val tc : TaskCompletionListener = _ => {
       lines.close()
     }
+    context.addTaskCompletionListener(tc)
 
     val it: Iterator[String] = new Iterator[String] {
       private var l = lines.next()
