@@ -32,7 +32,7 @@ Build and install a wheel file from source with local-mode ``pyspark``::
 
 As above, but explicitly specifying the Scala and Spark versions::
 
-    make install HAIL_COMPILE_NATIVES=1 SCALA_VERSION=2.11.12 SPARK_VERSION=2.4.5
+    make install HAIL_COMPILE_NATIVES=1 SCALA_VERSION=2.12.10 SPARK_VERSION=3.0.0-preview2
 
 Building the Docs and Website
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
