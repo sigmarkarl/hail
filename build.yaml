@@ -234,6 +234,8 @@ steps:
       script: /io/sql/initial.sql
     - name: copy-paste-tokens
       script: /io/sql/copy-paste-tokens.sql
+    - name: drop-bucket
+      script: /io/sql/drop-bucket.sql
    inputs:
     - from: /repo/auth/sql
       to: /io/
@@ -359,7 +361,7 @@ steps:
          rm -f /user-tokens/tokens.json
          kubectl -n {{ default_ns.name }} get -o json --export secret test-gsa-key | jq '.metadata.name = "ci-gsa-key"' | kubectl -n {{ default_ns.name }} apply -f -
          kubectl -n {{ default_ns.name }} get -o json --export secret test-gsa-key | jq '.metadata.name = "ci-gsa-key"' | kubectl -n {{ batch_pods_ns.name }} apply -f -
-         python3 create-session.py '{"state":"active","username":"ci","is_service_account":1,"gsa_email":"hail-test@hail-vdc.iam.gserviceaccount.com","bucket_name":"hail-test-dmk9z","gsa_key_secret_name":"ci-gsa-key","tokens_secret_name":"ci-tokens"}'
+         python3 create-session.py '{"state":"active","username":"ci","is_service_account":1,"gsa_email":"hail-test@hail-vdc.iam.gserviceaccount.com","gsa_key_secret_name":"ci-gsa-key","tokens_secret_name":"ci-tokens"}'
          kubectl -n {{ default_ns.name }} create secret generic ci-tokens --from-file=/user-tokens/tokens.json
      fi
      # created ci
@@ -368,7 +370,7 @@ steps:
      if [[ $N = 0 ]]; then
          # if test-tokens does not exist
          rm -f /user-tokens/tokens.json
-         python3 create-session.py '{"state":"active","username":"test","gsa_email":"hail-test@hail-vdc.iam.gserviceaccount.com","bucket_name":"hail-test-dmk9z","gsa_key_secret_name":"test-gsa-key","tokens_secret_name":"test-tokens"}'
+         python3 create-session.py '{"state":"active","username":"test","gsa_email":"hail-test@hail-vdc.iam.gserviceaccount.com","gsa_key_secret_name":"test-gsa-key","tokens_secret_name":"test-tokens"}'
          kubectl -n {{ batch_pods_ns.name }} create secret generic test-tokens --from-file=/user-tokens/tokens.json
      fi
      # created test
@@ -377,7 +379,7 @@ steps:
      if [[ $N = 0 ]]; then
          # if test-dev-tokens does not exist
          rm -f /user-tokens/tokens.json
-         python3 create-session.py '{"state":"active","username":"test-dev","gsa_email":"hail-test@hail-vdc.iam.gserviceaccount.com","bucket_name":"hail-test-dmk9z","gsa_key_secret_name":"test-gsa-key","tokens_secret_name":"test-dev-tokens","is_developer":1}'
+         python3 create-session.py '{"state":"active","username":"test-dev","gsa_email":"hail-test@hail-vdc.iam.gserviceaccount.com","gsa_key_secret_name":"test-gsa-key","tokens_secret_name":"test-dev-tokens","is_developer":1}'
          kubectl -n {{ batch_pods_ns.name }} create secret generic test-dev-tokens --from-file=/user-tokens/tokens.json
      fi
      # created test-dev
@@ -454,13 +456,6 @@ steps:
      python3 -m pylint --rcfile pylintrc auth
    dependsOn:
      - auth_image
- - kind: buildImage
-   name: site_image
-   dockerFile: site/Dockerfile
-   contextPath: site
-   publishAs: site
-   dependsOn:
-     - base_image
  - kind: buildImage
    name: router_image
    dockerFile: router/Dockerfile
@@ -544,12 +539,13 @@ steps:
      cd repo
      {{ code.checkout_script }}
      cd hail
-     time make jars python-version-info wheel
+     time retry ./gradlew --version
+     time retry make jars python-version-info wheel
      time (cd python && zip -r hail.zip hail hailtop)
      time tar czf test.tar.gz -C python test
      time tar czf resources.tar.gz -C src/test resources
      time tar czf data.tar.gz -C python/hail/docs data
-     time tar czf www-src.tar.gz www
+     (cd ../site && time tar czf ../hail/www-src.tar.gz www)
      time tar czf cluster-tests.tar.gz python/cluster-tests
      (cd build/deploy/dist/ && tar -cvf wheel-container.tar hail-*-py3-none-any.whl)
    outputs:
@@ -559,8 +555,8 @@ steps:
        to: /hail-test.jar
      - from: /io/repo/hail/testng-build.xml
        to: /testng-build.xml
-     - from: /io/repo/hail/testng-cpp-codegen.xml
-       to: /testng-cpp-codegen.xml
+     - from: /io/repo/hail/testng-services.xml
+       to: /testng-services.xml
      - from: /io/repo/hail/python/hail.zip
        to: /hail.zip
      - from: /io/repo/hail/build/deploy/dist/wheel-container.tar
@@ -614,22 +610,6 @@ steps:
     - default_ns
     - batch_pods_ns
     - deploy_query_sa
- - kind: deploy
-   name: deploy_query
-   namespace:
-     valueFrom: default_ns.name
-   config: query/deployment.yaml
-   wait:
-    - kind: Service
-      name: query
-      for: alive
-   dependsOn:
-    - default_ns
-    - batch_pods_ns
-    - query_image
-    - deploy_query_sa
-    - deploy_query_sa_batch_pods
-    - create_certs
  - kind: buildImage
    name: hail_repl_image
    dockerFile: hail/Dockerfile.hail-repl
@@ -700,12 +680,13 @@ steps:
     - from: /hail.zip
       to: /hail.zip
  - kind: runImage
-   name: check_hailtop
+   name: check_hail
    image:
      valueFrom: hail_base_image.image
    script: |
      set -ex
-     python3 -m flake8 hailtop
+     (cd hail/python && python3 -m flake8 --config ../../setup.cfg hail)
+     python3 -m flake8 --config setup.cfg hailtop
      python3 -m pylint --rcfile pylintrc hailtop
    dependsOn:
      - hail_base_image
@@ -920,7 +901,6 @@ steps:
      sed -E "s/\(hail\#([0-9]+)\)/(\[#\1](https:\/\/github.com\/hail-is\/hail\/pull\/\1))/g" \
        < python/hail/docs/change_log.md \
        | pandoc -o python/hail/docs/change_log.rst
-     make -C www
      make -C python/hail/docs BUILDDIR=_build clean html
      make -C python/hailtop/batch/docs BUILDDIR=_build clean html
      mkdir -p www/docs
@@ -961,6 +941,44 @@ steps:
     - default_ns
     - router_image
     - create_certs
+ - kind: runImage
+   name: build_site_www
+   image:
+     valueFrom: hail_build_image.image
+   script: |
+     set -ex
+     cd /io
+     rm -rf repo
+     mkdir repo
+     cd repo
+     {{ code.checkout_script }}
+     make -C hail python/hail/hail_version
+     HAIL_CACHE_VERSION=$(cat hail/python/hail/hail_version)
+     make -C site/www
+     find site/www -iname *.html -type f -exec sed -i -e "s/\.css/\.css\?v\=$HAIL_CACHE_VERSION/" {} +;
+     rsync --archive \
+           --verbose \
+           --exclude='*.xslt' \
+           --exclude='*.md' \
+           site/www/* \
+           /io/www
+     cd /io/www && tar -cvzf /io/site-www.tar.gz *
+   outputs:
+    - from: /io/site-www.tar.gz
+      to: /site-www.tar.gz
+   dependsOn:
+     - hail_build_image
+ - kind: buildImage
+   name: site_image
+   dockerFile: site/Dockerfile
+   contextPath: site
+   publishAs: site
+   inputs:
+     - from: /site-www.tar.gz
+       to: /site-www.tar.gz
+   dependsOn:
+     - base_image
+     - build_site_www
  - kind: deploy
    name: deploy_site
    namespace:
@@ -975,6 +993,32 @@ steps:
     - site_image
     - deploy_router
     - create_certs
+ - kind: runImage
+   name: test_site
+   image:
+     valueFrom: service_base_image.image
+   script: |
+     set -ex
+     hailctl curl {{ default_ns.name }} site / \
+             -vvv \
+             -fsSL \
+             --retry 3 \
+             --retry-delay 5
+   secrets:
+    - name: test-tokens
+      namespace:
+        valueFrom: batch_pods_ns.name
+      mountPath: /user-tokens
+    - name: gce-deploy-config
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /deploy-config
+   dependsOn:
+    - default_ns
+    - create_accounts
+    - batch_pods_ns
+    - service_base_image
+    - deploy_site
  - kind: deploy
    name: deploy_scorecard
    namespace:
@@ -1228,6 +1272,16 @@ steps:
       script: /io/sql/add-batches-time-created-index.sql
     - name: change-test-worker-disk-size
       script: /io/sql/change_test_worker_disk_size.py
+    - name: add-resources
+      script: /io/sql/add-resources.sql
+    - name: insert-resources
+      script: /io/sql/insert_resources.py
+    - name: insert-standing-worker-globals
+      script: /io/sql/insert_standing_worker_globals.py
+    - name: insert-local-ssd-resource
+      script: /io/sql/insert_local_ssd_resource.py
+    - name: fix-mark-job-complete-on-error
+      script: /io/sql/fix-mark-job-complete-on-error.sql
    inputs:
     - from: /repo/batch/sql
       to: /io/
@@ -1270,6 +1324,105 @@ steps:
     - batch_database
     - deploy_auth
     - create_certs
+ - kind: deploy
+   name: deploy_query
+   namespace:
+     valueFrom: default_ns.name
+   config: query/deployment.yaml
+   wait:
+    - kind: Service
+      name: query
+      for: alive
+   dependsOn:
+    - default_ns
+    - batch_pods_ns
+    - deploy_batch
+    - query_image
+    - deploy_query_sa
+    - deploy_query_sa_batch_pods
+    - create_certs
+ - kind: runImage
+   name: test_query
+   image:
+     valueFrom: hail_run_image.image
+   resources:
+     memory: "3.75G"
+     cpu: "1"
+   script: |
+     set -ex
+     cd /io
+     tar xvf wheel-container.tar
+     python3 -m pip install --no-dependencies hail-*-py3-none-any.whl
+     hailctl config set batch/bucket hail-test-dmk9z
+     cat > test.py <<EOF
+     import hail as hl
+     t = hl.utils.range_table(50, 3)
+     t = t.filter((t.idx % 3 == 0) | ((t.idx / 7) % 3 == 0))
+     n = t.count()
+     print(f'n {n}')
+     assert n == 17
+     EOF
+     HAIL_BILLING_PROJECT=test HAIL_DONT_RETRY_500=1 HAIL_QUERY_BACKEND=service python3 test.py
+   timeout: 600
+   secrets:
+    - name: gce-deploy-config
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /deploy-config
+    - name: test-tokens
+      namespace:
+        valueFrom: batch_pods_ns.name
+      mountPath: /user-tokens
+    - name: ssl-config-query-tests
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /ssl-config
+   inputs:
+     - from: /wheel-container.tar
+       to: /io/wheel-container.tar
+   dependsOn:
+    - default_ns
+    - batch_pods_ns
+    - create_certs
+    - build_hail
+    - hail_run_image
+    - deploy_query
+ - kind: runImage
+   name: test_hail_services_java
+   image:
+     valueFrom: hail_run_image.image
+   resources:
+     memory: "3.75G"
+     cpu: "1"
+   script: |
+     set -ex
+     cd /io
+     java -cp hail-test.jar:$SPARK_HOME/jars/* org.testng.TestNG -listener is.hail.LogTestListener testng-services.xml
+   inputs:
+    - from: /hail-test.jar
+      to: /io/hail-test.jar
+    - from: /testng-services.xml
+      to: /io/testng-services.xml
+   secrets:
+    - name: test-tokens
+      namespace:
+        valueFrom: batch_pods_ns.name
+      mountPath: /user-tokens
+    - name: gce-deploy-config
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /deploy-config
+    - name: ssl-config-services-java-tests
+      namespace:
+        valueFrom: default_ns.name
+      mountPath: /ssl-config
+   dependsOn:
+    - default_ns
+    - batch_pods_ns
+    - create_certs
+    - hail_run_image
+    - build_hail
+    - deploy_batch
  - kind: runImage
    name: test_batch
    image:
@@ -1278,6 +1431,7 @@ steps:
      export HAIL_BASE_IMAGE={{ base_image.image }}
      export CI_UTILS_IMAGE={{ ci_utils_image.image }}
      export HAIL_BATCH_PODS_NAMESPACE={{ batch_pods_ns.name }}
+     hailctl config set batch/bucket hail-test-dmk9z
      python3 -m pytest --log-date-format="%Y-%m-%dT%H:%M:%S" --log-format="%(asctime)s %(levelname)s %(name)s %(filename)s:%(lineno)d:%(funcName)s %(message)s" --log-cli-level=INFO -s -vv --instafail -k "not test_scale" /io/test/
    inputs:
     - from: /repo/batch/test
@@ -1392,7 +1546,7 @@ steps:
      export ORGANIZATION=hail-ci-test
      export REPO_NAME=ci-test-"{{ create_ci_test_repo.token }}"
      export NAMESPACE="{{ default_ns.name }}"
-     python3 -m pytest --tb=no --log-cli-level=INFO -s -vvl --instafail /test/
+     python3 -m pytest --log-cli-level=INFO -s -vv --instafail --durations=50 /test/
    secrets:
     - name: gce-deploy-config
       namespace:
@@ -1419,6 +1573,7 @@ steps:
     - create_accounts
     - default_ns
     - batch_pods_ns
+    - create_certs
     - deploy_ci
     - test_ci_image
     - create_ci_test_repo
@@ -1428,8 +1583,8 @@ steps:
      valueFrom: service_base_image.image
    script: |
      set -ex
-
-     python3 -m hailtop.hailctl config set batch/billing_project test
+     hailctl config set batch/billing_project test
+     hailctl config set batch/bucket hail-test-dmk9z
      python3 -m pytest --log-cli-level=INFO -s -vv --instafail /io/test/test/hailtop/batch/
    inputs:
     - from: /repo/test
@@ -1467,10 +1622,12 @@ steps:
    script: |
      set -ex
      cd /io/hailtop/hailtop/batch
-     python3 -m hailtop.hailctl config set batch/billing_project test
+     hailctl config set batch/billing_project test
+     hailctl config set batch/bucket hail-test-dmk9z
      python3 -m pytest --instafail \
        --doctest-modules \
        --doctest-glob='*.rst' \
+       --ignore=docs/cookbook/files/run_gwas.py \
        --ignore=docs/conf.py
    secrets:
     - name: gce-deploy-config
@@ -1684,6 +1841,7 @@ steps:
      fi
 
      cd hail
+     time retry ./gradlew --version
      make test-dataproc DEV_CLARIFIER=ci_test_dataproc/
    dependsOn:
      - ci_utils_image
@@ -1728,6 +1886,7 @@ steps:
          exit 0
      fi
 
+     time retry ./gradlew --version
      make wheel upload-artifacts DEPLOY_REMOTE=origin
 
      bash scripts/deploy.sh $(cat /io/hail_pip_version) \

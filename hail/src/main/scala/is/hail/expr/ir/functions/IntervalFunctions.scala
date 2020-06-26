@@ -3,8 +3,8 @@ package is.hail.expr.ir.functions
 import is.hail.annotations.{CodeOrdering, Region, StagedRegionValueBuilder}
 import is.hail.asm4s.{Code, _}
 import is.hail.expr.ir._
-import is.hail.expr.types.physical.{PBoolean, PCanonicalInterval, PCode, PInterval, PIntervalCode, PType}
-import is.hail.expr.types.virtual.{TArray, TBoolean, TInt32, TInterval, TString, TStruct, TTuple, Type}
+import is.hail.types.physical.{PBoolean, PCanonicalInterval, PCode, PInterval, PIntervalCode, PType}
+import is.hail.types.virtual.{TArray, TBoolean, TInt32, TInterval, TString, TStruct, TTuple, Type}
 import is.hail.utils._
 
 object IntervalFunctions extends RegistryFunctions {
@@ -14,7 +14,7 @@ object IntervalFunctions extends RegistryFunctions {
     registerEmitCode4("Interval", tv("T"), tv("T"), TBoolean, TBoolean, TInterval(tv("T")),
       { case (_: Type, startpt, endpt, includesStartPT, includesEndPT) =>
         PCanonicalInterval(
-          InferPType.getNestedElementPTypes(Seq(startpt, endpt)),
+          InferPType.getCompatiblePType(Seq(startpt, endpt)),
           required = includesStartPT.required && includesEndPT.required
         )
       }) {
@@ -97,7 +97,7 @@ object IntervalFunctions extends RegistryFunctions {
 
         val cmp = r.mb.newLocal[Int]()
         val interval = new IRInterval(r, int.pt.asInstanceOf[PInterval], int.value[Long])
-        val compare = interval.ordering(CodeOrdering.compare)
+        val compare = interval.ordering(CodeOrdering.Compare())
 
         val contains = Code(
           interval.storeToLocal,
@@ -207,8 +207,8 @@ class IRInterval(r: EmitRegion, typ: PInterval, value: Code[Long]) {
   def includesEnd: Code[Boolean] = typ.includesEnd(ref)
 
   def isEmpty: Code[Boolean] = {
-    val gt = ordering(CodeOrdering.gt)
-    val gteq = ordering(CodeOrdering.gteq)
+    val gt = ordering(CodeOrdering.Gt())
+    val gteq = ordering(CodeOrdering.Gteq())
 
     (includesStart && includesEnd).mux(
       gt(start, end),
@@ -217,7 +217,7 @@ class IRInterval(r: EmitRegion, typ: PInterval, value: Code[Long]) {
 
   def isAboveOnNonempty(other: IRInterval): Code[Boolean] = {
     val cmp = r.mb.newLocal[Int]()
-    val compare = ordering(CodeOrdering.compare)
+    val compare = ordering(CodeOrdering.Compare())
     Code(
       cmp := compare(start, other.end),
       cmp > 0 || (cmp.ceq(0) && (!includesStart || !other.includesEnd)))
@@ -225,7 +225,7 @@ class IRInterval(r: EmitRegion, typ: PInterval, value: Code[Long]) {
 
   def isBelowOnNonempty(other: IRInterval): Code[Boolean] = {
     val cmp = r.mb.newLocal[Int]()
-    val compare = ordering(CodeOrdering.compare)
+    val compare = ordering(CodeOrdering.Compare())
     Code(
       cmp := compare(end, other.start),
       cmp < 0 || (cmp.ceq(0) && (!includesEnd || !other.includesStart)))

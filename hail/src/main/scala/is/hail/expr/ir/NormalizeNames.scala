@@ -62,9 +62,9 @@ class NormalizeNames(normFunction: Int => String, allowFreeVariables: Boolean = 
       }.toFastIndexedSeq)
   }
 
-  private def normalizeIR(ir: IR, env: BindingEnv[String]): IR = {
+  private def normalizeIR(ir: IR, env: BindingEnv[String], context: Array[String] = Array()): IR = {
 
-    def normalize(ir: IR, env: BindingEnv[String] = env): IR = normalizeIR(ir, env)
+    def normalize(next: IR, env: BindingEnv[String] = env): IR = normalizeIR(next, env, context :+ ir.getClass().getName())
 
     ir match {
       case Let(name, value, body) =>
@@ -75,7 +75,7 @@ class NormalizeNames(normFunction: Int => String, allowFreeVariables: Boolean = 
           case Some(n) => n
           case None =>
             if (!allowFreeVariables)
-              throw new RuntimeException(s"found free variable in normalize: $name")
+              throw new RuntimeException(s"found free variable in normalize: $name, ${context.reverse.mkString(", ")}; ${env.pretty(x => x)}")
             else
               name
         }
@@ -85,7 +85,7 @@ class NormalizeNames(normFunction: Int => String, allowFreeVariables: Boolean = 
           case Some(n) => n
           case None =>
             if (!allowFreeVariables)
-              throw new RuntimeException(s"found free loop variable in normalize: $name")
+              throw new RuntimeException(s"found free loop variable in normalize: $name, ${context.reverse.mkString(", ")}; ${env.pretty(x => x)}")
             else
               name
         }
@@ -102,10 +102,10 @@ class NormalizeNames(normFunction: Int => String, allowFreeVariables: Boolean = 
         val newNames = Array.tabulate(args.length)(i => gen())
         val (names, values) = args.unzip
         TailLoop(newFName, newNames.zip(values.map(v => normalize(v))), normalize(body, env.copy(eval = env.eval.bind(names.zip(newNames) :+ name -> newFName: _*))))
-      case ArraySort(a, left, right, compare) =>
+      case ArraySort(a, left, right, lessThan) =>
         val newLeft = gen()
         val newRight = gen()
-        ArraySort(normalize(a), newLeft, newRight, normalize(compare, env.bindEval(left -> newLeft, right -> newRight)))
+        ArraySort(normalize(a), newLeft, newRight, normalize(lessThan, env.bindEval(left -> newLeft, right -> newRight)))
       case StreamMap(a, name, body) =>
         val newName = gen()
         StreamMap(normalize(a), newName, normalize(body, env.bindEval(name, newName)))
@@ -153,11 +153,11 @@ class NormalizeNames(normFunction: Int => String, allowFreeVariables: Boolean = 
         val newName = gen()
         val newEnv = env.eval.bind(name, newName)
         StreamAggScan(normalize(a), newName, normalize(body, env.copy(eval = newEnv, scan = Some(newEnv))))
-      case StreamLeftJoinDistinct(left, right, l, r, keyF, joinF) =>
+      case StreamJoinRightDistinct(left, right, lKey, rKey, l, r, joinF, joinType) =>
         val newL = gen()
         val newR = gen()
         val newEnv = env.bindEval(l -> newL, r -> newR)
-        StreamLeftJoinDistinct(normalize(left), normalize(right), newL, newR, normalize(keyF, newEnv), normalize(joinF, newEnv))
+        StreamJoinRightDistinct(normalize(left), normalize(right), lKey, rKey, newL, newR, normalize(joinF, newEnv), joinType)
       case NDArrayMap(nd, name, body) =>
         val newName = gen()
         NDArrayMap(normalize(nd), newName, normalize(body, env.bindEval(name -> newName)))

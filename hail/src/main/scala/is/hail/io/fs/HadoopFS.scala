@@ -4,7 +4,6 @@ import is.hail.utils._
 
 import org.apache.hadoop
 import org.apache.hadoop.fs.{FSDataInputStream, FSDataOutputStream}
-import org.apache.hadoop.io.compress.{CompressionCodec, CompressionCodecFactory}
 
 import java.io._
 
@@ -27,26 +26,40 @@ class HadoopFileStatus(fs: hadoop.fs.FileStatus) extends FileStatus {
 object HadoopFS {
   def toPositionedOutputStream(os: FSDataOutputStream): PositionedOutputStream =
     new OutputStream with Positioned {
+      private[this] var closed: Boolean = false
+
       override def write(i: Int): Unit = os.write(i)
 
       override def write(bytes: Array[Byte], off: Int, len: Int): Unit = os.write(bytes, off, len)
 
       override def flush(): Unit = os.flush()
 
-      override def close(): Unit = os.close()
+      override def close(): Unit = {
+        if (!closed) {
+          os.close()
+          closed = true
+        }
+      }
 
       def getPosition: Long = os.getPos
     }
 
   def toSeekableInputStream(is: FSDataInputStream): SeekableInputStream =
     new InputStream with Seekable {
+      private[this] var closed: Boolean = false
+
       override def read(): Int = is.read()
 
       override def read(bytes: Array[Byte], off: Int, len: Int): Int = is.read(bytes, off, len)
 
       override def skip(n: Long): Long = is.skip(n)
 
-      override def close(): Unit = is.close()
+      override def close(): Unit = {
+        if (!closed) {
+          is.close()
+          closed = true
+        }
+      }
 
       def seek(pos: Long): Unit = is.seek(pos)
 
@@ -55,24 +68,12 @@ object HadoopFS {
 }
 
 class HadoopFS(val conf: SerializableHadoopConfiguration) extends FS {
-  def getCodec(filename: String): CompressionCodec = {
-    val codecFactory = new CompressionCodecFactory(conf.value)
-    codecFactory.getCodec(new hadoop.fs.Path(filename))
-  }
-
-  def getCodecs(): IndexedSeq[String] = {
-    conf.value.get("io.compression.codecs").split(",")
-  }
-
-  def setCodecs(codecs: IndexedSeq[String]): Unit = {
-    conf.value.set("io.compression.codecs", codecs.mkString(","))
-  }
-
   def createNoCompression(filename: String): PositionedDataOutputStream = {
     val fs = getFileSystem(filename)
     val hPath = new hadoop.fs.Path(filename)
     val os = fs.create(hPath)
-    new WrappedPositionedDataOutputStream(HadoopFS.toPositionedOutputStream(os))
+    new WrappedPositionedDataOutputStream(
+      HadoopFS.toPositionedOutputStream(os))
   }
 
   def openNoCompression(filename: String): SeekableDataInputStream = {
@@ -88,7 +89,9 @@ class HadoopFS(val conf: SerializableHadoopConfiguration) extends FS {
           throw e
     }
 
-    new WrappedSeekableDataInputStream(HadoopFS.toSeekableInputStream(is))
+    new WrappedSeekableDataInputStream(
+      HadoopFS.toSeekableInputStream(is))
+
   }
 
   def getFileSystem(filename: String): hadoop.fs.FileSystem = {

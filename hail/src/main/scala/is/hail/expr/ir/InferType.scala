@@ -1,7 +1,7 @@
 package is.hail.expr.ir
 
 import is.hail.expr.Nat
-import is.hail.expr.types.virtual._
+import is.hail.types.virtual._
 import is.hail.utils._
 
 // FIXME: strip all requiredness logic when possible
@@ -13,6 +13,7 @@ object InferType {
       case F32(_) => TFloat32
       case F64(_) => TFloat64
       case Str(_) => TString
+      case UUID4(_) => TString
       case Literal(t, _) => t
       case True() | False() => TBoolean
       case Void() => TVoid
@@ -21,6 +22,7 @@ object InferType {
       case NA(t) => t
       case IsNA(_) => TBoolean
       case Coalesce(values) => values.head.typ
+      case Consume(_) => TInt64
       case Ref(_, t) => t
       case RelationalRef(_, t) => t
       case RelationalLet(_, _, body) => body.typ
@@ -76,8 +78,8 @@ object InferType {
       case ArrayRef(a, i, s) =>
         assert(i.typ == TInt32)
         coerce[TArray](a.typ).elementType
-      case ArraySort(a, _, _, compare) =>
-        assert(compare.typ == TBoolean)
+      case ArraySort(a, _, _, lessThan) =>
+        assert(lessThan.typ == TBoolean)
         val et = coerce[TStream](a.typ).elementType
         TArray(et)
       case ToSet(a) =>
@@ -95,6 +97,7 @@ object InferType {
       case ToStream(a) =>
         val elt = coerce[TIterable](a.typ).elementType
         TStream(elt)
+      case StreamLen(a) => TInt32
       case GroupByKey(collection) =>
         val elt = coerce[TBaseStruct](coerce[TStream](collection.typ).elementType)
         TDict(elt.types(0), TArray(elt.types(1)))
@@ -108,6 +111,9 @@ object InferType {
         TStream(a.typ)
       case StreamMap(a, name, body) =>
         TStream(body.typ)
+      case StreamMerge(l, r, key) =>
+        assert(l.typ == r.typ)
+        l.typ
       case StreamZip(as, _, body, _) =>
         TStream(body.typ)
       case StreamFilter(a, name, cond) =>
@@ -129,7 +135,7 @@ object InferType {
         result.typ
       case RunAggScan(_, _, _, _, result, _) =>
         TStream(result.typ)
-      case StreamLeftJoinDistinct(left, right, l, r, compare, join) =>
+      case StreamJoinRightDistinct(left, right, lKey, rKey, l, r, join, joinType) =>
         TStream(join.typ)
       case NDArrayShape(nd) =>
         val ndType = nd.typ.asInstanceOf[TNDArray]
@@ -230,6 +236,8 @@ object InferType {
       case BlockMatrixToValueApply(child, function) => function.typ(child.typ)
       case CollectDistributedArray(_, _, _, _, body) => TArray(body.typ)
       case ReadPartition(_, rowType, _) => TStream(rowType)
+      case WritePartition(value, writeCtx, writer) => writer.returnType
+      case _: WriteMetadata => TVoid
       case ReadValue(_, _, typ) => typ
       case WriteValue(value, pathPrefix, spec) => TString
       case LiftMeOut(child) => child.typ

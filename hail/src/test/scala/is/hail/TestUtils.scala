@@ -10,8 +10,8 @@ import is.hail.backend.spark.SparkBackend
 import is.hail.expr.ir._
 import is.hail.expr.ir.{BindingEnv, MakeTuple, Subst}
 import is.hail.expr.ir.lowering.LowererUnsupportedOperation
-import is.hail.expr.types.physical.{PBaseStruct, PCanonicalArray, PType}
-import is.hail.expr.types.virtual._
+import is.hail.types.physical.{PBaseStruct, PCanonicalArray, PType}
+import is.hail.types.virtual._
 import is.hail.io.vcf.MatrixVCFReader
 import is.hail.utils._
 import is.hail.variant._
@@ -22,6 +22,7 @@ object ExecStrategy extends Enumeration {
   type ExecStrategy = Value
   val Interpret, InterpretUnoptimized, JvmCompile, LoweredJVMCompile, JvmCompileUnoptimized = Value
 
+  val unoptimizedCompileOnly: Set[ExecStrategy] = Set(JvmCompileUnoptimized)
   val compileOnly: Set[ExecStrategy] = Set(JvmCompile, JvmCompileUnoptimized)
   val javaOnly: Set[ExecStrategy] = Set(Interpret, InterpretUnoptimized, JvmCompile, JvmCompileUnoptimized)
   val interpretOnly: Set[ExecStrategy] = Set(Interpret, InterpretUnoptimized)
@@ -328,7 +329,7 @@ object TestUtils {
     TypeCheck(x, BindingEnv(env.mapValues(_._2), agg = agg.map(_._2.toEnv)))
 
     val t = x.typ
-    assert(t.typeCheck(expected), s"$t, $expected")
+    assert(t == TVoid || t.typeCheck(expected), s"$t, $expected")
 
     ExecuteContext.scoped() { ctx =>
       val filteredExecStrats: Set[ExecStrategy] =
@@ -371,8 +372,10 @@ object TestUtils {
             case ExecStrategy.LoweredJVMCompile =>
               loweredExecute(x, env, args, agg)
           }
-          assert(t.typeCheck(res))
-          assert(t.valuesSimilar(res, expected), s"\n  result=$res\n  expect=$expected\n  strategy=$strat)")
+          if (t != TVoid) {
+            assert(t.typeCheck(res), s"\n  t=$t\n  result=$res\n  strategy=$strat")
+            assert(t.valuesSimilar(res, expected), s"\n  result=$res\n  expect=$expected\n  strategy=$strat)")
+          }
         } catch {
           case e: Exception =>
             error(s"error from strategy $strat")
@@ -501,6 +504,8 @@ object TestUtils {
     forceBGZ: Boolean = false,
     headerFile: Option[String] = None,
     nPartitions: Option[Int] = None,
+    blockSizeInMB: Option[Int] = None,
+    minPartitions: Option[Int] = None,
     dropSamples: Boolean = false,
     callFields: Set[String] = Set.empty[String],
     rg: Option[ReferenceGenome] = Some(ReferenceGenome.GRCh37),
@@ -519,6 +524,8 @@ object TestUtils {
       entryFloatType,
       headerFile,
       nPartitions,
+      blockSizeInMB,
+      minPartitions,
       rg.map(_.name),
       contigRecoding.getOrElse(Map.empty[String, String]),
       arrayElementsRequired,

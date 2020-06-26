@@ -1,12 +1,13 @@
 package is.hail.expr.ir
 
-import is.hail.expr.types.virtual.TNDArray
+import is.hail.types.virtual.TNDArray
 
 object Interpretable {
   def apply(ir: IR): Boolean = {
     !ir.typ.isInstanceOf[TNDArray] &&
       (ir match {
       case
+        _: StreamMerge |
         _: RunAgg |
         _: InitOp |
         _: SeqOp |
@@ -34,6 +35,8 @@ object Interpretable {
         _: TailLoop |
         _: Recur |
         _: ReadPartition |
+        _: WritePartition |
+        _: WriteMetadata |
         _: ReadValue |
         _: WriteValue |
         _: NDArrayWrite => false

@@ -9,13 +9,13 @@ import hail as hl
 import hail.expr.aggregators as agg
 from hail.expr import construct_expr, construct_variable
 from hail.expr.expressions import expr_float64, matrix_table_source, check_entry_indexed, \
-    expr_tuple, expr_array, expr_int64
-from hail.ir import BlockMatrixWrite, BlockMatrixMap2, ApplyBinaryPrimOp, Ref, F64, \
+    expr_tuple, expr_array, expr_int32, expr_int64
+from hail.ir import BlockMatrixWrite, BlockMatrixMap2, ApplyBinaryPrimOp, F64, \
     BlockMatrixBroadcast, ValueToBlockMatrix, BlockMatrixRead, JavaBlockMatrix, BlockMatrixMap, \
-    ApplyUnaryPrimOp, IR, BlockMatrixDot, tensor_shape_to_matrix_shape, BlockMatrixAgg, BlockMatrixRandom, \
+    ApplyUnaryPrimOp, BlockMatrixDot, tensor_shape_to_matrix_shape, BlockMatrixAgg, BlockMatrixRandom, \
     BlockMatrixToValueApply, BlockMatrixToTable, BlockMatrixFilter, TableFromBlockMatrixNativeReader, TableRead, \
     BlockMatrixSlice, BlockMatrixSparsify, BlockMatrixDensify, RectangleSparsifier, \
-    RowIntervalSparsifier, BandSparsifier, UnpersistBlockMatrix
+    RowIntervalSparsifier, BandSparsifier, PerBlockSparsifier, UnpersistBlockMatrix
 from hail.ir.blockmatrix_reader import BlockMatrixNativeReader, BlockMatrixBinaryReader, BlockMatrixPersistReader
 from hail.ir.blockmatrix_writer import BlockMatrixBinaryWriter, BlockMatrixNativeWriter, BlockMatrixRectanglesWriter, BlockMatrixPersistWriter
 from hail.ir import ExportType
@@ -1004,6 +1004,12 @@ class BlockMatrix(object):
         return BlockMatrix(
             BlockMatrixSparsify(self._bmir, intervals._ir,
                                 RowIntervalSparsifier(blocks_only)))
+
+    @typecheck_method(indices=expr_array(expr_int32))
+    def _sparsify_blocks(self, indices):
+        return BlockMatrix(
+            BlockMatrixSparsify(self._bmir, indices._ir,
+                                PerBlockSparsifier()))
 
     @typecheck_method(starts=oneof(sequenceof(int), np.ndarray),
                       stops=oneof(sequenceof(int), np.ndarray),
@@ -2147,7 +2153,7 @@ class BlockMatrix(object):
         for rect, file_path in zip(rects, rect_files):
             hl.utils.hadoop_copy(file_path, uri)
             if binary:
-                rect_data = np.reshape(np.fromfile(f), (rect[2]-rect[1], rect[4]-rect[3]))
+                rect_data = np.reshape(np.fromfile(f), (rect[2] - rect[1], rect[4] - rect[3]))
             else:
                 rect_data = np.loadtxt(f, ndmin=2)
             nd[rect[1]:rect[2], rect[3]:rect[4]] = rect_data
@@ -2359,7 +2365,7 @@ def _shape_after_broadcast(left, right):
     elif diff_len > 0:
         right = pad(right, diff_len)
 
-    return [join_dim(l, r) for l, r in zip(left, right)]
+    return [join_dim(lx, rx) for lx, rx in zip(left, right)]
 
 
 @typecheck(x=oneof(numeric, np.ndarray), block_size=int)

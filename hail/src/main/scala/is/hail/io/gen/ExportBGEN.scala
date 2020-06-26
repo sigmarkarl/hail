@@ -3,7 +3,7 @@ package is.hail.io.gen
 import is.hail.HailContext
 import is.hail.annotations.{RegionValue, UnsafeRow}
 import is.hail.expr.ir.{ExecuteContext, MatrixValue}
-import is.hail.expr.types.physical.PStruct
+import is.hail.types.physical.PStruct
 import is.hail.io.fs.FS
 import is.hail.utils.ArrayBuilder
 import is.hail.variant.{ArrayGenotypeView, RegionValueVariant, View}
@@ -324,7 +324,7 @@ object ExportBGEN {
 
     val d = digitsNeeded(mv.rvd.getNumPartitions)
 
-    val (files, droppedPerPart) = mv.rvd.crdd.mapPartitionsWithIndex { case (i: Int, it: Iterator[Long]) =>
+    val (files, droppedPerPart) = mv.rvd.crdd.boundary.mapPartitionsWithIndex { case (i: Int, it: Iterator[Long]) =>
       val context = TaskContext.get
       val pf =
         parallelOutputPath + "/" +

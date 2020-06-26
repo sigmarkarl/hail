@@ -1,7 +1,7 @@
 package is.hail.expr.ir
 
-import is.hail.expr.types.physical.PStream
-import is.hail.expr.types.virtual._
+import is.hail.types.physical.PStream
+import is.hail.types.virtual._
 import is.hail.utils._
 
 object TypeCheck {
@@ -85,6 +85,7 @@ object TypeCheck {
       case True() =>
       case False() =>
       case Str(x) =>
+      case UUID4(_) =>
       case Literal(_, _) =>
       case Void() =>
       case Cast(v, typ) => if (!Casts.valid(v.typ, typ))
@@ -232,9 +233,9 @@ object TypeCheck {
         val ndType = nd.typ.asInstanceOf[TNDArray]
         assert(ndType.elementType == TFloat64)
         assert(ndType.nDims == 2)
-      case x@ArraySort(a, l, r, compare) =>
+      case x@ArraySort(a, l, r, lessThan) =>
         assert(a.typ.isInstanceOf[TStream])
-        assert(compare.typ == TBoolean)
+        assert(lessThan.typ == TBoolean)
       case x@ToSet(a) =>
         assert(a.typ.isInstanceOf[TStream])
       case x@ToDict(a) =>
@@ -257,6 +258,8 @@ object TypeCheck {
         val td = coerce[TDict](x.typ)
         assert(td.keyType == telt.types(0))
         assert(td.valueType == TArray(telt.types(1)))
+      case StreamLen(a) =>
+        assert(a.typ.isInstanceOf[TStream])
       case x@StreamTake(a, num) =>
         assert(a.typ.isInstanceOf[TStream])
         assert(x.typ == a.typ)
@@ -278,6 +281,11 @@ object TypeCheck {
       case x@StreamMap(a, name, body) =>
         assert(a.typ.isInstanceOf[TStream])
         assert(x.elementTyp == body.typ)
+      case x@StreamMerge(l, r, key) =>
+        assert(l.typ == r.typ)
+        assert(x.typ == l.typ)
+        val structType = coerce[TStruct](coerce[TStream](l.typ).elementType)
+        assert(key.forall(structType.hasField))
       case x@StreamZip(as, names, body, _) =>
         assert(as.length == names.length)
         assert(x.typ.elementType == body.typ)
@@ -291,6 +299,7 @@ object TypeCheck {
         assert(body.typ.isInstanceOf[TStream])
       case x@StreamFold(a, zero, accumName, valueName, body) =>
         assert(a.typ.isInstanceOf[TStream])
+        assert(a.typ.asInstanceOf[TStream].elementType.isRealizable, Pretty(x))
         assert(body.typ == zero.typ)
         assert(x.typ == zero.typ)
       case x@StreamFold2(a, accum, valueName, seq, res) =>
@@ -302,11 +311,15 @@ object TypeCheck {
         assert(body.typ == zero.typ)
         assert(coerce[TStream](x.typ).elementType == zero.typ)
         assert(zero.typ.isRealizable)
-      case x@StreamLeftJoinDistinct(left, right, l, r, compare, join) =>
-        val ltyp = coerce[TStream](left.typ)
-        val rtyp = coerce[TStream](right.typ)
-        assert(compare.typ == TInt32)
+      case x@StreamJoinRightDistinct(left, right, lKey, rKey, l, r, join, joinType) =>
+        val lEltTyp = coerce[TStruct](coerce[TStream](left.typ).elementType)
+        val rEltTyp = coerce[TStruct](coerce[TStream](right.typ).elementType)
         assert(coerce[TStream](x.typ).elementType == join.typ)
+        assert(lKey.forall(lEltTyp.hasField))
+        assert(rKey.forall(rEltTyp.hasField))
+        assert((lKey, rKey).zipped.forall { case (lk, rk) =>
+          lEltTyp.fieldType(lk) == rEltTyp.fieldType(rk)
+        })
       case x@StreamFor(a, valueName, body) =>
         assert(a.typ.isInstanceOf[TStream])
         assert(body.typ == TVoid)
@@ -334,12 +347,10 @@ object TypeCheck {
       case x@AggArrayPerElement(a, _, _, aggBody, knownLength, _) =>
         assert(x.typ == TArray(aggBody.typ))
         assert(knownLength.forall(_.typ == TInt32))
-      case x@InitOp(_, args, aggSig, op) =>
-        assert(args.map(_.typ).zip(aggSig.lookup(op).initOpArgs).forall { case (l, r) => l == r })
-      case x@SeqOp(_, args, aggSig, op) =>
-        val sig = aggSig.lookup(op)
-        assert(args.map(_.typ).zip(sig.seqOpArgs).forall { case (l, r) => l == r },
-          s"${args.map(_.typ.parsableString())} ${sig.seqOpArgs.map(_.parsableString)}")
+      case x@InitOp(_, args, aggSig) =>
+        assert(args.map(_.typ) == aggSig.initOpTypes)
+      case x@SeqOp(_, args, aggSig) =>
+        assert(args.map(_.typ) == aggSig.seqOpTypes)
       case _: CombOp =>
       case _: ResultOp =>
       case AggStateValue(i, sig) =>
@@ -428,6 +439,12 @@ object TypeCheck {
         assert(context.typ == reader.contextType)
         assert(x.typ == TStream(rowType))
         assert(PruneDeadFields.isSupertype(rowType, reader.fullRowType))
+      case x@WritePartition(value, writeCtx, writer) =>
+        assert(value.typ.isInstanceOf[TStream])
+        assert(writeCtx.typ == writer.ctxType)
+        assert(x.typ == writer.returnType)
+      case WriteMetadata(writeAnnotations, writer) =>
+        assert(writeAnnotations.typ == writer.annotationType)
       case x@ReadValue(path, spec, requestedType) =>
         assert(path.typ == TString)
         assert(spec.encodedType.decodedPType(requestedType).virtualType == requestedType)

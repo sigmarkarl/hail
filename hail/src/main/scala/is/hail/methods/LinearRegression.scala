@@ -6,9 +6,9 @@ import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.expr.ir.functions.MatrixToTableFunction
 import is.hail.expr.ir.{ExecuteContext, MatrixValue, TableValue}
-import is.hail.expr.types._
-import is.hail.expr.types.physical.PStruct
-import is.hail.expr.types.virtual.{TArray, TFloat64, TInt32, TStruct}
+import is.hail.types._
+import is.hail.types.physical.PStruct
+import is.hail.types.virtual.{TArray, TFloat64, TInt32, TStruct}
 import is.hail.stats._
 import is.hail.utils._
 import net.sourceforge.jdistlib.T
@@ -92,7 +92,7 @@ case class LinearRegressionRowsSingle(
         val blockWRVs = new Array[WritableRegionValue](rowBlockSize)
         var i = 0
         while (i < rowBlockSize) {
-          blockWRVs(i) = WritableRegionValue(fullRowType, producerCtx.freshRegion)
+          blockWRVs(i) = WritableRegionValue(fullRowType, producerCtx.freshRegion())
           i += 1
         }
 
@@ -250,7 +250,7 @@ case class LinearRegressionRowsChained(
         val blockWRVs = new Array[WritableRegionValue](rowBlockSize)
         var i = 0
         while (i < rowBlockSize) {
-          blockWRVs(i) = WritableRegionValue(fullRowType, producerCtx.freshRegion)
+          blockWRVs(i) = WritableRegionValue(fullRowType, producerCtx.freshRegion())
           i += 1
         }
 

@@ -19,7 +19,7 @@ import aiodocker
 from aiodocker.exceptions import DockerError
 import google.oauth2.service_account
 from hailtop.utils import time_msecs, request_retry_transient_errors, RETRY_FUNCTION_SCRIPT, \
-    sleep_and_backoff, retry_all_errors
+    sleep_and_backoff, retry_all_errors, check_shell, CalledProcessError
 from hailtop.tls import ssl_client_session
 
 # import uvloop
@@ -33,13 +33,13 @@ from .semaphore import FIFOWeightedSemaphore
 from .log_store import LogStore
 from .globals import HTTP_CLIENT_MAX_SIZE, STATUS_FORMAT_VERSION
 from .batch_format_version import BatchFormatVersion
+from .worker_config import WorkerConfig
 
 # uvloop.install()
 
 configure_logging()
 log = logging.getLogger('batch-worker')
 
-MAX_IDLE_TIME_MSECS = 30 * 1000
 MAX_DOCKER_IMAGE_PULL_SECS = 20 * 60
 MAX_DOCKER_WAIT_SECS = 5 * 60
 MAX_DOCKER_OTHER_OPERATION_SECS = 1 * 60
@@ -49,20 +49,27 @@ NAME = os.environ['NAME']
 NAMESPACE = os.environ['NAMESPACE']
 # ACTIVATION_TOKEN
 IP_ADDRESS = os.environ['IP_ADDRESS']
-BUCKET_NAME = os.environ['BUCKET_NAME']
+BATCH_LOGS_BUCKET_NAME = os.environ['BATCH_LOGS_BUCKET_NAME']
+WORKER_LOGS_BUCKET_NAME = os.environ['WORKER_LOGS_BUCKET_NAME']
 INSTANCE_ID = os.environ['INSTANCE_ID']
 PROJECT = os.environ['PROJECT']
-WORKER_TYPE = os.environ['WORKER_TYPE']
+WORKER_CONFIG = json.loads(base64.b64decode(os.environ['WORKER_CONFIG']).decode())
+MAX_IDLE_TIME_MSECS = int(os.environ['MAX_IDLE_TIME_MSECS'])
 
 log.info(f'CORES {CORES}')
 log.info(f'NAME {NAME}')
 log.info(f'NAMESPACE {NAMESPACE}')
 # ACTIVATION_TOKEN
 log.info(f'IP_ADDRESS {IP_ADDRESS}')
-log.info(f'WORKER_TYPE {WORKER_TYPE}')
-log.info(f'BUCKET_NAME {BUCKET_NAME}')
+log.info(f'BATCH_LOGS_BUCKET_NAME {BATCH_LOGS_BUCKET_NAME}')
+log.info(f'WORKER_LOGS_BUCKET_NAME {WORKER_LOGS_BUCKET_NAME}')
 log.info(f'INSTANCE_ID {INSTANCE_ID}')
 log.info(f'PROJECT {PROJECT}')
+log.info(f'WORKER_CONFIG {WORKER_CONFIG}')
+log.info(f'MAX_IDLE_TIME_MSECS {MAX_IDLE_TIME_MSECS}')
+
+worker_config = WorkerConfig(WORKER_CONFIG)
+assert worker_config.cores == CORES
 
 deploy_config = DeployConfig('gce', NAMESPACE, {})
 
@@ -213,6 +220,10 @@ class ContainerStepManager:
         self.timing['duration'] = finish_time - start_time
 
 
+def worker_fraction_in_1024ths(cpu_in_mcpu):
+    return 1024 * cpu_in_mcpu // (CORES * 1000)
+
+
 class Container:
     def __init__(self, job, name, spec):
         self.job = job
@@ -239,10 +250,11 @@ class Container:
         self.log = None
 
     def container_config(self):
+        weight = worker_fraction_in_1024ths(self.spec['cpu'])
         host_config = {
-            'CpuPeriod': 100000,
-            'CpuQuota': self.spec['cpu'] * 100,
-            'Memory': self.spec['memory']
+            'CpuShares': weight,
+            'Memory': self.spec['memory'],
+            'BlkioWeight': min(weight, 1000)
         }
         config = {
             "AttachStdin": False,
@@ -460,8 +472,32 @@ def populate_secret_host_path(host_path, secret_data):
     os.makedirs(host_path)
     if secret_data is not None:
         for filename, data in secret_data.items():
-            with open(f'{host_path}/{filename}', 'w') as f:
-                f.write(base64.b64decode(data).decode())
+            with open(f'{host_path}/{filename}', 'wb') as f:
+                f.write(base64.b64decode(data))
+
+
+async def add_gcsfuse_bucket(mount_path, bucket, key_file):
+    os.makedirs(mount_path)
+    delay = 0.1
+    error = 0
+    while True:
+        try:
+            return await check_shell(f'''
+/usr/bin/gcsfuse \
+    -o allow_other \
+    --file-mode 770 \
+    --dir-mode 770 \
+    --key-file {key_file} \
+    {bucket} {mount_path}
+''')
+        except CalledProcessError:
+            error += 1
+            if error == 5:
+                raise
+        except asyncio.CancelledError:  # pylint: disable=try-except-raise
+            raise
+
+        delay = await sleep_and_backoff(delay)
 
 
 def copy_command(src, dst):
@@ -507,6 +543,13 @@ class Job:
     def io_host_path(self):
         return f'{self.scratch}/io'
 
+    def gcsfuse_path(self, bucket):
+        # Make sure this path isn't in self.scratch to avoid accidental bucket deletions!
+        return f'/gcsfuse/{self.token}/{bucket}'
+
+    def gsa_key_file_path(self):
+        return f'{self.scratch}/gsa-key'
+
     def __init__(self, batch_id, user, gsa_key, job_spec, format_version):
         self.batch_id = batch_id
         self.user = user
@@ -516,8 +559,8 @@ class Job:
 
         self.deleted = False
 
-        token = uuid.uuid4().hex
-        self.scratch = f'/batch/{token}'
+        self.token = uuid.uuid4().hex
+        self.scratch = f'/batch/{self.token}'
 
         self.state = 'pending'
         self.error = None
@@ -541,6 +584,12 @@ class Job:
             main_volume_mounts.append(volume_mount)
             copy_volume_mounts.append(volume_mount)
 
+        gcsfuse = job_spec.get('gcsfuse')
+        self.gcsfuse = gcsfuse
+        if gcsfuse:
+            for b in gcsfuse:
+                main_volume_mounts.append(f'{self.gcsfuse_path(b["bucket"])}:{b["mount_path"]}:shared')
+
         secrets = job_spec.get('secrets')
         self.secrets = secrets
         if secrets:
@@ -558,11 +607,13 @@ class Job:
         req_cpu_in_mcpu = parse_cpu_in_mcpu(job_spec['resources']['cpu'])
         req_memory_in_bytes = parse_memory_in_bytes(job_spec['resources']['memory'])
 
-        cpu_in_mcpu = adjust_cores_for_memory_request(req_cpu_in_mcpu, req_memory_in_bytes, WORKER_TYPE)
+        cpu_in_mcpu = adjust_cores_for_memory_request(req_cpu_in_mcpu, req_memory_in_bytes, worker_config.instance_type)
         cpu_in_mcpu = adjust_cores_for_packability(cpu_in_mcpu)
 
         self.cpu_in_mcpu = cpu_in_mcpu
-        self.memory_in_bytes = cores_mcpu_to_memory_bytes(self.cpu_in_mcpu, WORKER_TYPE)
+        self.memory_in_bytes = cores_mcpu_to_memory_bytes(self.cpu_in_mcpu, worker_config.instance_type)
+
+        self.resources = worker_config.resources(self.cpu_in_mcpu, self.memory_in_bytes)
 
         # create containers
         containers = {}
@@ -626,6 +677,14 @@ class Job:
                     for secret in self.secrets:
                         populate_secret_host_path(self.secret_host_path(secret), secret['data'])
 
+                if self.gcsfuse:
+                    populate_secret_host_path(self.gsa_key_file_path(), self.gsa_key)
+                    for b in self.gcsfuse:
+                        bucket = b['bucket']
+                        await add_gcsfuse_bucket(mount_path=self.gcsfuse_path(bucket),
+                                                 bucket=bucket,
+                                                 key_file=f'{self.gsa_key_file_path()}/key.json')
+
                 self.state = 'running'
 
                 input = self.containers.get('input')
@@ -670,6 +729,12 @@ class Job:
 
                 log.info(f'{self}: cleaning up')
                 try:
+                    if self.gcsfuse:
+                        for b in self.gcsfuse:
+                            bucket = b['bucket']
+                            mount_path = self.gcsfuse_path(bucket)
+                            await check_shell(f'fusermount -u {mount_path}')
+                            log.info(f'unmounted gcsfuse bucket {bucket} from {mount_path}')
                     shutil.rmtree(self.scratch, ignore_errors=True)
                 except Exception:
                     log.exception('while deleting volumes')
@@ -695,7 +760,8 @@ class Job:
     #   error: str, (optional)
     #   container_statuses: [Container.status],
     #   start_time: int,
-    #   end_time: int
+    #   end_time: int,
+    #   resources: list of dict, {name: str, quantity: int}
     # }
     async def status(self):
         status = {
@@ -706,7 +772,8 @@ class Job:
             'attempt_id': self.job_spec['attempt_id'],
             'user': self.user,
             'state': self.state,
-            'format_version': self.format_version.format_version
+            'format_version': self.format_version.format_version,
+            'resources': self.resources
         }
         if self.error:
             status['error'] = self.error
@@ -850,26 +917,28 @@ class Worker:
             site = web.TCPSite(app_runner, '0.0.0.0', 5000)
             await site.start()
 
-            await self.activate()
-
-            idle_duration = time_msecs() - self.last_updated
-            while self.jobs or idle_duration < MAX_IDLE_TIME_MSECS:
-                log.info(f'n_jobs {len(self.jobs)} free_cores {self.cpu_sem.value / 1000} idle {idle_duration}')
-                await asyncio.sleep(15)
+            try:
+                await asyncio.wait_for(self.activate(), MAX_IDLE_TIME_MSECS / 1000)
+            except asyncio.TimeoutError:
+                log.exception(f'could not activate after trying for {MAX_IDLE_TIME_MSECS} ms, exiting')
+            else:
                 idle_duration = time_msecs() - self.last_updated
+                while self.jobs or idle_duration < MAX_IDLE_TIME_MSECS:
+                    log.info(f'n_jobs {len(self.jobs)} free_cores {self.cpu_sem.value / 1000} idle {idle_duration}')
+                    await asyncio.sleep(15)
+                    idle_duration = time_msecs() - self.last_updated
+                log.info(f'idle {idle_duration} ms, exiting')
 
-            log.info(f'idle {idle_duration} seconds, exiting')
-
-            async with ssl_client_session(
-                    raise_for_status=True, timeout=aiohttp.ClientTimeout(total=60)) as session:
-                # Don't retry.  If it doesn't go through, the driver
-                # monitoring loops will recover.  If the driver is
-                # gone (e.g. testing a PR), this would go into an
-                # infinite loop and the instance won't be deleted.
-                await session.post(
-                    deploy_config.url('batch-driver', '/api/v1alpha/instances/deactivate'),
-                    headers=self.headers)
-            log.info('deactivated')
+                async with ssl_client_session(
+                        raise_for_status=True, timeout=aiohttp.ClientTimeout(total=60)) as session:
+                    # Don't retry.  If it doesn't go through, the driver
+                    # monitoring loops will recover.  If the driver is
+                    # gone (e.g. testing a PR), this would go into an
+                    # infinite loop and the instance won't be deleted.
+                    await session.post(
+                        deploy_config.url('batch-driver', '/api/v1alpha/instances/deactivate'),
+                        headers=self.headers)
+                log.info('deactivated')
         finally:
             log.info('shutting down')
             if site:
@@ -902,6 +971,7 @@ class Worker:
             'state': full_status['state'],
             'start_time': full_status['start_time'],
             'end_time': full_status['end_time'],
+            'resources': full_status['resources'],
             'status': db_status
         }
 
@@ -961,6 +1031,7 @@ class Worker:
             'job_id': full_status['job_id'],
             'attempt_id': full_status['attempt_id'],
             'start_time': full_status['start_time'],
+            'resources': full_status['resources']
         }
 
         body = {
@@ -1002,7 +1073,7 @@ class Worker:
 
             credentials = google.oauth2.service_account.Credentials.from_service_account_file(
                 'key.json')
-            self.log_store = LogStore(BUCKET_NAME, INSTANCE_ID, self.pool,
+            self.log_store = LogStore(BATCH_LOGS_BUCKET_NAME, WORKER_LOGS_BUCKET_NAME, INSTANCE_ID, self.pool,
                                       project=PROJECT, credentials=credentials)
 
 

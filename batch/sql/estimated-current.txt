@@ -4,9 +4,16 @@ CREATE TABLE IF NOT EXISTS `globals` (
   `worker_cores` BIGINT NOT NULL,
   `worker_type` VARCHAR(100) NOT NULL,
   `worker_disk_size_gb` BIGINT NOT NULL,
+  `standing_worker_cores` BIGINT NOT NULL,
   `max_instances` BIGINT NOT NULL,
   `pool_size` BIGINT NOT NULL,
   `n_tokens` INT NOT NULL
+) ENGINE = InnoDB;
+
+CREATE TABLE IF NOT EXISTS `resources` (
+  `resource` VARCHAR(100) NOT NULL,
+  `rate` DOUBLE NOT NULL,
+  PRIMARY KEY (`resource`)
 ) ENGINE = InnoDB;
 
 CREATE TABLE IF NOT EXISTS `billing_projects` (
@@ -79,7 +86,7 @@ CREATE TABLE IF NOT EXISTS `batches` (
 CREATE INDEX `batches_user_state_cancelled` ON `batches` (`user`, `state`, `cancelled`);
 CREATE INDEX `batches_deleted` ON `batches` (`deleted`);
 CREATE INDEX `batches_token` ON `batches` (`token`);
-CREATE INDEX `batches_time_created` ON `batches` (`time_created`);
+CREATE INDEX `batches_time_completed` ON `batches` (`time_completed`);
 
 CREATE TABLE IF NOT EXISTS `batches_staging` (
   `batch_id` BIGINT NOT NULL,
@@ -187,6 +194,39 @@ CREATE TABLE IF NOT EXISTS `batch_attributes` (
 ) ENGINE = InnoDB;
 CREATE INDEX batch_attributes_key_value ON `batch_attributes` (`key`, `value`(256));
 
+CREATE TABLE IF NOT EXISTS `aggregated_batch_resources` (
+  `batch_id` BIGINT NOT NULL,
+  `resource` VARCHAR(100) NOT NULL,
+  `usage` BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (`batch_id`, `resource`),
+  FOREIGN KEY (`batch_id`) REFERENCES batches(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`resource`) REFERENCES resources(`resource`) ON DELETE CASCADE
+) ENGINE = InnoDB;
+
+CREATE TABLE IF NOT EXISTS `aggregated_job_resources` (
+  `batch_id` BIGINT NOT NULL,
+  `job_id` INT NOT NULL,
+  `resource` VARCHAR(100) NOT NULL,
+  `usage` BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (`batch_id`, `job_id`, `resource`),
+  FOREIGN KEY (`batch_id`) REFERENCES batches(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`batch_id`, `job_id`) REFERENCES jobs(`batch_id`, `job_id`) ON DELETE CASCADE,
+  FOREIGN KEY (`resource`) REFERENCES resources(`resource`) ON DELETE CASCADE
+) ENGINE = InnoDB;
+
+CREATE TABLE IF NOT EXISTS `attempt_resources` (
+  `batch_id` BIGINT NOT NULL,
+  `job_id` INT NOT NULL,
+  `attempt_id` VARCHAR(40) NOT NULL,
+  `resource` VARCHAR(100) NOT NULL,
+  `quantity` BIGINT NOT NULL,
+  PRIMARY KEY (`batch_id`, `job_id`, `attempt_id`, `resource`),
+  FOREIGN KEY (`batch_id`) REFERENCES batches(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`batch_id`, `job_id`) REFERENCES jobs(`batch_id`, `job_id`) ON DELETE CASCADE,
+  FOREIGN KEY (`batch_id`, `job_id`, `attempt_id`) REFERENCES attempts(`batch_id`, `job_id`, `attempt_id`) ON DELETE CASCADE,
+  FOREIGN KEY (`resource`) REFERENCES resources(`resource`) ON DELETE CASCADE
+) ENGINE = InnoDB;
+
 DELIMITER $$
 
 DROP TRIGGER IF EXISTS instances_before_update;
@@ -212,6 +252,7 @@ BEGIN
   END IF;
 END $$
 
+DROP TRIGGER IF EXISTS attempts_after_update $$
 CREATE TRIGGER attempts_after_update AFTER UPDATE ON attempts
 FOR EACH ROW
 BEGIN
@@ -234,6 +275,29 @@ BEGIN
   UPDATE jobs
   SET msec_mcpu = jobs.msec_mcpu + msec_mcpu_diff
   WHERE batch_id = NEW.batch_id AND job_id = NEW.job_id;
+
+  UPDATE aggregated_batch_resources
+  JOIN (SELECT batch_id, resource, quantity
+        FROM attempt_resources
+        WHERE batch_id = NEW.batch_id AND
+        job_id = NEW.job_id AND
+        attempt_id = NEW.attempt_id) AS t
+  ON aggregated_batch_resources.batch_id = t.batch_id AND
+    aggregated_batch_resources.resource = t.resource
+  SET `usage` = `usage` + msec_diff * t.quantity
+  WHERE aggregated_batch_resources.batch_id = NEW.batch_id;
+
+  UPDATE aggregated_job_resources
+  JOIN (SELECT batch_id, job_id, resource, quantity
+        FROM attempt_resources
+        WHERE batch_id = NEW.batch_id AND
+        job_id = NEW.job_id AND
+        attempt_id = NEW.attempt_id) AS t
+  ON aggregated_job_resources.batch_id = t.batch_id AND
+    aggregated_job_resources.job_id = t.job_id AND
+    aggregated_job_resources.resource = t.resource
+  SET `usage` = `usage` + msec_diff * t.quantity
+  WHERE aggregated_job_resources.batch_id = NEW.batch_id AND aggregated_job_resources.job_id = NEW.job_id;
 END $$
 
 CREATE TRIGGER jobs_after_update AFTER UPDATE ON jobs
@@ -362,6 +426,32 @@ BEGIN
         running_cores_mcpu = running_cores_mcpu + NEW.cores_mcpu;
     END IF;
   END IF;
+END $$
+
+DROP TRIGGER IF EXISTS attempt_resources_after_insert $$
+CREATE TRIGGER attempt_resources_after_insert AFTER INSERT ON attempt_resources
+FOR EACH ROW
+BEGIN
+  DECLARE cur_start_time BIGINT;
+  DECLARE cur_end_time BIGINT;
+  DECLARE msec_diff BIGINT;
+
+  SELECT start_time, end_time INTO cur_start_time, cur_end_time
+  FROM attempts
+  WHERE batch_id = NEW.batch_id AND job_id = NEW.job_id AND attempt_id = NEW.attempt_id
+  LOCK IN SHARE MODE;
+
+  SET msec_diff = GREATEST(COALESCE(cur_end_time - cur_start_time, 0), 0);
+
+  INSERT INTO aggregated_job_resources (batch_id, job_id, resource, `usage`)
+  VALUES (NEW.batch_id, NEW.job_id, NEW.resource, NEW.quantity * msec_diff)
+  ON DUPLICATE KEY UPDATE
+    `usage` = `usage` + NEW.quantity * msec_diff;
+
+  INSERT INTO aggregated_batch_resources (batch_id, resource, `usage`)
+  VALUES (NEW.batch_id, NEW.resource, NEW.quantity * msec_diff)
+  ON DUPLICATE KEY UPDATE
+    `usage` = `usage` + NEW.quantity * msec_diff;
 END $$
 
 CREATE PROCEDURE recompute_incremental(
@@ -525,7 +615,7 @@ BEGIN
   END IF;
 END $$
 
-DROP PROCEDURE IF EXISTS close_batch;
+DROP PROCEDURE IF EXISTS close_batch $$
 CREATE PROCEDURE close_batch(
   IN in_batch_id BIGINT,
   IN in_timestamp BIGINT
@@ -817,6 +907,7 @@ BEGIN
   SELECT 0 as rc, delta_cores_mcpu;
 END $$
 
+DROP PROCEDURE IF EXISTS mark_job_complete $$
 CREATE PROCEDURE mark_job_complete(
   IN in_batch_id BIGINT,
   IN in_job_id INT,
@@ -868,7 +959,7 @@ BEGIN
   WHERE batch_id = in_batch_id AND job_id = in_job_id
   FOR UPDATE;
 
-  IF expected_attempt_id != in_attempt_id THEN
+  IF expected_attempt_id IS NOT NULL AND expected_attempt_id != in_attempt_id THEN
     COMMIT;
     SELECT 2 as rc,
       expected_attempt_id,
@@ -876,7 +967,7 @@ BEGIN
       'input attempt id does not match expected attempt id' as message;
   ELSEIF cur_job_state = 'Ready' OR cur_job_state = 'Running' THEN
     UPDATE jobs
-    SET state = new_state, status = new_status
+    SET state = new_state, status = new_status, attempt_id = in_attempt_id
     WHERE batch_id = in_batch_id AND job_id = in_job_id;
 
     UPDATE batches SET n_completed = n_completed + 1 WHERE id = in_batch_id;

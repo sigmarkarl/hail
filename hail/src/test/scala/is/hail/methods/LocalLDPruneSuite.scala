@@ -5,9 +5,9 @@ import is.hail.annotations.{Annotation, Region, RegionValue, RegionValueBuilder}
 import is.hail.check.Prop._
 import is.hail.check.{Gen, Properties}
 import is.hail.expr.ir.{Interpret, MatrixValue, TableValue}
-import is.hail.expr.types._
-import is.hail.expr.types.physical.{PStruct, PType}
-import is.hail.expr.types.virtual.{TArray, TString, TStruct}
+import is.hail.types._
+import is.hail.types.physical.{PStruct, PType}
+import is.hail.types.virtual.{TArray, TString, TStruct}
 import is.hail.utils._
 import is.hail.variant._
 import is.hail.{HailSuite, TestUtils}
@@ -148,9 +148,9 @@ class LocalLDPruneSuite extends HailSuite {
 
   def toC2(i: Int): BoxedCall = if (i == -1) null else Call2.fromUnphasedDiploidGtIndex(i)
 
-  def getLocallyPrunedRDDWithGT(unprunedMatrixTable: MatrixValue, locallyPrunedTable: TableValue):
-  RDD[(Locus, Any, Iterable[Annotation])] = {
-
+  def getLocallyPrunedRDDWithGT(
+    unprunedMatrixTable: MatrixValue, locallyPrunedTable: TableValue
+  ): RDD[(Locus, Any, Iterable[Annotation])] = {
     val mtLocusIndex = unprunedMatrixTable.rvRowPType.index("locus").get
     val mtAllelesIndex = unprunedMatrixTable.rvRowPType.index("alleles").get
     val mtEntriesIndex = unprunedMatrixTable.entriesIdx

@@ -9,7 +9,7 @@ import hail
 from hail.genetics.reference_genome import ReferenceGenome
 from hail.typecheck import nullable, typecheck, typecheck_method, enumeration, dictof
 from hail.utils import get_env_or_default
-from hail.utils.java import Env, FatalError, warn
+from hail.utils.java import Env, FatalError, warning
 from hail.backend import Backend
 
 
@@ -35,6 +35,7 @@ def _get_log(log):
         log = hail.utils.timestamp_path(os.path.join(os.getcwd(), 'hail'),
                                         suffix=f'-{py_version}.log')
     return log
+
 
 class HailContext(object):
     @typecheck_method(log=str,
@@ -91,7 +92,6 @@ class HailContext(object):
         if global_seed is None:
             global_seed = 6348563392232659379
         Env.set_seed(global_seed)
-
 
     @property
     def default_reference(self):
@@ -203,8 +203,8 @@ def init(sc=None, app_name='Hail', master=None, local='local[*]',
     spark_conf : :obj:`dict[str, str]`, optional
         Spark configuration parameters.
     skip_logging_configuration : :obj:`bool`
-        Skip logging configuration.
-    local_tmpdir : obj:`str`, optional
+        Skip logging configuration in java and python.
+    local_tmpdir : :obj:`str`, optional
         Local temporary directory.  Used on driver and executor nodes.
         Must use the file scheme.  Defaults to TMPDIR, or /tmp.
     """
@@ -214,8 +214,8 @@ def init(sc=None, app_name='Hail', master=None, local='local[*]',
         if idempotent:
             return
         else:
-            warn('Hail has already been initialized. If this call was intended to change configuration,'
-                 ' close the session with hl.stop() first.')
+            warning('Hail has already been initialized. If this call was intended to change configuration,'
+                    ' close the session with hl.stop() first.')
 
     log = _get_log(log)
     tmpdir = _get_tmpdir(tmp_dir)
@@ -233,23 +233,29 @@ def init(sc=None, app_name='Hail', master=None, local='local[*]',
 
 
 @typecheck(
+    billing_project=nullable(str),
+    bucket=nullable(str),
     log=nullable(str),
     quiet=bool,
     append=bool,
     tmpdir=nullable(str),
     local_tmpdir=nullable(str),
     default_reference=enumeration('GRCh37', 'GRCh38', 'GRCm38', 'CanFam3'),
-    global_seed=nullable(int))
+    global_seed=nullable(int),
+    skip_logging_configuration=bool)
 def init_service(
+        billing_project: str = None,
+        bucket: str = None,
         log=None,
         quiet=False,
         append=False,
         tmpdir=None,
         local_tmpdir=None,
         default_reference='GRCh37',
-        global_seed=6348563392232659379):
+        global_seed=6348563392232659379,
+        skip_logging_configuration=False):
     from hail.backend.service_backend import ServiceBackend
-    backend = ServiceBackend()
+    backend = ServiceBackend(billing_project, bucket, skip_logging_configuration=skip_logging_configuration)
 
     log = _get_log(log)
     tmpdir = _get_tmpdir(tmpdir)
@@ -257,6 +263,41 @@ def init_service(
 
     HailContext(
         log, quiet, append, tmpdir, local_tmpdir, default_reference,
+        global_seed, backend)
+
+
+@typecheck(
+    log=nullable(str),
+    quiet=bool,
+    append=bool,
+    branching_factor=int,
+    tmpdir=nullable(str),
+    default_reference=enumeration('GRCh37', 'GRCh38', 'GRCm38', 'CanFam3'),
+    global_seed=nullable(int),
+    skip_logging_configuration=bool,
+    _optimizer_iterations=nullable(int))
+def init_local(
+        log=None,
+        quiet=False,
+        append=False,
+        branching_factor=50,
+        tmpdir=None,
+        default_reference='GRCh37',
+        global_seed=6348563392232659379,
+        skip_logging_configuration=False,
+        _optimizer_iterations=None):
+    from hail.backend.local_backend import LocalBackend
+
+    log = _get_log(log)
+    tmpdir = _get_tmpdir(tmpdir)
+    optimizer_iterations = get_env_or_default(_optimizer_iterations, 'HAIL_OPTIMIZER_ITERATIONS', 3)
+
+    backend = LocalBackend(
+        tmpdir, log, quiet, append, branching_factor,
+        skip_logging_configuration, optimizer_iterations)
+
+    HailContext(
+        log, quiet, append, tmpdir, tmpdir, default_reference,
         global_seed, backend)
 
 
@@ -316,6 +357,7 @@ def stop():
     if Env._hc:
         Env.hc().stop()
 
+
 def spark_context():
     """Returns the active Spark context.
 
@@ -325,8 +367,10 @@ def spark_context():
     """
     return Env.spark_backend('spark_context').sc
 
+
 def current_backend():
     return Env.hc()._backend
+
 
 def default_reference():
     """Returns the default reference genome ``'GRCh37'``.
@@ -336,6 +380,7 @@ def default_reference():
     :class:`.ReferenceGenome`
     """
     return Env.hc().default_reference
+
 
 def get_reference(name) -> 'hail.ReferenceGenome':
     """Returns the reference genome corresponding to `name`.
@@ -383,7 +428,6 @@ def set_global_seed(seed):
     """
 
     Env.set_seed(seed)
-
 
 
 def _set_flags(**flags):

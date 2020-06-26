@@ -7,14 +7,14 @@ import is.hail.annotations.{CodeOrdering, Region}
 import is.hail.asm4s._
 import is.hail.check.{Gen, Prop}
 import is.hail.expr.ir.agg._
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 import is.hail.io.{InputBuffer, OutputBuffer, StreamBufferSpec}
 import is.hail.utils._
 import org.testng.annotations.Test
 
 import scala.collection.mutable
 class TestBTreeKey(mb: EmitMethodBuilder[_]) extends BTreeKey {
-  private val comp = mb.getCodeOrdering(PInt64(), CodeOrdering.compare)
+  private val comp = mb.getCodeOrdering(PInt64(), CodeOrdering.Compare())
   def storageType: PTuple = PCanonicalTuple(required = true, PInt64(), PCanonicalTuple(false))
   def compType: PType = PInt64()
   def isEmpty(off: Code[Long]): Code[Boolean] =

@@ -7,7 +7,7 @@ import is.hail.check.Gen._
 import is.hail.check.Prop._
 import is.hail.check._
 import is.hail.expr.ir.{CompileAndEvaluate, GetField, TableCollect, TableLiteral}
-import is.hail.expr.types.virtual.{TFloat64, TInt64, TStruct}
+import is.hail.types.virtual.{TFloat64, TInt64, TStruct}
 import is.hail.linalg.BlockMatrix.ops._
 import is.hail.utils._
 import is.hail.{HailSuite, TestUtils}
@@ -801,7 +801,7 @@ class BlockMatrixSuite extends HailSuite {
     val lm = new BDM[Double](9, 12, (0 to 107).map(_.toDouble).toArray)
     val bm = toBM(lm, blockSize = 3)
     val sparse = bm.filterBand(0, 0, true)
-    assert(sparse.transpose().gp.maybeBlocks.get.toIndexedSeq == IndexedSeq(0, 5, 10))
+    assert(sparse.transpose().gp.partitionIndexToBlockIndex.get.toIndexedSeq == IndexedSeq(0, 5, 10))
   }
 
   @Test

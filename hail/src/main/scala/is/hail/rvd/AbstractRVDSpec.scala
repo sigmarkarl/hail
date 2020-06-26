@@ -7,9 +7,9 @@ import is.hail.asm4s.AsmFunction3RegionLongLongLong
 import is.hail.expr.JSONAnnotationImpex
 import is.hail.expr.ir
 import is.hail.expr.ir.ExecuteContext
-import is.hail.expr.types.encoded.{EType, ETypeSerializer}
-import is.hail.expr.types.physical.{PCanonicalStruct, PInt64Optional, PInt64Required, PStruct, PType, PTypeSerializer}
-import is.hail.expr.types.virtual.{TStructSerializer, _}
+import is.hail.types.encoded.{EType, ETypeSerializer}
+import is.hail.types.physical.{PCanonicalStruct, PInt64Optional, PInt64Required, PStruct, PType, PTypeSerializer}
+import is.hail.types.virtual.{TStructSerializer, _}
 import is.hail.io._
 import is.hail.io.fs.FS
 import is.hail.io.index.{InternalNodeBuilder, LeafNodeBuilder}
@@ -99,7 +99,7 @@ object AbstractRVDSpec {
         }
       }
 
-    val spec = MakeRVDSpec(FastIndexedSeq(), codecSpec, Array(filePath), RVDPartitioner.unkeyed(1))
+    val spec = MakeRVDSpec(codecSpec, Array(filePath), RVDPartitioner.unkeyed(1))
     spec.write(fs, path)
 
     Array(part0Count)
@@ -240,6 +240,7 @@ case class IndexSpec2(_relPath: String,
 
 
 object IndexSpec {
+
   def fromKeyAndValuePTypes(relPath: String, keyPType: PType, annotationPType: PType, offsetFieldName: Option[String]): AbstractIndexSpec = {
     val leafType = LeafNodeBuilder.typ(keyPType, annotationPType)
     val leafNodeSpec = TypedCodecSpec(leafType, BufferSpec.default)
@@ -261,33 +262,52 @@ object IndexSpec {
 
 object MakeRVDSpec {
   def apply(
-    key: IndexedSeq[String],
     codecSpec: AbstractTypedCodecSpec,
     partFiles: Array[String],
     partitioner: RVDPartitioner,
     indexSpec: AbstractIndexSpec = null,
     attrs: Map[String, String] = Map.empty
-  ): AbstractRVDSpec = {
-    val partJV = JSONAnnotationImpex.exportAnnotation(
+  ): AbstractRVDSpec =
+    RVDSpecMaker(codecSpec, partitioner, indexSpec, attrs)(partFiles)
+}
+
+object RVDSpecMaker {
+  def apply(codecSpec: AbstractTypedCodecSpec,
+    partitioner: RVDPartitioner,
+    indexSpec: AbstractIndexSpec = null,
+    attrs: Map[String, String] =  Map.empty): RVDSpecMaker = RVDSpecMaker(
+    codecSpec,
+    partitioner.kType.fieldNames,
+    JSONAnnotationImpex.exportAnnotation(
       partitioner.rangeBounds.toFastSeq,
-      partitioner.rangeBoundsType)
+      partitioner.rangeBoundsType),
+    indexSpec,
+    attrs)
+}
+
+case class RVDSpecMaker(
+  codecSpec: AbstractTypedCodecSpec,
+  key: IndexedSeq[String],
+  bounds: JValue,
+  indexSpec: AbstractIndexSpec,
+  attrs: Map[String, String]) {
+  def apply(partFiles: Array[String]): AbstractRVDSpec =
     Option(indexSpec) match {
       case Some(ais) => IndexedRVDSpec2(
         key,
         codecSpec,
         ais,
         partFiles,
-        partJV,
+        bounds,
         attrs)
       case None => OrderedRVDSpec2(
         key,
         codecSpec,
         partFiles,
-        partJV,
+        bounds,
         attrs
       )
     }
-  }
 }
 
 object IndexedRVDSpec2 {

@@ -4,8 +4,8 @@ import java.io.DataOutputStream
 
 import is.hail.HailContext
 import is.hail.expr.ir.{ExecuteContext, MatrixValue}
-import is.hail.expr.types.MatrixType
-import is.hail.expr.types.virtual.{TVoid, Type}
+import is.hail.types.{MatrixType, RPrimitive, RTable, TypeWithRequiredness}
+import is.hail.types.virtual.{TVoid, Type}
 import is.hail.linalg.{BlockMatrix, BlockMatrixMetadata, GridPartitioner, WriteBlocksRDD}
 import is.hail.utils._
 import org.json4s.jackson
@@ -15,6 +15,8 @@ case class MatrixWriteBlockMatrix(path: String,
   entryField: String,
   blockSize: Int) extends MatrixToValueFunction {
   def typ(childType: MatrixType): Type = TVoid
+
+  def unionRequiredness(childType: RTable, resultType: TypeWithRequiredness): Unit = ()
 
   def execute(ctx: ExecuteContext, mv: MatrixValue): Any = {
     val rvd = mv.rvd
@@ -41,7 +43,7 @@ case class MatrixWriteBlockMatrix(path: String,
     fs.mkDir(path + "/parts")
     val gp = GridPartitioner(blockSize, nRows, localNCols)
     val blockPartFiles =
-      new WriteBlocksRDD(fs.broadcast, path, rvd, partStarts, entryField, gp)
+      new WriteBlocksRDD(fs.broadcast, ctx.localTmpdir, path, rvd, partStarts, entryField, gp)
         .collect()
 
     val blockCount = blockPartFiles.length
@@ -52,7 +54,7 @@ case class MatrixWriteBlockMatrix(path: String,
     using(new DataOutputStream(fs.create(path + BlockMatrix.metadataRelativePath))) { os =>
       implicit val formats = defaultJSONFormats
       jackson.Serialization.write(
-        BlockMatrixMetadata(blockSize, nRows, localNCols, gp.maybeBlocks, partFiles),
+        BlockMatrixMetadata(blockSize, nRows, localNCols, gp.partitionIndexToBlockIndex, partFiles),
         os)
     }
 

@@ -7,7 +7,7 @@ from .utils import benchmark
 @benchmark(args=profile_25.handle('vcf'))
 def import_vcf_write(vcf):
     mt = hl.import_vcf(vcf)
-    out = hl.utils.new_temp_file(suffix='mt')
+    out = hl.utils.new_temp_file(extension='mt')
     mt.write(out)
 
 
@@ -20,7 +20,7 @@ def import_vcf_count_rows(vcf):
 @benchmark(args=profile_25.handle('mt'))
 def export_vcf(mt_path):
     mt = hl.read_matrix_table(mt_path)
-    out = hl.utils.new_temp_file(suffix='vcf.bgz')
+    out = hl.utils.new_temp_file(extension='vcf.bgz')
     hl.export_vcf(mt, out)
 
 
@@ -137,7 +137,7 @@ def pc_relate(mt_path):
 
 @benchmark()
 def pc_relate_big():
-    mt = hl.balding_nichols_model(3, 2 * 4096, 2 * 4096).checkpoint(hl.utils.new_temp_file(suffix='mt'))
+    mt = hl.balding_nichols_model(3, 2 * 4096, 2 * 4096).checkpoint(hl.utils.new_temp_file(extension='mt'))
     mt = mt.annotate_cols(scores = hl.range(2).map(lambda x: hl.rand_unif(0, 1)))
     rel = hl.pc_relate(mt.GT,
                        0.05,
@@ -159,4 +159,19 @@ def linear_regression_rows(mt_path):
     res = hl.linear_regression_rows(y=[mt[key] for key in pheno_dict.keys()],
                                     x=mt.x,
                                     covariates=[mt[key] for key in cov_dict.keys()])
+    res._force_count()
+
+
+@benchmark(args=random_doubles.handle('mt'))
+def linear_regression_rows_nd(mt_path):
+    mt = hl.read_matrix_table(mt_path)
+    num_phenos = 100
+    num_covs = 20
+    pheno_dict = {f"pheno_{i}": hl.rand_unif(0, 1) for i in range(num_phenos)}
+    cov_dict = {f"cov_{i}": hl.rand_unif(0, 1) for i in range(num_covs)}
+    mt = mt.annotate_cols(**pheno_dict)
+    mt = mt.annotate_cols(**cov_dict)
+    res = hl._linear_regression_rows_nd(y=[mt[key] for key in pheno_dict.keys()],
+                                       x=mt.x,
+                                       covariates=[mt[key] for key in cov_dict.keys()])
     res._force_count()

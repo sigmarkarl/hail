@@ -1,8 +1,7 @@
 package is.hail.methods
 
 import is.hail.utils._
-import is.hail.expr.types._
-import is.hail.nativecode.NativeCode
+import is.hail.types._
 import is.hail.stats.{LogisticRegressionModel, RegressionUtils, eigSymD}
 import is.hail.annotations.{Annotation, BroadcastRow, Region, UnsafeRow}
 import breeze.linalg.{DenseMatrix => BDM, DenseVector => BDV, _}
@@ -14,7 +13,7 @@ import com.sun.jna.ptr.IntByReference
 import is.hail.HailContext
 import is.hail.expr.ir.{ExecuteContext, MatrixValue, TableValue}
 import is.hail.expr.ir.functions.MatrixToTableFunction
-import is.hail.expr.types.virtual.{TFloat64, TInt32, TStruct, Type}
+import is.hail.types.virtual.{TFloat64, TInt32, TStruct, Type}
 import is.hail.rvd.RVDType
 
 /*
@@ -133,7 +132,7 @@ object Skat {
 
   // NativeCode needs to control the initial loading of the libhail DLL, and
   // the call to getHailName() guarantees that.
-  Native.register(NativeCode.getHailName())
+  Native.register("hail")
 
   // gramian is the m x m matrix (G * sqrt(W)).t * P_0 * (G * sqrt(W)) which has the same non-zero eigenvalues
   // as the n x n matrix in the paper P_0^{1/2} * (G * W * G.t) * P_0^{1/2}

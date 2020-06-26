@@ -9,7 +9,7 @@ import secrets
 from asyncinit import asyncinit
 
 from hailtop.config import get_deploy_config
-from hailtop.auth import async_get_userinfo, service_auth_headers
+from hailtop.auth import service_auth_headers
 from hailtop.utils import bounded_gather, request_retry_transient_errors, tqdm, TQDM_DEFAULT_DISABLE
 from hailtop.tls import ssl_client_session
 
@@ -67,6 +67,10 @@ class Job:
 
     @staticmethod
     def _get_container_status_exit_code(container_status):
+        error = container_status.get('error')
+        if error is not None:
+            return None
+
         docker_container_status = container_status.get('container_status')
         if not docker_container_status:
             return None
@@ -209,6 +213,9 @@ class Job:
     async def log(self):
         return await self._job.log()
 
+    async def attempts(self):
+        return await self._job.attempts()
+
 
 class UnsubmittedJob:
     def _submit(self, batch):
@@ -248,6 +255,9 @@ class UnsubmittedJob:
 
     async def log(self):
         raise ValueError("cannot get the log of an unsubmitted job")
+
+    async def attempts(self):
+        raise ValueError("cannot get the attempts of an unsubmitted job")
 
 
 class SubmittedJob:
@@ -290,6 +300,10 @@ class SubmittedJob:
 
     async def log(self):
         resp = await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}/log')
+        return await resp.json()
+
+    async def attempts(self):
+        resp = await self._batch._client._get(f'/api/v1alpha/batches/{self.batch_id}/jobs/{self.job_id}/attempts')
         return await resp.json()
 
 
@@ -357,7 +371,7 @@ class BatchBuilder:
                    port=None, resources=None, secrets=None,
                    service_account=None, attributes=None, parents=None,
                    input_files=None, output_files=None, always_run=False, pvc_size=None,
-                   timeout=None):
+                   timeout=None, gcsfuse=None):
         if self._submitted:
             raise ValueError("cannot create a job in an already submitted batch")
 
@@ -421,6 +435,8 @@ class BatchBuilder:
             job_spec['output_files'] = [{"from": src, "to": dst} for (src, dst) in output_files]
         if pvc_size:
             job_spec['pvc_size'] = pvc_size
+        if gcsfuse:
+            job_spec['gcsfuse'] = [{"bucket": bucket, "mount_path": mount_path} for (bucket, mount_path) in gcsfuse]
 
         self._job_specs.append(job_spec)
 
@@ -541,9 +557,6 @@ class BatchClient:
             session = ssl_client_session(raise_for_status=True,
                                          timeout=aiohttp.ClientTimeout(total=60))
         self._session = session
-
-        userinfo = await async_get_userinfo(deploy_config)
-        self.bucket = userinfo['bucket_name']
 
         h = {}
         if headers:

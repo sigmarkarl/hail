@@ -3,14 +3,14 @@ package is.hail.expr.ir.agg
 import is.hail.annotations.StagedRegionValueBuilder
 import is.hail.asm4s._
 import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder}
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 
 object CountAggregator extends StagedAggregator {
   type State = PrimitiveRVAState
 
   val resultType: PType = PInt64(true)
-
-  def createState(cb: EmitCodeBuilder): State = new PrimitiveRVAState(Array(PInt64(true)), cb.emb.ecb)
+  val initOpTypes: Seq[PType] = Array[PType]()
+  val seqOpTypes: Seq[PType] = Array[PType]()
 
   protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     assert(init.length == 0)

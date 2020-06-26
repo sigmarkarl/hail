@@ -1,6 +1,6 @@
 package is.hail.expr.ir
 
-import is.hail.expr.types.virtual._
+import is.hail.types.virtual._
 import is.hail.io.bgen.MatrixBGENReader
 import is.hail.utils._
 
@@ -193,21 +193,25 @@ object Simplify {
 
     case ArrayLen(MakeArray(args, _)) => I32(args.length)
 
-    case ArrayLen(ToArray(StreamMap(s, _, _))) => ArrayLen(ToArray(s))
-
+    case StreamLen(StreamMap(s, _, _)) => StreamLen(s)
+    case StreamLen(StreamFlatMap(a, name, body)) => streamSumIR(StreamMap(a, name, StreamLen(body)))
+      
+    case ArrayLen(ToArray(s)) if s.typ.isInstanceOf[TStream] => StreamLen(s)
     case ArrayLen(StreamFlatMap(a, _, MakeArray(args, _))) => ApplyBinaryPrimOp(Multiply(), I32(args.length), ArrayLen(a))
 
     case ArrayLen(ArraySort(a, _, _, _)) => ArrayLen(ToArray(a))
 
     case ArrayLen(ToArray(MakeStream(args, _))) => I32(args.length)
-      
+    case StreamLen(MakeStream(args, _)) => I32(args.length)
+
     case ArrayRef(MakeArray(args, _), I32(i), _) if i >= 0 && i < args.length => args(i)
 
     case StreamFilter(a, _, True()) => a
 
     case StreamFor(_, _, Begin(Seq())) => Begin(FastIndexedSeq())
 
-    case StreamFold(StreamMap(a, n1, b), zero, accumName, valueName, body) => StreamFold(a, zero, accumName, n1, Let(valueName, b, body))
+    // FIXME: Unqualify when StreamFold supports folding over stream of streams
+    case StreamFold(StreamMap(a, n1, b), zero, accumName, valueName, body) if a.typ.asInstanceOf[TStream].elementType.isRealizable => StreamFold(a, zero, accumName, n1, Let(valueName, b, body))
 
     case StreamFlatMap(StreamMap(a, n1, b1), n2, b2) =>
       StreamFlatMap(a, n1, Let(n2, b1, b2))
@@ -217,9 +221,9 @@ object Simplify {
     case StreamMap(StreamMap(a, n1, b1), n2, b2) =>
       StreamMap(a, n1, Let(n2, b1, b2))
 
-    case StreamFilter(ArraySort(a, left, right, compare), name, cond) => ArraySort(StreamFilter(a, name, cond), left, right, compare)
+    case StreamFilter(ArraySort(a, left, right, lessThan), name, cond) => ArraySort(StreamFilter(a, name, cond), left, right, lessThan)
 
-    case StreamFilter(ToStream(ArraySort(a, left, right, compare)), name, cond) => ToStream(ArraySort(StreamFilter(a, name, cond), left, right, compare))
+    case StreamFilter(ToStream(ArraySort(a, left, right, lessThan)), name, cond) => ToStream(ArraySort(StreamFilter(a, name, cond), left, right, lessThan))
 
     case ToArray(ToStream(a)) if a.typ.isInstanceOf[TArray] => a
     case ToArray(ToStream(a)) if a.typ.isInstanceOf[TSet] || a.typ.isInstanceOf[TDict] =>
@@ -228,8 +232,6 @@ object Simplify {
     case ToStream(ToArray(s)) if s.typ.isInstanceOf[TStream] => s
 
     case ToStream(Let(name, value, ToArray(x))) if x.typ.isInstanceOf[TStream] => Let(name, value, x)
-
-    case ArrayLen(ToArray(s)) if s.typ.isInstanceOf[TStream] => foldIR(s, 0){ case (acc, _) => acc + 1}
 
     case NDArrayShape(NDArrayMap(nd, _, _)) => NDArrayShape(nd)
 
@@ -302,7 +304,7 @@ object Simplify {
       val newFieldRefs = newFieldMap.map { case (k, ir) =>
         (k, Ref(genUID(), ir.typ))
       } // cannot be mapValues, or genUID() gets run for every usage!
-      def copiedNewFieldRefs(): Array[(String, IR)] = fieldNames.map(name => (name, newFieldRefs(name).copy(FastSeq())))
+      def copiedNewFieldRefs(): IndexedSeq[(String, IR)] = fieldNames.map(name => (name, newFieldRefs(name).copy(FastSeq()))).toFastIndexedSeq
 
       def rewrite(ir1: IR): IR = ir1 match {
         case GetField(Ref(`name`, _), fd) => newFieldRefs.get(fd) match {
@@ -314,9 +316,9 @@ object Simplify {
           InsertFields(Ref(name, old.typ),
             copiedNewFieldRefs().filter { case (name, _) => !newFieldSet.contains(name) }
               ++ fields.map { case (name, ir) => (name, rewrite(ir)) },
-            Some(ins.typ.fieldNames))
+            Some(ins.typ.fieldNames.toFastIndexedSeq))
         case SelectFields(Ref(`name`, _), fds) =>
-          SelectFields(InsertFields(Ref(name, old.typ), copiedNewFieldRefs(), Some(x.typ.fieldNames)), fds)
+          SelectFields(InsertFields(Ref(name, old.typ), copiedNewFieldRefs(), Some(x.typ.fieldNames.toFastIndexedSeq)), fds)
         case ta: TableAggregate => ta
         case ma: MatrixAggregate => ma
         case _ => ir1.copy(ir1.children
@@ -359,7 +361,7 @@ object Simplify {
       val (oldFields, newFields) =
         insertFields.partition {  case (name, f) => f == GetField(struct, name) }
       val preservedFields = selectFields.filter(f => !insertNames.contains(f)) ++ oldFields.map(_._1)
-      InsertFields(SelectFields(struct, preservedFields), newFields, Some(fields))
+      InsertFields(SelectFields(struct, preservedFields), newFields, Some(fields.toFastIndexedSeq))
 
     case GetTupleElement(MakeTuple(xs), idx) => xs.find(_._1 == idx).get._2
 

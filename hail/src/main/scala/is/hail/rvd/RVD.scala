@@ -6,9 +6,9 @@ import is.hail.HailContext
 import is.hail.annotations._
 import is.hail.backend.spark.SparkBackend
 import is.hail.expr.ir.PruneDeadFields.isSupertype
-import is.hail.expr.types._
-import is.hail.expr.types.physical.{PCanonicalStruct, PInt64, PStruct, PType}
-import is.hail.expr.types.virtual.{TArray, TInt64, TInterval, TStruct}
+import is.hail.types._
+import is.hail.types.physical.{PCanonicalStruct, PInt64, PStruct, PType}
+import is.hail.types.virtual.{TArray, TInt64, TInterval, TStruct}
 import is.hail.io._
 import is.hail.io.index.IndexWriter
 import is.hail.io.{AbstractTypedCodecSpec, BufferSpec, RichContextRDDRegionValue, TypedCodecSpec}
@@ -115,15 +115,50 @@ class RVD(
     isSorted: Boolean = false
   ): RVD = {
     require(newKey.forall(rowType.hasField))
-    val nPreservedFields = typ.key.zip(newKey).takeWhile { case (l, r) => l == r }.length
-    require(!isSorted || nPreservedFields > 0 || newKey.isEmpty)
+    val sharedPrefixLength = typ.key.zip(newKey).takeWhile { case (l, r) => l == r }.length
+    val maybeKeys = if (newKey.toSet.subsetOf(typ.key.toSet)) {
+      partitioner.keysIfOneToOne()
+    } else None
+    if (isSorted && sharedPrefixLength == 0 && !newKey.isEmpty && maybeKeys.isEmpty) {
+      throw new IllegalArgumentException(s"$isSorted, $sharedPrefixLength, $newKey, ${maybeKeys.isDefined}, ${typ}, ${partitioner}")
+    }
 
-    if (nPreservedFields == newKey.length)
+    if (sharedPrefixLength == newKey.length)
       this
     else if (isSorted)
-      truncateKey(newKey.take(nPreservedFields))
-        .extendKeyPreservesPartitioning(execCtx, newKey)
-        .checkKeyOrdering()
+      maybeKeys match {
+        case None =>
+          truncateKey(newKey.take(sharedPrefixLength))
+            .extendKeyPreservesPartitioning(execCtx, newKey)
+            .checkKeyOrdering()
+        case Some(keys) =>
+          val oldRVDType = typ
+          val oldKeyPType = oldRVDType.kType
+          val oldKeyVType = oldKeyPType.virtualType
+          val newRVDType = oldRVDType.copy(key = newKey)
+          val newKeyPType = newRVDType.kType
+          val newKeyVType = newKeyPType.virtualType
+          var keyInfo = keys.zipWithIndex.map { case (oldKey, partitionIndex) =>
+            val newKey = new SelectFieldsRow(oldKey, oldKeyPType, newKeyPType)
+            RVDPartitionInfo(
+              partitionIndex,
+              1,
+              newKey,
+              newKey,
+              Array[Any](newKey),
+              RVDPartitionInfo.KSORTED,
+              s"out-of-order partitions $newKey")
+          }
+          val kOrd = PartitionBoundOrdering(newKeyVType).toOrdering
+          keyInfo = keyInfo.sortBy(_.min)(kOrd)
+          val bounds = keyInfo.map(_.interval).toFastIndexedSeq
+          val pids = keyInfo.map(_.partitionIndex).toArray
+          val unfixedPartitioner = new RVDPartitioner(newKeyVType, bounds)
+          val newPartitioner = RVDPartitioner.generate(
+            newRVDType.key, newKeyVType, bounds)
+          RVD(newRVDType, unfixedPartitioner, crdd.reorderPartitions(pids))
+            .repartition(execCtx, newPartitioner, shuffle = false)
+      }
     else
       changeKey(execCtx, newKey)
   }
@@ -168,7 +203,7 @@ class RVD(
       typ,
       partitioner,
       crdd.cmapPartitionsWithIndex { case (i, ctx, it) =>
-        val regionForWriting = ctx.freshRegion // This one gets cleaned up when context is freed.
+        val regionForWriting = ctx.freshRegion() // This one gets cleaned up when context is freed.
         val prevK = WritableRegionValue(localType.kType, regionForWriting)
         val kUR = new UnsafeRow(localKPType)
 
@@ -247,9 +282,9 @@ class RVD(
       val partBc = newPartitioner.broadcast(crdd.sparkContext)
       val enc = TypedCodecSpec(rowPType, BufferSpec.wireSpec)
 
-      val filtered: RVD = if (filter) filterWithContext[(UnsafeRow, KeyedRow)]({ case (_, _) =>
+      val filtered: RVD = if (filter) filterWithContext[(UnsafeRow, SelectFieldsRow)]({ case (_, _) =>
         val ur = new UnsafeRow(localRowPType, null, 0)
-        val key = new KeyedRow(ur, newType.kFieldIdx)
+        val key = new SelectFieldsRow(ur, newType.kFieldIdx)
         (ur, key)
       }, { case ((ur, key), ctx, ptr) =>
         ur.set(ctx.r, ptr)
@@ -646,62 +681,62 @@ class RVD(
     RVD(typ, newPartitioner, crdd.subsetPartitions(keep))
   }
 
-  def combine[U : ClassTag](
-    zeroValue: U,
-    itF: (Int, RVDContext, Iterator[Long]) => U,
-    combOp: (U, U) => U,
+  def combine[U: ClassTag, T: ClassTag](
+    mkZero: () => T,
+    itF: (Int, RVDContext, Iterator[Long]) => T,
+    deserialize: U => T,
+    serialize: T => U,
+    combOp: (T, T) => T,
     commutative: Boolean,
-    tree: Boolean): U = {
-
-    val makeComb: () => Combiner[U] = () => Combiner(zeroValue, combOp, commutative = commutative, associative = true)
-
-    var reduced = crdd.cmapPartitionsWithIndex[U] { (i, ctx, it) => Iterator.single(itF(i, ctx, it)) }
+    tree: Boolean
+  ): T = {
+    var reduced = crdd.cmapPartitionsWithIndex[U] { (i, ctx, it) => Iterator.single(serialize(itF(i, ctx, it))) }
 
     if (tree) {
-      val depth = treeAggDepth(reduced.getNumPartitions)
+      val depth = treeAggDepth(getNumPartitions)
       val scale = math.max(
-        math.ceil(math.pow(reduced.partitions.length, 1.0 / depth)).toInt,
+        math.ceil(math.pow(getNumPartitions, 1.0 / depth)).toInt,
         2)
+
       var i = 0
       while (i < depth - 1 && reduced.getNumPartitions > scale) {
         val nParts = reduced.getNumPartitions
         val newNParts = nParts / scale
-        reduced = reduced.mapPartitionsWithIndex { (i, it) =>
-          it.map(x => (itemPartition(i, nParts, newNParts), (i, x)))
-        }
+        reduced = reduced
+          .mapPartitionsWithIndex { (i, it) =>
+            it.map(x => (itemPartition(i, nParts, newNParts), (i, x)))
+          }
           .partitionBy(new Partitioner {
             override def getPartition(key: Any): Int = key.asInstanceOf[Int]
-
             override def numPartitions: Int = newNParts
           })
           .mapPartitions { it =>
-            val ac = makeComb()
+            var acc = mkZero()
             it.foreach { case (newPart, (oldPart, v)) =>
-              ac.combine(oldPart, v)
+              acc = combOp(acc, deserialize(v))
             }
-            Iterator.single(ac.result())
+            Iterator.single(serialize(acc))
           }
         i += 1
       }
     }
 
-    val ac = makeComb()
-    sparkContext.runJob(reduced.run, (it: Iterator[U]) => singletonElement(it), ac.combine _)
+    val ac = Combiner(mkZero(), combOp, commutative, true)
+    sparkContext.runJob(reduced.run, (it: Iterator[U]) => singletonElement(it), (i, x: U) => ac.combine(i, deserialize(x)))
     ac.result()
   }
 
   def count(): Long =
-    crdd.cmapPartitions { (ctx, it) =>
+    crdd.boundary.cmapPartitions { (ctx, it) =>
       var count = 0L
       it.foreach { _ =>
         count += 1
-        ctx.region.clear()
       }
       Iterator.single(count)
     }.run.fold(0L)(_ + _)
 
   def countPerPartition(): Array[Long] =
-    crdd.cmapPartitions { (ctx, it) =>
+    crdd.boundary.cmapPartitions { (ctx, it) =>
       var count = 0L
       it.foreach { _ =>
         count += 1
@@ -761,7 +796,7 @@ class RVD(
 
   def write(ctx: ExecuteContext, path: String, idxRelPath: String, stageLocally: Boolean, codecSpec: AbstractTypedCodecSpec): Array[Long] = {
     val (partFiles, partitionCounts) = crdd.writeRows(ctx, path, idxRelPath, typ, stageLocally, codecSpec)
-    val spec = MakeRVDSpec(typ.key, codecSpec, partFiles, partitioner, IndexSpec.emptyAnnotation(idxRelPath, typ.kType))
+    val spec = MakeRVDSpec(codecSpec, partFiles, partitioner, IndexSpec.emptyAnnotation(idxRelPath, typ.kType))
     spec.write(ctx.fs, path)
     partitionCounts
   }
@@ -1430,7 +1465,7 @@ object RVD {
     if (rvds.length == 1 || rvds.forall(_.rowPType == rvds.head.rowPType))
       return rvds
 
-    val unifiedRowPType = InferPType.getNestedElementPTypesOfSameType(rvds.map(_.rowPType)).asInstanceOf[PStruct]
+    val unifiedRowPType = InferPType.getCompatiblePType(rvds.map(_.rowPType)).asInstanceOf[PStruct]
     val unifiedKey = rvds.map(_.typ.key).reduce((l, r) => commonPrefix(l, r))
     rvds.map { rvd =>
       val srcRowPType = rvd.rowPType

@@ -4,7 +4,7 @@ import is.hail.annotations.{Region, StagedRegionValueBuilder}
 import is.hail.asm4s
 import is.hail.asm4s.{Code, _}
 import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder, ParamType, defaultValue, typeToTypeInfo}
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 import is.hail.io.{BufferSpec, InputBuffer, OutputBuffer}
 import is.hail.utils._
 
@@ -571,9 +571,8 @@ class TakeByAggregator(valueType: PType, keyType: PType) extends StagedAggregato
   type State = TakeByRVAS
 
   val resultType: PArray = PCanonicalArray(valueType, true)
-
-  def createState(cb: EmitCodeBuilder): State =
-    new TakeByRVAS(valueType, keyType, resultType, cb.emb.ecb)
+  val initOpTypes: Seq[PType] = Array(PInt32(true))
+  val seqOpTypes: Seq[PType] = Array(valueType, keyType)
 
   protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     assert(init.length == 1)

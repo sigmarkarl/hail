@@ -3,7 +3,7 @@ package is.hail.utils
 import is.hail.annotations._
 import is.hail.check._
 import is.hail.expr.ir.IRParser
-import is.hail.expr.types.virtual.TBoolean
+import is.hail.types.virtual.TBoolean
 import org.apache.spark.sql.Row
 import org.json4s.JValue
 import org.json4s.JsonAST.JObject
@@ -214,7 +214,9 @@ object Interval {
           Interval(y, x, s, e)
       }
 
-  def ordering(pord: ExtendedOrdering, startPrimary: Boolean): ExtendedOrdering = new ExtendedOrdering {
+  def ordering(pord: ExtendedOrdering, startPrimary: Boolean, _missingEqual: Boolean = true): ExtendedOrdering = new ExtendedOrdering {
+    val missingEqual = _missingEqual
+
     override def compareNonnull(x: Any, y: Any): Int = {
       val xi = x.asInstanceOf[Interval]
       val yi = y.asInstanceOf[Interval]

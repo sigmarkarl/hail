@@ -4,14 +4,13 @@ import java.io.PrintWriter
 
 import is.hail.annotations._
 import is.hail.asm4s._
+import is.hail.expr.ir.agg.AggStateSig
 import is.hail.expr.ir.lowering.LoweringPipeline
-import is.hail.expr.types.physical.PType
-import is.hail.expr.types.virtual.Type
+import is.hail.types.physical.PType
+import is.hail.types.virtual.Type
 import is.hail.utils._
 
-import scala.reflect.{ClassTag, classTag}
-
-case class CodeCacheKey(aggSigs: IndexedSeq[AggStatePhysicalSignature], args: Seq[(String, PType)], body: IR)
+case class CodeCacheKey(aggSigs: IndexedSeq[AggStateSig], args: Seq[(String, PType)], body: IR)
 
 case class CodeCacheValue(typ: PType, f: (Int, Region) => Any)
 
@@ -30,7 +29,7 @@ object Compile {
     val normalizeNames = new NormalizeNames(_.toString)
     val normalizedBody = normalizeNames(body,
       Env(params.map { case (n, _) => n -> n }: _*))
-    val k = CodeCacheKey(FastIndexedSeq[AggStatePhysicalSignature](), params.map { case (n, pt) => (n, pt) }, normalizedBody)
+    val k = CodeCacheKey(FastIndexedSeq[AggStateSig](), params.map { case (n, pt) => (n, pt) }, normalizedBody)
     codeCache.get(k) match {
       case Some(v) =>
         return (v.typ, v.f.asInstanceOf[(Int, Region) => F])
@@ -44,7 +43,7 @@ object Compile {
     ir = LoweringPipeline.compileLowerer.apply(ctx, ir, optimize).asInstanceOf[IR].noSharing
 
     TypeCheck(ir, BindingEnv.empty)
-    InferPType(ir, Env.empty[PType])
+    InferPType(ir)
     val returnType = ir.pType
 
     val fb = EmitFunctionBuilder[F](ctx, "Compiled",
@@ -82,7 +81,7 @@ object CompileWithAggregators2 {
 
   def apply[F: TypeInfo](
     ctx: ExecuteContext,
-    aggSigs: Array[AggStatePhysicalSignature],
+    aggSigs: Array[AggStateSig],
     params: IndexedSeq[(String, PType)],
     expectedCodeParamTypes: IndexedSeq[TypeInfo[_]], expectedCodeReturnType: TypeInfo[_],
     body: IR,
@@ -106,7 +105,7 @@ object CompileWithAggregators2 {
 
     TypeCheck(ir, BindingEnv(Env.fromSeq[Type](params.map { case (name, t) => name -> t.virtualType })))
 
-    InferPType(ir, Env.empty[PType], aggSigs, null, null)
+    InferPType(ir, Env.empty[PType])
 
     val returnType = ir.pType
     val fb = EmitFunctionBuilder[F](ctx, "CompiledWithAggs",

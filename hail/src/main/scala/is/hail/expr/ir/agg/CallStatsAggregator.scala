@@ -3,7 +3,7 @@ package is.hail.expr.ir.agg
 import is.hail.annotations.{Region, StagedRegionValueBuilder}
 import is.hail.asm4s._
 import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder, ParamType, typeToTypeInfo}
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 import is.hail.io.{BufferSpec, InputBuffer, OutputBuffer, TypedCodecSpec}
 import is.hail.utils._
 
@@ -96,8 +96,8 @@ class CallStatsAggregator(t: PCall) extends StagedAggregator {
   type State = CallStatsState
 
   def resultType: PStruct = CallStatsState.resultType
-
-  def createState(cb: EmitCodeBuilder): State = new CallStatsState(cb.emb.ecb)
+  val initOpTypes: Seq[PType] = FastSeq(PInt32(true))
+  val seqOpTypes: Seq[PType] = FastSeq(t)
 
   protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     val Array(nAlleles) = init

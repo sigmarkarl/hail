@@ -4,7 +4,7 @@ import is.hail.annotations.StagedRegionValueBuilder
 import is.hail.asm4s._
 import is.hail.expr.ir.{coerce => _, _}
 import is.hail.expr.ir.functions.UtilFunctions
-import is.hail.expr.types.physical.{PInt32, PInt64, PFloat32, PFloat64, PType}
+import is.hail.types.physical.{PInt32, PInt64, PFloat32, PFloat64, PType}
 
 import scala.language.existentials
 import scala.reflect.ClassTag
@@ -19,9 +19,8 @@ class MonoidAggregator(monoid: StagedMonoidSpec) extends StagedAggregator {
   type State = PrimitiveRVAState
   val typ: PType = monoid.typ
   val resultType: PType = typ.setRequired(monoid.neutral.isDefined)
-
-  def createState(cb: EmitCodeBuilder): State =
-    new PrimitiveRVAState(Array(typ.setRequired(monoid.neutral.isDefined)), cb.emb.ecb)
+  val initOpTypes: Seq[PType] = Array[PType]()
+  val seqOpTypes: Seq[PType] = Array[PType](typ)
 
   protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     assert(init.length == 0)

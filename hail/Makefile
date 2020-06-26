@@ -12,7 +12,7 @@ URL := $(shell git config --get remote.origin.url)
 SCALA_VERSION = 2.12.10
 SPARK_VERSION := 3.0.0-preview2
 HAIL_MAJOR_MINOR_VERSION := 0.2
-HAIL_PATCH_VERSION := 39
+HAIL_PATCH_VERSION := 47
 HAIL_PIP_VERSION := $(HAIL_MAJOR_MINOR_VERSION).$(HAIL_PATCH_VERSION)
 HAIL_VERSION := $(HAIL_PIP_VERSION)-$(SHORT_REVISION)
 
@@ -43,6 +43,7 @@ SHADOW_JAR := build/libs/hail-all-spark.jar
 SHADOW_TEST_JAR := build/libs/hail-all-spark-test.jar
 PYTHON_JAR := python/hail/backend/hail-all-spark.jar
 WHEEL := build/deploy/dist/hail-$(HAIL_PIP_VERSION)-py3-none-any.whl
+EGG := build/deploy/dist/hail-$(HAIL_PIP_VERSION)-py3.6.egg
 
 .PHONY: shadowJar
 shadowJar: $(SHADOW_JAR)
@@ -114,6 +115,7 @@ pytest: python/README.md $(PYTHON_JAR)
      -r A \
      --self-contained-html \
      --html=../build/reports/pytest.html \
+     test/hail \
      $(PYTEST_ARGS)"
 
 .PHONY: doctest
@@ -139,10 +141,8 @@ doctest: python/README.md $(PYTHON_JAR)
     --ignore=hail/docs/getting_started.rst \
     $(PYTEST_ARGS)"
 
-.PHONY: wheel
-wheel: $(WHEEL)
-
-$(WHEEL): $(PYTHON_VERSION_INFO) $(SHADOW_JAR) $(INIT_SCRIPTS) $(PY_FILES) $(PYTHON_JAR)
+.PHONY: copy-py-files
+copy-py-files: $(PYTHON_VERSION_INFO) $(SHADOW_JAR) $(INIT_SCRIPTS) $(PY_FILES) $(PYTHON_JAR)
 	rm -rf build/deploy
 	mkdir -p build/deploy
 	mkdir -p build/deploy/src
@@ -155,7 +155,18 @@ $(WHEEL): $(PYTHON_VERSION_INFO) $(SHADOW_JAR) $(INIT_SCRIPTS) $(PY_FILES) $(PYT
 	    --exclude 'test/' \
 	    --exclude '*.log' \
 	    python/ build/deploy/
+
+.PHONY: wheel
+wheel: $(WHEEL)
+
+$(WHEEL): copy-py-files
 	cd build/deploy; $(HAIL_PYTHON3) setup.py -q sdist bdist_wheel
+
+.PHONY: egg
+egg: $(EGG)
+
+$(EGG): copy-py-files
+	cd build/deploy; $(HAIL_PYTHON3) setup.py -q sdist bdist_egg
 
 # if the DEPLOY_REMOTE flag is not set, then deploy init scripts into a dev-username location
 ifndef DEPLOY_REMOTE
@@ -239,20 +250,8 @@ benchmark: $(WHEEL)
 install-benchmark:
 	HAIL_WHEEL=DUMMY HAIL_VERSION=$(HAIL_PIP_VERSION) $(MAKE) -C ../benchmark install
 
-.PHONY: clean-docs
-clean-docs:
-	$(MAKE) -C www clean
-
-.PHONY: base-docs
-base-docs: install-dev-deps
-	mkdir -p build
-	rm -rf build/www
-	cp -R www build/www
-	$(MAKE) -C build/www
-	rm build/www/*.md
-
 .PHONY: batch-docs
-batch-docs: base-docs
+batch-docs:
 	mkdir -p build/batch/docs
 	rm -rf build/batch/docs
 	cp -R python/hailtop/batch/docs build/batch/
@@ -264,7 +263,7 @@ batch-docs: base-docs
 
 HAIL_CACHE_VERSION = $(shell cat python/hail/hail_version)
 .PHONY: hail-docs
-hail-docs: install $(PYTHON_VERSION_INFO) base-docs
+hail-docs: install $(PYTHON_VERSION_INFO)
 	mkdir -p build/docs
 	rm -rf build/docs
 	cp -R python/hail/docs build/
@@ -293,7 +292,6 @@ test: pytest jvm-test doctest tutorial-test
 docs-no-test: install $(PYTHON_VERSION_INFO) install-dev-deps
 	mkdir -p build
 	rm -rf build/www
-	cp -R www build/www
 	rm -rf build/docs
 	mkdir -p build/docs
 	cp -R python/hail/docs build/
@@ -301,8 +299,6 @@ docs-no-test: install $(PYTHON_VERSION_INFO) install-dev-deps
 	sed -E "s/\(hail\#([0-9]+)\)/(\[#\1](https:\/\/github.com\/hail-is\/hail\/pull\/\1))/g" \
     < build/docs/change_log.md \
     | pandoc -o build/docs/change_log.rst
-	$(MAKE) -C build/www
-	rm build/www/*.md
 	$(MAKE) -C build/docs BUILDDIR=_build clean html
 	mkdir -p build/www/docs
 	rm -rf build/www/docs/$(HAIL_MAJOR_MINOR_VERSION)
@@ -322,7 +318,7 @@ native-lib-prebuilt:
 native-lib-reset-prebuilt:
 	$(MAKE) -C src/main/c reset-prebuilt
 
-clean: clean-env clean-docs native-lib-clean
+clean: clean-env native-lib-clean
 	./gradlew clean $(GRADLE_ARGS)
 	rm -rf build/
 	rm -rf $(PYTHON_JAR)

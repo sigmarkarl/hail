@@ -8,13 +8,11 @@ import tempfile
 def init_parser(parser):
     parser.add_argument('name', type=str, help='Cluster name.')
     parser.add_argument('service', type=str,
-                        choices=['notebook', 'nb', 'spark-ui', 'ui', 'spark-ui1', 'ui1',
-                                 'spark-ui2', 'ui2', 'spark-history', 'hist'],
+                        choices=['notebook', 'nb', 'spark-ui', 'ui', 'spark-history', 'hist'],
                         help='Web service to launch.')
     parser.add_argument('--port', '-p', default='10000', type=str,
                         help='Local port to use for SSH tunnel to master node (default: %(default)s).')
-    parser.add_argument('--zone', '-z', default='us-central1-b', type=str,
-                        help='Compute zone for Dataproc cluster (default: %(default)s).')
+    parser.add_argument('--zone', '-z', type=str, help='Compute zone for Dataproc cluster.')
     parser.add_argument('--dry-run', action='store_true', help="Print gcloud dataproc command, but don't run it.")
 
 
@@ -37,11 +35,19 @@ def main(args, pass_through_args):  # pylint: disable=unused-argument
     }
     connect_port_and_path = dataproc_port_and_path[service]
 
+    if args.zone:
+        zone = args.zone
+    else:
+        zone = sp.check_output(["gcloud", "config", "get-value", "compute/zone"], stderr=sp.DEVNULL).decode().strip()
+
+    if not zone:
+        raise RuntimeError("Could not determine compute zone. Use --zone argument to hailctl, or use `gcloud config set compute/zone <my-zone>` to set a default.")
+
     cmd = ['gcloud',
            'compute',
            'ssh',
            '{}-m'.format(args.name),
-           '--zone={}'.format(args.zone),
+           '--zone={}'.format(zone),
            '--ssh-flag=-D {}'.format(args.port),
            '--ssh-flag=-N',
            '--ssh-flag=-f',

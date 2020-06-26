@@ -4,7 +4,7 @@ import java.io.{ObjectInputStream, ObjectOutputStream}
 
 import scala.collection.generic.Growable
 import scala.collection.mutable.{ArrayBuffer, PriorityQueue}
-import is.hail.expr.types.physical.{PStruct, PType}
+import is.hail.types.physical.{PStruct, PType}
 import is.hail.rvd.RVDContext
 import sun.reflect.generics.reflectiveObjects.NotImplementedException
 
@@ -99,7 +99,7 @@ class RegionValuePriorityQueue(val t: PType, ctx: RVDContext, ord: Ordering[Regi
   override def head: RegionValue = queue.head
 
   def enqueue(rv: RegionValue) {
-    val region = ctx.freshRegion
+    val region = ctx.freshRegion()
     rvb.set(region)
     rvb.start(t)
     rvb.addRegionValue(t, rv)

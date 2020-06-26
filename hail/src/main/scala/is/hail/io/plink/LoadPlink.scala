@@ -2,9 +2,10 @@ package is.hail.io.plink
 
 import is.hail.annotations.{Region, RegionValueBuilder}
 import is.hail.expr.ir._
-import is.hail.expr.types._
-import is.hail.expr.types.physical.{PBoolean, PCanonicalArray, PCanonicalCall, PCanonicalLocus, PCanonicalString, PCanonicalStruct, PFloat64, PStruct, PType}
-import is.hail.expr.types.virtual._
+import is.hail.expr.ir.lowering.TableStage
+import is.hail.types._
+import is.hail.types.physical.{PBoolean, PCanonicalArray, PCanonicalCall, PCanonicalLocus, PCanonicalString, PCanonicalStruct, PFloat64, PStruct, PType}
+import is.hail.types.virtual._
 import is.hail.io.vcf.LoadVCF
 import is.hail.utils.StringEscapeUtils._
 import is.hail.utils._
@@ -217,8 +218,8 @@ object MatrixPLINKReader {
       var end = partScan(p + 1)
       if (start < end) {
         while (end + 1 < nVariants
-          && lOrd.equiv(variants(end).asInstanceOf[Row].get(0),
-            variants(end + 1).asInstanceOf[Row].get(0)))
+          && lOrd.equiv(variants(end).locusAlleles.asInstanceOf[Row].get(0),
+            variants(end + 1).locusAlleles.asInstanceOf[Row].get(0)))
           end += 1
         
         cb += Row(params.bed, start, end)
@@ -352,7 +353,7 @@ class MatrixPLINKReader(
           is.close()
         }
         TaskContext.get.addTaskCompletionListener(tc)
-        var offset = 0
+        var offset: Long = 0
 
         val input = new Array[Byte](blockLength)
 
@@ -365,7 +366,7 @@ class MatrixPLINKReader(
         Iterator.range(start, end).flatMap { i =>
           val variant = variantsBc.value(i)
 
-          val newOffset = 3 + variant.index * blockLength
+          val newOffset: Long = 3L + variant.index.toLong * blockLength
           if (newOffset != offset) {
             is match {
               case base: Seekable =>
@@ -435,7 +436,7 @@ class MatrixPLINKReader(
 
     new GenericTableValue(
       tt,
-      partitioner,
+      Some(partitioner),
       { (requestedGlobalsType: Type) =>
         val subset = tt.globalType.valueSubsetter(requestedGlobalsType)
         subset(globals).asInstanceOf[Row]
@@ -449,8 +450,14 @@ class MatrixPLINKReader(
   def apply(tr: TableRead, ctx: ExecuteContext): TableValue =
     executeGeneric(ctx).toTableValue(ctx, tr.typ)
 
-  override def lower(ctx: ExecuteContext, requestedType: TableType): LoweredTableReader =
-    executeGeneric(ctx).toLoweredTableValue(requestedType)
+  override def lowerGlobals(ctx: ExecuteContext, requestedGlobalsType: TStruct): IR = {
+    val subset = fullMatrixType.globalType.valueSubsetter(requestedGlobalsType)
+    val globals = Row(sampleInfo)
+    Literal(requestedGlobalsType, subset(globals).asInstanceOf[Row])
+  }
+
+  override def lower(ctx: ExecuteContext, requestedType: TableType): TableStage =
+    executeGeneric(ctx).toTableStage(ctx, requestedType)
 
   override def toJValue: JValue = {
     implicit val formats: Formats = DefaultFormats

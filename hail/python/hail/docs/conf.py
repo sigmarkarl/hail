@@ -25,7 +25,7 @@ import datetime
 sys.path.insert(0, os.path.abspath('./_ext'))
 
 # sys.path.insert(0, os.path.abspath('.'))
-#import sphinx_rtd_theme
+# import sphinx_rtd_theme
 
 # -- General configuration ------------------------------------------------
 
@@ -61,7 +61,8 @@ katex_options = ''
 
 nbsphinx_timeout = 300
 nbsphinx_allow_errors = False
-if not tags.has('checktutorial'):
+# F821 undefined name 'tags'
+if not tags.has('checktutorial'):  # noqa: F821
     nbsphinx_execute = 'never'
 
 autosummary_generate = ['api.rst',
@@ -221,14 +222,7 @@ html_static_path = ['_static']
 # .htaccess) here, relative to this directory. These files are copied
 # directly to the root of the documentation.
 #
-www_root = os.path.dirname(os.path.abspath(__file__))
-_i = 0
-while _i < 50 and not os.path.isdir(os.path.join(www_root, 'www')):
-    www_root = os.path.join(www_root, '..')
-    _i += 1
-html_extra_path = [os.path.join(www_root, 'www/hail-logo-cropped.png'),
-                   os.path.join(www_root, 'www/navbar.css'),
-                   'misc/']
+html_extra_path = ['misc/']
 
 # If not None, a 'Last updated on:' timestamp is inserted at every page
 # bottom, using the given strftime format.

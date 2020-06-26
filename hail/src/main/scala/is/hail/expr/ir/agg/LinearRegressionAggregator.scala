@@ -4,7 +4,7 @@ import breeze.linalg.{DenseMatrix, DenseVector, diag, inv}
 import is.hail.annotations.{Region, RegionValueBuilder, StagedRegionValueBuilder, UnsafeRow}
 import is.hail.asm4s._
 import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder, EmitMethodBuilder}
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 import is.hail.utils.FastIndexedSeq
 
 object LinearRegressionAggregator {
@@ -86,9 +86,8 @@ class LinearRegressionAggregator(yt: PFloat64, xt: PCanonicalArray) extends Stag
   type State = TypedRegionBackedAggState
 
   override def resultType: PType = LinearRegressionAggregator.resultType
-
-  def createState(cb: EmitCodeBuilder): State =
-    new TypedRegionBackedAggState(stateType, cb.emb.ecb)
+  val initOpTypes: Seq[PType] = Array(PInt32(true), PInt32(true))
+  val seqOpTypes: Seq[PType] = Array(yt, xt)
 
   def initOpF(state: State)(mb: EmitMethodBuilder[_], k: Code[Int], k0: Code[Int]): Code[Unit] =
     Code.memoize(k, "lra_init_k", k0, "lra_init_k0") { (k, k0) =>

@@ -3,16 +3,15 @@ package is.hail.expr.ir.agg
 import is.hail.annotations.{Region, RegionUtils, StagedRegionValueBuilder}
 import is.hail.asm4s._
 import is.hail.expr.ir.{EmitClassBuilder, EmitCode, EmitCodeBuilder, typeToTypeInfo}
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 import is.hail.utils._
 
 class PrevNonNullAggregator(typ: PType) extends StagedAggregator {
   type State = TypedRegionBackedAggState
   assert(PType.canonical(typ) == typ)
   val resultType: PType = typ
-
-  def createState(cb: EmitCodeBuilder): State =
-    new TypedRegionBackedAggState(typ.setRequired(false), cb.emb.ecb)
+  val initOpTypes: Seq[PType] = Array[PType]()
+  val seqOpTypes: Seq[PType] = Array[PType](typ)
 
   protected def _initOp(cb: EmitCodeBuilder, state: State, init: Array[EmitCode]): Unit = {
     assert(init.length == 0)

@@ -1,15 +1,15 @@
 package is.hail.expr.ir.functions
 
 import is.hail.expr.ir.InferPType
-import is.hail.expr.types._
-import is.hail.expr.types.physical.{PBoolean, PCanonicalArray, PCanonicalCall, PInt32, PType}
-import is.hail.expr.types.virtual._
+import is.hail.types._
+import is.hail.types.physical.{PBoolean, PCanonicalArray, PCanonicalCall, PInt32, PType}
+import is.hail.types.virtual._
 import is.hail.utils.FastSeq
 import is.hail.variant._
 
 object CallFunctions extends RegistryFunctions {
   def registerAll() {
-    registerWrappedScalaFunction1("Call", TString, TCall, (rt: Type, _: PType) => PCanonicalCall())(Call.getClass, "parse")
+    registerWrappedScalaFunction1("Call", TString, TCall, (rt: Type, st: PType) => PCanonicalCall(st.required))(Call.getClass, "parse")
 
     registerScalaFunction("Call", Array(TBoolean), TCall, (rt: Type, _: Seq[PType]) => PCanonicalCall())(Call0.getClass, "apply")
 

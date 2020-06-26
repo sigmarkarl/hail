@@ -1,6 +1,8 @@
-from .indices import *
+from typing import Set, Dict
+from hail.typecheck import typecheck, setof
+
+from .indices import Indices, Aggregation
 from ..expressions import Expression, ExpressionException, expr_any
-from typing import *
 
 
 @typecheck(caller=str,
@@ -13,7 +15,7 @@ def analyze(caller: str,
             expected_indices: Indices,
             aggregation_axes: Set = set(),
             broadcast=True):
-    from hail.utils import warn, error
+    from hail.utils import warning, error
 
     indices = expr._indices
     source = indices.source
@@ -41,11 +43,10 @@ def analyze(caller: str,
                                 "  Correct usage:\n"
                                 "    >>> ht = ht.distinct()\n"
                                 "    >>> ht = ht.select(ht.x)".format(
-                caller=caller,
-                expected=expected_source,
-                actual=source,
-                bad_refs=list(bad_refs)
-            )))
+                                    caller=caller,
+                                    expected=expected_source,
+                                    actual=source,
+                                    bad_refs=list(bad_refs))))
 
     # check for stray indices by subtracting expected axes from observed
     if broadcast:
@@ -121,7 +122,7 @@ def analyze(caller: str,
             errors.append(ExpressionException("'{}' does not support aggregation".format(caller)))
 
     for w in warnings:
-        warn('{}'.format(w.msg))
+        warning('{}'.format(w.msg))
     if errors:
         for e in errors:
             error('{}'.format(e.msg))
@@ -225,9 +226,9 @@ def _get_refs(expr: Expression, builder: Dict[str, Indices]) -> None:
     from hail.ir import GetField, TopLevelReference
 
     for ir in expr._ir.search(
-            lambda a: isinstance(a, GetField)
-                      and not a.name.startswith('__uid')
-                      and isinstance(a.o, TopLevelReference)):
+            lambda a: (isinstance(a, GetField)
+                       and not a.name.startswith('__uid')
+                       and isinstance(a.o, TopLevelReference))):
         src = expr._indices.source
         builder[ir.name] = src._indices_from_ref[ir.o.name]
 
@@ -250,6 +251,7 @@ def extract_refs_by_indices(exprs, indices):
             if inds == indices:
                 s.add(name)
     return s
+
 
 def get_refs(*exprs: Expression) -> Dict[str, Indices]:
     builder = {}
@@ -293,6 +295,7 @@ def check_entry_indexed(caller, expr):
     if expr._indices != expr._indices.source._entry_indices:
         raise ExpressionException("{}: expression must be entry-indexed,"
                                   " found indices {}".format(caller, list(expr._indices.axes)))
+
 
 @typecheck(caller=str,
            expr=Expression)

@@ -1,4 +1,5 @@
 import pkg_resources
+import sys
 import os
 import json
 import socket
@@ -7,16 +8,18 @@ from threading import Thread
 import py4j
 import pyspark
 
-from hail.utils.java import *
+import hail
+from hail.utils.java import FatalError, Env, scala_package_object, scala_object
 from hail.expr.types import dtype
-from hail.expr.table_type import *
-from hail.expr.matrix_type import *
-from hail.expr.blockmatrix_type import *
-from hail.ir.renderer import CSERenderer, Renderer
+from hail.expr.table_type import ttable
+from hail.expr.matrix_type import tmatrix
+from hail.expr.blockmatrix_type import tblockmatrix
+from hail.ir.renderer import CSERenderer
 from hail.table import Table
 from hail.matrixtable import MatrixTable
 
-from .backend import Backend
+from .py4j_backend import Py4JBackend
+from ..hail_logging import Logger
 
 
 def handle_java_exception(f):
@@ -120,7 +123,21 @@ def connect_logger(utils_package_object, host, port):
     utils_package_object.addSocketAppender(host, port)
 
 
-class SparkBackend(Backend):
+class Log4jLogger(Logger):
+    def __init__(self, log_pkg):
+        self._log_pkg = log_pkg
+
+    def error(self, msg):
+        self._log_pkg.error(msg)
+
+    def warning(self, msg):
+        self._log_pkg.warn(msg)
+
+    def info(self, msg):
+        self._log_pkg.info(msg)
+
+
+class SparkBackend(Py4JBackend):
     def __init__(self, idempotent, sc, spark_conf, app_name, master,
                  local, log, quiet, append, min_block_size,
                  branching_factor, tmpdir, local_tmpdir, skip_logging_configuration, optimizer_iterations):
@@ -199,6 +216,7 @@ class SparkBackend(Backend):
                                f"  Python: {py_version}")
 
         self._fs = None
+        self._logger = None
 
         if not quiet:
             sys.stderr.write('Running on Apache Spark version {}\n'.format(self.sc.version))
@@ -241,6 +259,12 @@ class SparkBackend(Backend):
         return self._jbackend.parse_blockmatrix_ir(code, ref_map, ir_map)
 
     @property
+    def logger(self):
+        if self._logger is None:
+            self._logger = Log4jLogger(self._utils_package_object)
+        return self._logger
+
+    @property
     def fs(self):
         if self._fs is None:
             from hail.fs.hadoop_fs import HadoopFS
@@ -268,6 +292,7 @@ class SparkBackend(Backend):
 
     def execute(self, ir, timed=False):
         jir = self._to_java_value_ir(ir)
+        # print(self._hail_package.expr.ir.Pretty.apply(jir, True, -1))
         result = json.loads(self._jhc.backend().executeJSON(jir))
         value = ir.typ._from_json(result['value'])
         timings = result['timings']

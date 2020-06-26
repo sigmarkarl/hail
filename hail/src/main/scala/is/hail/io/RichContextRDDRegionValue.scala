@@ -4,7 +4,7 @@ import java.io._
 
 import is.hail.annotations._
 import is.hail.expr.ir.ExecuteContext
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 import is.hail.io.fs.FS
 import is.hail.io.index.IndexWriter
 import is.hail.rvd.{AbstractIndexSpec, IndexSpec, MakeRVDSpec, RVDContext, RVDPartitioner, RVDType}
@@ -165,12 +165,11 @@ object RichContextRDDRegionValue {
     partFiles: Array[String],
     partitioner: RVDPartitioner
   ) {
-    val rowsSpec = MakeRVDSpec(t.key, rowsCodecSpec, partFiles, partitioner, rowsIndexSpec)
+    val rowsSpec = MakeRVDSpec(rowsCodecSpec, partFiles, partitioner, rowsIndexSpec)
     rowsSpec.write(fs, path + "/rows/rows")
 
-    val entriesSpec = MakeRVDSpec(
-      FastIndexedSeq(), entriesCodecSpec, partFiles, RVDPartitioner.unkeyed(partitioner.numPartitions),
-      entriesIndexSpec)
+    val entriesSpec = MakeRVDSpec(entriesCodecSpec, partFiles,
+      RVDPartitioner.unkeyed(partitioner.numPartitions), entriesIndexSpec)
     entriesSpec.write(fs, path + "/entries/rows")
   }
 }

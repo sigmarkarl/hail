@@ -5,7 +5,7 @@ import hail as hl
 from hail.linalg import BlockMatrix
 from hail.linalg.utils import _check_dims
 from hail.table import Table
-from hail.typecheck import *
+from hail.typecheck import typecheck_method, nullable, tupleof, oneof, numeric
 from hail.utils.java import Env, info
 from hail.utils.misc import plural
 
@@ -498,7 +498,7 @@ class LinearMixedModel(object):
             else:
                 return neg_log_reml
         except LinAlgError as e:
-            raise Exception(f'linear algebra error while solving for REML estimate') from e
+            raise Exception('linear algebra error while solving for REML estimate') from e
 
     @typecheck_method(log_gamma=nullable(numeric), bounds=tupleof(numeric), tol=float, maxiter=int)
     def fit(self, log_gamma=None, bounds=(-8.0, 8.0), tol=1e-8, maxiter=500):
@@ -1152,4 +1152,3 @@ class LinearMixedModel(object):
             print(f'different p_path:\n{self.p_path}\n{other.p_path}')
             same = False
         return same
-

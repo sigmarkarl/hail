@@ -3,8 +3,8 @@ package is.hail.expr.ir.functions
 import is.hail.asm4s
 import is.hail.asm4s._
 import is.hail.expr.ir._
-import is.hail.expr.types.physical.{PBoolean, PCanonicalString, PInt32, PLocus, PType}
-import is.hail.expr.types.virtual._
+import is.hail.types.physical.{PBoolean, PCanonicalString, PInt32, PLocus, PType}
+import is.hail.types.virtual._
 import is.hail.variant.ReferenceGenome
 
 object ReferenceGenomeFunctions extends RegistryFunctions {
@@ -12,7 +12,7 @@ object ReferenceGenomeFunctions extends RegistryFunctions {
 
   def registerAll() {
     registerCode1t("isValidContig", LocusFunctions.tlocus("R"), TString, TBoolean, (_: Type, _: PType) => PBoolean()) {
-      case (r, rt, tlocus, (contigT, contig: Code[Long])) => {}
+      case (r, rt, tlocus, (contigT, contig: Code[Long])) =>
         val scontig = asm4s.coerce[String](wrapArg(r, contigT)(contig))
         rgCode(r.mb, tlocus.asInstanceOf[TLocus].rg).invoke[String, Boolean]("isValidContig", scontig)
     }
@@ -35,17 +35,17 @@ object ReferenceGenomeFunctions extends RegistryFunctions {
         rgCode(r.mb, typeArg.rg).invoke[String, Int]("contigLength", scontig)
     }
 
-    registerIR("getReferenceSequence", Array(TString, TInt32, TInt32, TInt32), TString, typeParams = Array(LocusFunctions.tlocus("R"))) {
+    registerIR("getReferenceSequence", Array(TString, TInt32, TInt32, TInt32), TString, typeParameters = Array(LocusFunctions.tlocus("R"))) {
       case (tl, Seq(contig, pos, before, after)) =>
-        val getRef = IRFunctionRegistry.lookupConversion(
+        val getRef = IRFunctionRegistry.lookupUnseeded(
           name = "getReferenceSequenceFromValidLocus",
-          rt = TString,
-          typeParams = tl,
-          args = Seq(TString, TInt32, TInt32, TInt32)).get
-        val isValid = IRFunctionRegistry.lookupConversion(
+          returnType = TString,
+          typeParameters = tl,
+          arguments = Seq(TString, TInt32, TInt32, TInt32)).get
+        val isValid = IRFunctionRegistry.lookupUnseeded(
           "isValidLocus",
           TBoolean,
-          typeParams = tl,
+          typeParameters = tl,
           Seq(TString, TInt32)).get
 
         val r = isValid(tl, Seq(contig, pos))

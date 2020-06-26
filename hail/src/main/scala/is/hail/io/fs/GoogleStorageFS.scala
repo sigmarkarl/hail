@@ -5,13 +5,10 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.file.FileSystems
 
-import is.hail.utils._
 import com.google.auth.oauth2.ServiceAccountCredentials
 import com.google.cloud.{ReadChannel, WriteChannel}
 import com.google.cloud.storage.Storage.BlobListOption
 import com.google.cloud.storage.{Blob, BlobId, BlobInfo, Storage, StorageOptions}
-import org.apache.commons.io.FilenameUtils
-import org.apache.hadoop
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
@@ -100,32 +97,6 @@ class GoogleStorageFileStatus(path: String, modificationTime: java.lang.Long, si
 class GoogleStorageFS(serviceAccountKey: String) extends FS {
   import GoogleStorageFS._
 
-  private var codecNames: IndexedSeq[String] = FastIndexedSeq(
-    "is.hail.io.compress.BGzipCodec",
-    "is.hail.io.compress.BGzipCodecTbi",
-    "org.apache.hadoop.io.compress.GzipCodec")
-
-  @transient private var codecs: IndexedSeq[hadoop.io.compress.CompressionCodec] = _
-
-  private val defaultHadoopConf = new hadoop.conf.Configuration()
-
-  def createCodecs(): Unit = {
-    if (codecs != null)
-      return
-
-    codecs = codecNames.map { codecName =>
-      val codecClass = Class.forName(codecName)
-      val codec = codecClass.newInstance().asInstanceOf[hadoop.io.compress.CompressionCodec]
-
-      codec match {
-        case codec: hadoop.io.compress.DefaultCodec =>
-          codec.setConf(defaultHadoopConf)
-        case _ =>
-      }
-      codec
-    }
-  }
-
   @transient private lazy val storage: Storage = {
     StorageOptions.newBuilder()
       .setCredentials(
@@ -134,36 +105,24 @@ class GoogleStorageFS(serviceAccountKey: String) extends FS {
       .getService
   }
 
-  def getCodecs(): IndexedSeq[String] = codecNames
-
-  def setCodecs(newCodecs: IndexedSeq[String]): Unit = {
-    codecNames = newCodecs
-    codecs = null
-  }
-
-  def getCodec(filename: String): hadoop.io.compress.CompressionCodec = {
-    if (codecs == null)
-      createCodecs()
-
-    val ext = "." + FilenameUtils.getExtension(filename)
-    codecs.foreach { codec =>
-      if (codec.getDefaultExtension == ext)
-        return codec
-    }
-
-    null
-  }
-
   def openNoCompression(filename: String): SeekableDataInputStream = {
     val (bucket, path) = getBucketPath(filename)
 
     val is: SeekableInputStream = new InputStream with Seekable {
-      val bb: ByteBuffer = ByteBuffer.allocate(64 * 1024)
+      private[this] val bb: ByteBuffer = ByteBuffer.allocate(64 * 1024)
       bb.limit(0)
 
-      val reader: ReadChannel = storage.reader(bucket, path)
-      var pos: Long = 0
-      var eof: Boolean = false
+      private[this] var closed: Boolean = false
+      private[this] val reader: ReadChannel = storage.reader(bucket, path)
+      private[this] var pos: Long = 0
+      private[this] var eof: Boolean = false
+
+      override def close(): Unit = {
+        if (!closed) {
+          reader.close()
+          closed = true
+        }
+      }
 
       def fill(): Unit = {
         bb.clear()
@@ -216,6 +175,7 @@ class GoogleStorageFS(serviceAccountKey: String) extends FS {
 
       def seek(newPos: Long): Unit = {
         bb.clear()
+        bb.limit(0)
         reader.seek(newPos)
         pos = newPos
       }
@@ -232,9 +192,10 @@ class GoogleStorageFS(serviceAccountKey: String) extends FS {
       .build()
 
     val os: PositionedOutputStream = new OutputStream with Positioned {
-      val bb: ByteBuffer = ByteBuffer.allocate(64 * 1024)
-      var pos: Long = 0
-      val write: WriteChannel = storage.writer(blobInfo)
+      private[this] var closed: Boolean = false
+      private[this] val bb: ByteBuffer = ByteBuffer.allocate(64 * 1024)
+      private[this] var pos: Long = 0
+      private[this] val write: WriteChannel = storage.writer(blobInfo)
 
       override def flush(): Unit = {
         bb.flip()
@@ -267,8 +228,11 @@ class GoogleStorageFS(serviceAccountKey: String) extends FS {
       }
 
       override def close(): Unit = {
-        flush()
-        write.close()
+        if (!closed) {
+          flush()
+          write.close()
+          closed = true
+        }
       }
 
       def getPosition: Long = pos

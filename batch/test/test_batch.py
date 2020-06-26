@@ -1,20 +1,18 @@
 import random
 import math
 import collections
-import hailtop
-from hailtop.batch_client.client import BatchClient, Job
-import json
 import os
 import base64
-import pkg_resources
 import secrets
 import time
 import unittest
 import aiohttp
 import requests
+
 from hailtop.config import get_deploy_config
 from hailtop.auth import service_auth_headers
 from hailtop.utils import retry_response_returning_functions
+from hailtop.batch_client.client import BatchClient, Job
 
 from .utils import legacy_batch_status
 from .failure_injecting_client_session import FailureInjectingClientSession
@@ -468,6 +466,7 @@ echo $HAIL_BATCH_WORKER_IP
         self.assertEqual(status['state'], 'Error', (status, j.log()))
         error_msg = j._get_error(status, 'main')
         assert error_msg and 'JobTimeoutError' in error_msg
+        assert j.exit_code(status) is None, status
 
     def test_client_max_size(self):
         builder = self.client.create_batch()
@@ -535,3 +534,14 @@ echo $HAIL_BATCH_WORKER_IP
                 allow_redirects=True,
                 headers=headers)
             assert r.status_code == 400, (config, r)
+
+    def test_duplicate_parents(self):
+        batch = self.client.create_batch()
+        head = batch.create_job('ubuntu:18.04', command=['echo', 'head'])
+        batch.create_job('ubuntu:18.04', command=['echo', 'tail'], parents=[head, head])
+        try:
+            batch = batch.submit()
+        except aiohttp.ClientResponseError as e:
+            assert e.status == 400
+        else:
+            assert False, f'should receive a 400 Bad Request {batch.id}'

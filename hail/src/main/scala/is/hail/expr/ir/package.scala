@@ -5,12 +5,14 @@ import is.hail.asm4s._
 import is.hail.annotations.RegionValue
 import is.hail.asm4s.joinpoint.Ctrl
 import is.hail.expr.ir.functions.IRFunctionRegistry
-import is.hail.expr.types._
-import is.hail.expr.types.physical.PType
-import is.hail.expr.types.virtual._
+import is.hail.types.{coerce => tycoerce, _}
+import is.hail.types.physical.PType
+import is.hail.types.virtual._
 import is.hail.utils._
 
 import scala.language.implicitConversions
+
+import java.util.UUID
 
 package object ir {
   type TokenIterator = BufferedIterator[Token]
@@ -22,6 +24,8 @@ package object ir {
     uidCounter += 1
     uid
   }
+
+  def uuid4(): String = UUID.randomUUID().toString
 
   def genSym(base: String): Sym = Sym.gen(base)
 
@@ -75,13 +79,13 @@ package object ir {
 
   private[ir] def coerce[T](ti: TypeInfo[_]): TypeInfo[T] = ti.asInstanceOf[TypeInfo[T]]
 
-  private[ir] def coerce[T <: Type](x: Type): T = types.coerce[T](x)
+  private[ir] def coerce[T <: Type](x: Type): T = tycoerce[T](x)
 
-  private[ir] def coerce[T <: PType](x: PType): T = types.coerce[T](x)
+  private[ir] def coerce[T <: PType](x: PType): T = tycoerce[T](x)
 
-  private[ir] def coerce[T <: BaseTypeWithRequiredness](x: BaseTypeWithRequiredness): T = types.coerce[T](x)
+  private[ir] def coerce[T <: BaseTypeWithRequiredness](x: BaseTypeWithRequiredness): T = tycoerce[T](x)
 
-  def invoke(name: String, rt: Type, typeArgs: Array[Type], args: IR*): IR = IRFunctionRegistry.lookupConversion(name, rt, typeArgs, args.map(_.typ)) match {
+  def invoke(name: String, rt: Type, typeArgs: Array[Type], args: IR*): IR = IRFunctionRegistry.lookupUnseeded(name, rt, typeArgs, args.map(_.typ)) match {
     case Some(f) => f(typeArgs, args)
     case None => fatal(s"no conversion found for $name(${typeArgs.mkString(", ")}, ${args.map(_.typ).mkString(", ")}) => $rt")
   }
@@ -89,9 +93,9 @@ package object ir {
   def invoke(name: String, rt: Type, args: IR*): IR =
     invoke(name, rt, Array.empty[Type], args:_*)
 
-  def invokeSeeded(name: String, rt: Type, args: IR*): IR = IRFunctionRegistry.lookupConversion(name, rt, Array.empty[Type], args.init.map(_.typ)) match {
-    case Some(f) => f(Array.empty[Type], args)
-    case None => fatal(s"no conversion found for $name(${args.map(_.typ).mkString(", ")}) => $rt")
+  def invokeSeeded(name: String, seed: Long, rt: Type, args: IR*): IR = IRFunctionRegistry.lookupSeeded(name, seed, rt, args.map(_.typ)) match {
+    case Some(f) => f(args)
+    case None => fatal(s"no seeded function found for $name(${args.map(_.typ).mkString(", ")}) => $rt")
   }
 
   implicit def irToPrimitiveIR(ir: IR): PrimitiveIR = new PrimitiveIR(ir)
@@ -142,6 +146,10 @@ package object ir {
     StreamFlatMap(stream, ref.name, f(ref))
   }
 
+  def flatten(stream: IR): IR = flatMapIR(stream) { elt =>
+      if (elt.typ.isInstanceOf[TStream]) elt else ToStream(elt)
+    }
+
   def foldIR(stream: IR, zero: IR)(f: (Ref, Ref) => IR): IR = {
     val elt = Ref(genUID(), coerce[TStream](stream.typ).elementType)
     val accum = Ref(genUID(), zero.typ)
@@ -152,9 +160,23 @@ package object ir {
     foldIR(stream, 0){ case (accum, elt) => accum + elt}
   }
 
+  def streamForceCount(stream: IR): IR =
+    streamSumIR(mapIR(stream)(_ => I32(1)))
+
   def rangeIR(n: IR): IR = StreamRange(0, n, 1)
 
   def rangeIR(start: IR, stop: IR): IR = StreamRange(start, stop, 1)
+
+  def insertIR(old: IR, fields: (String, IR)*): InsertFields = InsertFields(old, fields)
+  def selectIR(old: IR, fields: String*): SelectFields = SelectFields(old, fields)
+
+  def zip2(s1: IR, s2: IR, behavior: ArrayZipBehavior.ArrayZipBehavior)(f: (Ref, Ref) => IR): IR = {
+    val r1 = Ref(genUID(), coerce[TStream](s1.typ).elementType)
+    val r2 = Ref(genUID(), coerce[TStream](s2.typ).elementType)
+    StreamZip(FastSeq(s1, s2), FastSeq(r1.name, r2.name), f(r1, r2), behavior)
+  }
+
+  def makestruct(fields: (String, IR)*): MakeStruct = MakeStruct(fields)
 
   implicit def toRichIndexedSeqEmitSettable(s: IndexedSeq[EmitSettable]): RichIndexedSeqEmitSettable = new RichIndexedSeqEmitSettable(s)
 

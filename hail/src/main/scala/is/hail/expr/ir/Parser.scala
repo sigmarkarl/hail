@@ -1,10 +1,11 @@
 package is.hail.expr.ir
 
 import is.hail.HailContext
+import is.hail.expr.ir.agg._
 import is.hail.expr.ir.functions.RelationalFunctions
-import is.hail.expr.types.physical._
-import is.hail.expr.types.virtual._
-import is.hail.expr.types.{MatrixType, TableType}
+import is.hail.types.physical._
+import is.hail.types.virtual._
+import is.hail.types.{MatrixType, TableType}
 import is.hail.expr.{JSONAnnotationImpex, Nat, ParserUtils}
 import is.hail.io.{AbstractTypedCodecSpec, BufferSpec}
 import is.hail.rvd.{AbstractRVDSpec, RVDType}
@@ -188,12 +189,8 @@ object IRParser {
     }
   }
 
-  def identifiers(it: TokenIterator): Array[String] = {
-    punctuation(it, "(")
-    val ids = repUntil(it, identifier, PunctuationToken(")"))
-    punctuation(it, ")")
-    ids
-  }
+  def identifiers(it: TokenIterator): Array[String] =
+    base_seq_parser(identifier)(it)
 
   def boolean_literal(it: TokenIterator): Boolean = {
     consumeToken(it) match {
@@ -260,12 +257,8 @@ object IRParser {
     }
   }
 
-  def literals[T](literalIdentifier: TokenIterator => T)(it: TokenIterator)(implicit tct: ClassTag[T]): Array[T] = {
-    punctuation(it, "(")
-    val literals = repUntil(it, literalIdentifier, PunctuationToken(")"))
-    punctuation(it, ")")
-    literals
-  }
+  def literals[T](literalIdentifier: TokenIterator => T)(it: TokenIterator)(implicit tct: ClassTag[T]): Array[T] =
+    base_seq_parser(literalIdentifier)(it)
 
   def string_literals: TokenIterator => Array[String] = literals(string_literal)
   def int32_literals: TokenIterator => Array[Int] = literals(int32_literal)
@@ -302,6 +295,14 @@ object IRParser {
       xs += f(it)
     }
     xs.result()
+  }
+
+
+  def base_seq_parser[T : ClassTag](f: TokenIterator => T)(it: TokenIterator): Array[T] = {
+    punctuation(it, "(")
+    val r = repUntil(it, f, PunctuationToken(")"))
+    punctuation(it, ")")
+    r
   }
 
   def decorator(it: TokenIterator): (String, String) = {
@@ -417,19 +418,11 @@ object IRParser {
     typ
   }
 
-  def ptype_exprs(env: TypeParserEnvironment)(it: TokenIterator): Array[PType] = {
-    punctuation(it, "(")
-    val types = repUntil(it, ptype_expr(env), PunctuationToken(")"))
-    punctuation(it, ")")
-    types
-  }
+  def ptype_exprs(env: TypeParserEnvironment)(it: TokenIterator): Array[PType] =
+    base_seq_parser(ptype_expr(env))(it)
 
-  def type_exprs(env: TypeParserEnvironment)(it: TokenIterator): Array[Type] = {
-    punctuation(it, "(")
-    val types = repUntil(it, type_expr(env), PunctuationToken(")"))
-    punctuation(it, ")")
-    types
-  }
+  def type_exprs(env: TypeParserEnvironment)(it: TokenIterator): Array[Type] =
+    base_seq_parser(type_expr(env))(it)
 
   def type_expr(env: TypeParserEnvironment)(it: TokenIterator): Type = {
     // skip requiredness token for back-compatibility
@@ -613,23 +606,69 @@ object IRParser {
   def agg_op(it: TokenIterator): AggOp =
     AggOp.fromString(identifier(it))
 
-  def agg_state_signature(env: TypeParserEnvironment)(it: TokenIterator): AggStateSignature = {
+  def agg_state_signature(env: TypeParserEnvironment)(it: TokenIterator): AggStateSig = {
     punctuation(it, "(")
-    val op = agg_op(it)
-    val sigs = agg_signatures(env)(it)
-    val nested = opt(it, agg_state_signatures(env)).map(_.toFastSeq)
+    val sig = identifier(it) match {
+      case "TypedStateSig" =>
+        val pt = ptype_expr(env)(it)
+        TypedStateSig(pt)
+      case "DownsampleStateSig" =>
+        val labelType = ptype_expr(env)(it)
+        DownsampleStateSig(coerce[PArray](labelType))
+      case "TakeStateSig" =>
+        val pt = ptype_expr(env)(it)
+        TakeStateSig(pt)
+      case "TakeByStateSig" =>
+        val vt = ptype_expr(env)(it)
+        val kt = ptype_expr(env)(it)
+        TakeByStateSig(vt, kt)
+      case "CollectStateSig" =>
+        val pt = ptype_expr(env)(it)
+        CollectStateSig(pt)
+      case "CollectAsSetStateSig" =>
+        val pt = ptype_expr(env)(it)
+        CollectAsSetStateSig(pt)
+      case "CallStatsStateSig" => CallStatsStateSig()
+      case "ArrayAggStateSig" =>
+        val nested = agg_state_signatures(env)(it)
+        ArrayAggStateSig(nested)
+      case "GroupedStateSig" =>
+        val kt = ptype_expr(env)(it)
+        val nested = agg_state_signatures(env)(it)
+        GroupedStateSig(kt, nested)
+      case "ApproxCDFStateSig" => ApproxCDFStateSig()
+    }
     punctuation(it, ")")
-    AggStateSignature(sigs.map(s => (s.op, s)).toMap, op, nested)
+    sig
   }
 
-  def agg_state_signatures(env: TypeParserEnvironment)(it: TokenIterator): Array[AggStateSignature] = {
+  def agg_state_signatures(env: TypeParserEnvironment)(it: TokenIterator): Array[AggStateSig] =
+    base_seq_parser(agg_state_signature(env))(it)
+
+  def p_agg_sigs(env: TypeParserEnvironment)(it: TokenIterator): Array[PhysicalAggSig] =
+    base_seq_parser(p_agg_sig(env))(it)
+
+  def p_agg_sig(env: TypeParserEnvironment)(it: TokenIterator): PhysicalAggSig = {
     punctuation(it, "(")
-    val sigs = repUntil(it, agg_state_signature(env), PunctuationToken(")"))
+    val sig = identifier(it) match {
+      case "Grouped" =>
+        val pt = ptype_expr(env)(it)
+        val nested = p_agg_sigs(env)(it)
+        GroupedAggSig(pt, nested)
+      case "ArrayLen" =>
+        val knownLength = boolean_literal(it)
+        val nested = p_agg_sigs(env)(it)
+        ArrayLenAggSig(knownLength, nested)
+      case "AggElements" =>
+        val nested = p_agg_sigs(env)(it)
+        AggElementsAggSig(nested)
+      case op =>
+        val state = agg_state_signature(env)(it)
+        PhysicalAggSig(AggOp.fromString(op), state)
+    }
     punctuation(it, ")")
-    sigs
+    sig
   }
-
-
 
   def agg_signature(env: TypeParserEnvironment)(it: TokenIterator): AggSignature = {
     punctuation(it, "(")
@@ -640,12 +679,8 @@ object IRParser {
     AggSignature(op, initArgs, seqOpArgs)
   }
 
-  def agg_signatures(env: TypeParserEnvironment)(it: TokenIterator): Array[AggSignature] = {
-    punctuation(it, "(")
-    val sigs = repUntil(it, agg_signature(env), PunctuationToken(")"))
-    punctuation(it, ")")
-    sigs
-  }
+  def agg_signatures(env: TypeParserEnvironment)(it: TokenIterator): Array[AggSignature] =
+    base_seq_parser(agg_signature(env))(it)
 
   def ir_value(env: TypeParserEnvironment)(it: TokenIterator): (Type, Any) = {
     val typ = type_expr(env)(it)
@@ -690,6 +725,7 @@ object IRParser {
       case "F32" => F32(float32_literal(it))
       case "F64" => F64(float64_literal(it))
       case "Str" => Str(string_literal(it))
+      case "UUID4" => UUID4(identifier(it))
       case "True" => True()
       case "False" => False()
       case "Literal" =>
@@ -779,6 +815,7 @@ object IRParser {
         val s = ir_value_expr(env)(it)
         ArrayRef(a, i, s)
       case "ArrayLen" => ArrayLen(ir_value_expr(env)(it))
+      case "StreamLen" => StreamLen(ir_value_expr(env)(it))
       case "StreamRange" =>
         val start = ir_value_expr(env)(it)
         val stop = ir_value_expr(env)(it)
@@ -790,8 +827,8 @@ object IRParser {
         val r = identifier(it)
         val a = ir_value_expr(env)(it)
         val elt = coerce[TStream](a.typ).elementType
-        val body = ir_value_expr(env + (l -> elt) + (r -> elt))(it)
-        ArraySort(a, l, r, body)
+        val lessThan = ir_value_expr(env + (l -> elt) + (r -> elt))(it)
+        ArraySort(a, l, r, lessThan)
       case "MakeNDArray" =>
         val data = ir_value_expr(env)(it)
         val shape = ir_value_expr(env)(it)
@@ -880,6 +917,11 @@ object IRParser {
         val a = ir_value_expr(env)(it)
         val num = ir_value_expr(env)(it)
         StreamDrop(a, num)
+      case "StreamMerge" =>
+        val key = identifiers(it)
+        val left = ir_value_expr(env)(it)
+        val right = ir_value_expr(env)(it)
+        StreamMerge(left, right, key)
       case "StreamZip" =>
         val behavior = identifier(it) match {
           case "AssertSameLength" => ArrayZipBehavior.AssertSameLength
@@ -928,16 +970,18 @@ object IRParser {
         val eltType = coerce[TStream](a.typ).elementType
         val body = ir_value_expr(env.update(Map(accumName -> zero.typ, valueName -> eltType)))(it)
         StreamScan(a, zero, accumName, valueName, body)
-      case "StreamLeftJoinDistinct" =>
+      case "StreamJoinRightDistinct" =>
+        val lKey = identifiers(it)
+        val rKey = identifiers(it)
         val l = identifier(it)
         val r = identifier(it)
+        val joinType = identifier(it)
         val left = ir_value_expr(env)(it)
         val right = ir_value_expr(env)(it)
         val lelt = coerce[TStream](left.typ).elementType
         val relt = coerce[TStream](right.typ).elementType
-        val comp = ir_value_expr(env.update(Map(l -> lelt, r -> relt)))(it)
         val join = ir_value_expr(env.update(Map(l -> lelt, r -> relt)))(it)
-        StreamLeftJoinDistinct(left, right, l, r, comp, join)
+        StreamJoinRightDistinct(left, right, lKey, rKey, l, r, join, joinType)
       case "StreamFor" =>
         val name = identifier(it)
         val a = ir_value_expr(env)(it)
@@ -1008,24 +1052,22 @@ object IRParser {
         ApplyScanOp(initOpArgs, seqOpArgs, aggSig)
       case "InitOp" =>
         val i = int32_literal(it)
-        val op = agg_op(it)
-        val aggSig = agg_state_signature(env.typEnv)(it)
+        val aggSig = p_agg_sig(env.typEnv)(it)
         val args = ir_value_exprs(env)(it)
-        InitOp(i, args, aggSig, op)
+        InitOp(i, args, aggSig)
       case "SeqOp" =>
         val i = int32_literal(it)
-        val op = agg_op(it)
-        val aggSig = agg_state_signature(env.typEnv)(it)
+        val aggSig = p_agg_sig(env.typEnv)(it)
         val args = ir_value_exprs(env)(it)
-        SeqOp(i, args, aggSig, op)
+        SeqOp(i, args, aggSig)
       case "CombOp" =>
         val i1 = int32_literal(it)
         val i2 = int32_literal(it)
-        val aggSig = agg_state_signature(env.typEnv)(it)
+        val aggSig = p_agg_sig(env.typEnv)(it)
         CombOp(i1, i2, aggSig)
       case "ResultOp" =>
         val i = int32_literal(it)
-        val aggSigs = agg_state_signatures(env.typEnv)(it)
+        val aggSigs = p_agg_sigs(env.typEnv)(it)
         ResultOp(i, aggSigs)
       case "AggStateValue" =>
         val i = int32_literal(it)
@@ -1033,7 +1075,7 @@ object IRParser {
         AggStateValue(i, sig)
       case "CombOpValue" =>
         val i = int32_literal(it)
-        val sig = agg_state_signature(env.typEnv)(it)
+        val sig = p_agg_sig(env.typEnv)(it)
         val value = ir_value_expr(env)(it)
         CombOpValue(i, value, sig)
       case "SerializeAggs" =>
@@ -1182,6 +1224,17 @@ object IRParser {
         val reader = JsonMethods.parse(string_literal(it)).extract[PartitionReader]
         val context = ir_value_expr(env)(it)
         ReadPartition(context, rowType, reader)
+      case "WritePartition" =>
+        import PartitionWriter.formats
+        val writer = JsonMethods.parse(string_literal(it)).extract[PartitionWriter]
+        val stream = ir_value_expr(env)(it)
+        val ctx = ir_value_expr(env)(it)
+        WritePartition(stream, ctx, writer)
+      case "WriteMetadata" =>
+        import MetadataWriter.formats
+        val writer = JsonMethods.parse(string_literal(it)).extract[MetadataWriter]
+        val ctx = ir_value_expr(env)(it)
+        WriteMetadata(ctx, writer)
       case "ReadValue" =>
         import AbstractRVDSpec.formats
         val spec = JsonMethods.parse(string_literal(it)).extract[AbstractTypedCodecSpec]
@@ -1560,6 +1613,11 @@ object IRParser {
         val Row(l: Long, u: Long) =
           ExecuteContext.scoped() { ctx => CompileAndEvaluate[Row](ctx, ir_value_expr(env)(it)) }
         BandSparsifier(blocksOnly, l, u)
+      case "PyPerBlockSparsifier" =>
+        punctuation(it, ")")
+        val indices: IndexedSeq[Int] =
+          ExecuteContext.scoped() { ctx => CompileAndEvaluate[IndexedSeq[Int]](ctx, ir_value_expr(env)(it)) }
+        PerBlockSparsifier(indices)
       case "PyRectangleSparsifier" =>
         punctuation(it, ")")
         val rectangles: IndexedSeq[Long] =

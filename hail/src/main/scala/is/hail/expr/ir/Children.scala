@@ -11,6 +11,7 @@ object Children {
     case F32(x) => none
     case F64(x) => none
     case Str(x) => none
+    case UUID4(_) => none
     case True() => none
     case False() => none
     case Literal(_, _) => none
@@ -23,6 +24,7 @@ object Children {
     case IsNA(value) =>
       Array(value)
     case Coalesce(values) => values.toFastIndexedSeq
+    case Consume(value) => FastIndexedSeq(value)
     case If(cond, cnsq, altr) =>
       Array(cond, cnsq, altr)
     case Let(name, value, body) =>
@@ -65,8 +67,8 @@ object Children {
       Array(nd, shape)
     case NDArrayConcat(nds, _) =>
       Array(nds)
-    case ArraySort(a, _, _, compare) =>
-      Array(a, compare)
+    case ArraySort(a, _, _, lessThan) =>
+      Array(a, lessThan)
     case ToSet(a) =>
       Array(a)
     case ToDict(a) =>
@@ -81,6 +83,8 @@ object Children {
       Array(orderedCollection, elem)
     case GroupByKey(collection) =>
       Array(collection)
+    case StreamLen(a) =>
+      Array(a)
     case StreamTake(a, len) =>
       Array(a, len)
     case StreamDrop(a, len) =>
@@ -91,6 +95,8 @@ object Children {
       Array(a)
     case StreamMap(a, name, body) =>
       Array(a, body)
+    case StreamMerge(l, r, _) =>
+      Array(l, r)
     case StreamZip(as, names, body, _) =>
       as ++ Array(body)
     case StreamFilter(a, name, cond) =>
@@ -103,8 +109,8 @@ object Children {
       Array(a) ++ accum.map(_._2) ++ seq ++ Array(result)
     case StreamScan(a, zero, accumName, valueName, body) =>
       Array(a, zero, body)
-    case StreamLeftJoinDistinct(left, right, l, r, compare, join) =>
-      Array(left, right, compare, join)
+    case StreamJoinRightDistinct(left, right, lKey, rKey, l, r, join, joinType) =>
+      Array(left, right, join)
     case StreamFor(a, valueName, body) =>
       Array(a, body)
     case StreamAgg(a, name, query) =>
@@ -148,8 +154,8 @@ object Children {
       Array(old)
     case InsertFields(old, fields, _) =>
       (old +: fields.map(_._2)).toFastIndexedSeq
-    case InitOp(_, args, _, _) => args
-    case SeqOp(_, args, _, _) => args
+    case InitOp(_, args, _) => args
+    case SeqOp(_, args, _) => args
     case _: ResultOp => none
     case _: AggStateValue => none
     case _: CombOp => none
@@ -202,6 +208,8 @@ object Children {
     case BlockMatrixMultiWrite(blockMatrices, _) => blockMatrices
     case CollectDistributedArray(ctxs, globals, _, _, body) => Array(ctxs, globals, body)
     case ReadPartition(path, _, _) => Array(path)
+    case WritePartition(stream, ctx, _) => Array(stream, ctx)
+    case WriteMetadata(writeAnnotations, _) => Array(writeAnnotations)
     case ReadValue(path, _, _) => Array(path)
     case WriteValue(value, pathPrefix, spec) => Array(value, pathPrefix)
     case LiftMeOut(child) => Array(child)

@@ -6,7 +6,7 @@ import is.hail.{ExecStrategy, HailSuite}
 import is.hail.annotations._
 import is.hail.asm4s._
 import is.hail.expr.ir.functions.{IRFunctionRegistry, RegistryFunctions}
-import is.hail.expr.types.virtual._
+import is.hail.types.virtual._
 import is.hail.utils.{FastIndexedSeq, FastSeq}
 import is.hail.variant.Call2
 import org.testng.annotations.Test
@@ -46,7 +46,7 @@ class FunctionSuite extends HailSuite {
   TestRegisterFunctions.registerAll()
 
   def lookup(meth: String, rt: Type, types: Type*)(irs: IR*): IR = {
-    val l = IRFunctionRegistry.lookupConversion(meth, rt, types).get
+    val l = IRFunctionRegistry.lookupUnseeded(meth, rt, types).get
     l(Seq(), irs)
   }
 
@@ -83,10 +83,10 @@ class FunctionSuite extends HailSuite {
 
   @Test
   def testVariableUnification() {
-    assert(IRFunctionRegistry.lookupConversion("testCodeUnification", TInt32, Seq(TInt32, TInt32)).isDefined)
-    assert(IRFunctionRegistry.lookupConversion("testCodeUnification", TInt32, Seq(TInt64, TInt32)).isEmpty)
-    assert(IRFunctionRegistry.lookupConversion("testCodeUnification", TInt64, Seq(TInt32, TInt32)).isEmpty)
-    assert(IRFunctionRegistry.lookupConversion("testCodeUnification2", TArray(TInt32), Seq(TArray(TInt32))).isDefined)
+    assert(IRFunctionRegistry.lookupUnseeded("testCodeUnification", TInt32, Seq(TInt32, TInt32)).isDefined)
+    assert(IRFunctionRegistry.lookupUnseeded("testCodeUnification", TInt32, Seq(TInt64, TInt32)).isEmpty)
+    assert(IRFunctionRegistry.lookupUnseeded("testCodeUnification", TInt64, Seq(TInt32, TInt32)).isEmpty)
+    assert(IRFunctionRegistry.lookupUnseeded("testCodeUnification2", TArray(TInt32), Seq(TArray(TInt32))).isDefined)
   }
 
   @Test

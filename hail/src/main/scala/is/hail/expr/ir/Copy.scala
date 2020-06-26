@@ -8,6 +8,7 @@ object Copy {
       case F32(value) => F32(value)
       case F64(value) => F64(value)
       case Str(value) => Str(value)
+      case UUID4(id) => UUID4(id)
       case True() => True()
       case False() => False()
       case Literal(typ, value) => Literal(typ, value)
@@ -24,6 +25,8 @@ object Copy {
         IsNA(newChildren(0).asInstanceOf[IR])
       case Coalesce(_) =>
         Coalesce(newChildren.map(_.asInstanceOf[IR]))
+      case Consume(_) =>
+        Consume(newChildren(0).asInstanceOf[IR])
       case If(_, _, _) =>
         assert(newChildren.length == 3)
         If(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], newChildren(2).asInstanceOf[IR])
@@ -135,6 +138,8 @@ object Copy {
       case GroupByKey(_) =>
         assert(newChildren.length == 1)
         GroupByKey(newChildren(0).asInstanceOf[IR])
+      case StreamLen(_) =>
+        StreamLen(newChildren(0).asInstanceOf[IR])
       case StreamTake(_, _) =>
         assert(newChildren.length == 2)
         StreamTake(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR])
@@ -150,6 +155,9 @@ object Copy {
       case StreamMap(_, name, _) =>
         assert(newChildren.length == 2)
         StreamMap(newChildren(0).asInstanceOf[IR], name, newChildren(1).asInstanceOf[IR])
+      case StreamMerge(_, _, key) =>
+        assert(newChildren.length == 2)
+        StreamMerge(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], key)
       case StreamZip(_, names, _, behavior) =>
         assert(newChildren.length == names.length + 1)
         StreamZip(newChildren.init.asInstanceOf[IndexedSeq[IR]], names, newChildren(names.length).asInstanceOf[IR], behavior)
@@ -172,9 +180,9 @@ object Copy {
       case StreamScan(_, _, accumName, valueName, _) =>
         assert(newChildren.length == 3)
         StreamScan(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], accumName, valueName, newChildren(2).asInstanceOf[IR])
-      case StreamLeftJoinDistinct(_, _, l, r, _, _) =>
-        assert(newChildren.length == 4)
-        StreamLeftJoinDistinct(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], l, r, newChildren(2).asInstanceOf[IR], newChildren(3).asInstanceOf[IR])
+      case StreamJoinRightDistinct(_, _, lKey, rKey, l, r, _, joinType) =>
+        assert(newChildren.length == 3)
+        StreamJoinRightDistinct(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], lKey, rKey, l, r, newChildren(2).asInstanceOf[IR], joinType)
       case StreamFor(_, valueName, _) =>
         assert(newChildren.length == 2)
         StreamFor(newChildren(0).asInstanceOf[IR], valueName, newChildren(1).asInstanceOf[IR])
@@ -218,18 +226,21 @@ object Copy {
       case GetField(_, name) =>
         assert(newChildren.length == 1)
         GetField(newChildren(0).asInstanceOf[IR], name)
-      case InitOp(i, _, aggSig, op) =>
-        InitOp(i, newChildren.map(_.asInstanceOf[IR]), aggSig, op)
-      case SeqOp(i, _, aggSig, op) =>
-        SeqOp(i, newChildren.map(_.asInstanceOf[IR]), aggSig, op)
-      case x@(_: ResultOp | _: CombOp | _: AggStateValue) =>
-        assert(newChildren.isEmpty)
-        x
+      case InitOp(i, _, aggSig) =>
+        InitOp(i, newChildren.map(_.asInstanceOf[IR]), aggSig)
+      case SeqOp(i, _, aggSig) =>
+        SeqOp(i, newChildren.map(_.asInstanceOf[IR]), aggSig)
+      case ResultOp(i, aggSigs) =>
+        ResultOp(i, aggSigs)
+      case CombOp(i1, i2, aggSig) =>
+        CombOp(i1, i2, aggSig)
+      case AggStateValue(i, aggSig) =>
+        AggStateValue(i, aggSig)
       case CombOpValue(i, _, aggSig) =>
         assert(newChildren.length == 1)
         CombOpValue(i, newChildren(0).asInstanceOf[IR], aggSig)
-      case x: SerializeAggs => x
-      case x: DeserializeAggs => x
+      case SerializeAggs(startIdx, serIdx, spec, aggSigs) => SerializeAggs(startIdx, serIdx, spec, aggSigs)
+      case DeserializeAggs(startIdx, serIdx, spec, aggSigs) => DeserializeAggs(startIdx, serIdx, spec, aggSigs)
       case Begin(_) =>
         Begin(newChildren.map(_.asInstanceOf[IR]))
       case x@ApplyAggOp(initOpArgs, seqOpArgs, aggSig) =>
@@ -323,6 +334,12 @@ object Copy {
       case ReadPartition(context, rowType, reader) =>
         assert(newChildren.length == 1)
         ReadPartition(newChildren(0).asInstanceOf[IR], rowType, reader)
+      case WritePartition(stream, ctx, writer) =>
+        assert(newChildren.length == 2)
+        WritePartition(newChildren(0).asInstanceOf[IR], newChildren(1).asInstanceOf[IR], writer)
+      case WriteMetadata(ctx, writer) =>
+        assert(newChildren.length == 1)
+        WriteMetadata(newChildren(0).asInstanceOf[IR], writer)
       case ReadValue(path, spec, requestedType) =>
         assert(newChildren.length == 1)
         ReadValue(newChildren(0).asInstanceOf[IR], spec, requestedType)

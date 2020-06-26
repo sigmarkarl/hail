@@ -8,15 +8,16 @@ import is.hail.expr.ir.ArrayZipBehavior.ArrayZipBehavior
 import is.hail.expr.ir.IRBuilder._
 import is.hail.expr.ir.IRSuite.TestFunctions
 import is.hail.expr.ir.functions._
-import is.hail.expr.types.TableType
-import is.hail.expr.types.physical._
-import is.hail.expr.types.virtual._
+import is.hail.types.TableType
+import is.hail.types.physical._
+import is.hail.types.virtual._
 import is.hail.expr.Nat
+import is.hail.expr.ir.agg.{CallStatsStateSig, CollectStateSig, GroupedAggSig, PhysicalAggSig, TypedStateSig}
 import is.hail.io.bgen.{IndexBgen, MatrixBGENReader}
 import is.hail.io.{BufferSpec, TypedCodecSpec}
 import is.hail.linalg.BlockMatrix
 import is.hail.methods._
-import is.hail.rvd.RVD
+import is.hail.rvd.{RVD, RVDPartitioner, RVDSpecMaker}
 import is.hail.utils.{FastIndexedSeq, _}
 import is.hail.variant.{Call2, Locus}
 import is.hail.{ExecStrategy, HailContext, HailSuite}
@@ -36,45 +37,48 @@ object IRSuite {
 
   object TestFunctions extends RegistryFunctions {
 
-    def registerSeededWithMissingness(mname: String, aTypes: Array[Type], rType: Type, pt: (Type, Seq[PType]) => PType)(impl: (EmitRegion, PType, Long, Array[EmitCode]) => EmitCode) {
-      IRFunctionRegistry.addIRFunction(new SeededIRFunction {
-        val isDeterministic: Boolean = false
-
-        override val name: String = mname
-
-        override val argTypes: Seq[Type] = aTypes
-
-        override val returnType: Type = rType
-
-        override def returnPType(argTypes: Seq[PType], returnType: Type): PType = if (pt == null) PType.canonical(returnType) else pt(returnType, argTypes)
-
-        def applySeeded(seed: Long, r: EmitRegion, rpt: PType, args: EmitCode*): EmitCode = {
-          assert(unify(FastSeq(), args.map(_.pt.virtualType), rpt.virtualType))
-          impl(r, rpt, seed, args.toArray)
+    def registerSeededWithMissingness(
+      name: String,
+      valueParameterTypes: Array[Type],
+      returnType: Type,
+      calculateReturnType: (Type, Seq[PType]) => PType
+    )(
+      impl: (EmitCodeBuilder, EmitRegion, PType, Long, Array[() => IEmitCode]) => IEmitCode
+    ) {
+      IRFunctionRegistry.addJVMFunction(
+        new SeededMissingnessAwareJVMFunction(name, valueParameterTypes, returnType, calculateReturnType) {
+          val isDeterministic: Boolean = false
+          def applySeededI(seed: Long, cb: EmitCodeBuilder, r: EmitRegion, returnPType: PType, args: (PType, () => IEmitCode)*): IEmitCode = {
+            assert(unify(FastSeq(), args.map(_._1.virtualType), returnPType.virtualType))
+            impl(cb, r, returnPType, seed, args.map(a => a._2).toArray)
+          }
         }
-      })
+      )
     }
 
-    def registerSeededWithMissingness(mname: String, mt1: Type, rType: Type, pt: (Type, PType) => PType)(impl: (EmitRegion, PType, Long, EmitCode) => EmitCode): Unit =
-      registerSeededWithMissingness(mname, Array(mt1), rType, unwrappedApply(pt)) { case (r, rt, seed, Array(a1)) => impl(r, rt, seed, a1) }
+    def registerSeededWithMissingness(
+      name: String,
+      valueParameterType: Type,
+      returnType: Type,
+      calculateReturnType: (Type, PType) => PType
+    )(
+      impl: (EmitCodeBuilder, EmitRegion, PType, Long, () => IEmitCode) => IEmitCode
+    ): Unit =
+      registerSeededWithMissingness(name, Array(valueParameterType), returnType, unwrappedApply(calculateReturnType)) {
+        case (cb, r, rt, seed, Array(a1)) => impl(cb, r, rt, seed, a1)
+      }
 
     def registerAll() {
-      registerSeededWithMissingness("incr_s", TBoolean, TBoolean, null) { case (mb, rt,  _, l) =>
-        EmitCode(Code(Code.invokeScalaObject0[Unit](outer.getClass, "incr"), l.setup),
-          l.m,
-          PCode(rt, l.v))
+      registerSeededWithMissingness("incr_s", TBoolean, TBoolean, null) { case (cb, mb, rt,  _, l) =>
+        cb += Code.invokeScalaObject0[Unit](outer.getClass, "incr")
+        l()
       }
 
-      registerSeededWithMissingness("incr_m", TBoolean, TBoolean, null) { case (mb, rt, _, l) =>
-        EmitCode(l.setup,
-          Code(Code.invokeScalaObject0[Unit](outer.getClass, "incr"), l.m),
-          PCode(rt, l.v))
-      }
-
-      registerSeededWithMissingness("incr_v", TBoolean, TBoolean, null) { case (mb, rt, _, l) =>
-        EmitCode(l.setup,
-          l.m,
-          PCode(rt, Code(Code.invokeScalaObject0[Unit](outer.getClass, "incr"), l.v)))
+      registerSeededWithMissingness("incr_v", TBoolean, TBoolean, null) { case (cb, mb, rt, _, l) =>
+        l().map(cb) { pc =>
+          cb += Code.invokeScalaObject0[Unit](outer.getClass, "incr")
+          pc
+        }
       }
     }
   }
@@ -84,8 +88,8 @@ object IRSuite {
 class IRSuite extends HailSuite {
   implicit val execStrats = ExecStrategy.nonLowering
 
-  def assertPType(node: IR, expected: PType, env: Env[PType] = Env.empty) {
-    InferPType(node, env)
+  def assertPType(node: IR, expected: PType) {
+    InferPType(node)
     assert(node.pType == expected)
   }
 
@@ -126,20 +130,6 @@ class IRSuite extends HailSuite {
     assertPType(Str("HELLO WORLD"), PCanonicalString(true))
     assertPType(True(), PBoolean(true))
     assertPType(False(), PBoolean(true))
-  }
-
-  @Test def testRefInferPtype() {
-    val env = Env[PType](
-      "1" -> PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(false), true), false), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(false), PCanonicalString(false), false)),
-      "2" -> PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(true), true), true), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(true), PCanonicalString(true), true))
-    )
-
-    var ir = Ref("1", TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString)))
-
-    assertPType(ir, PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(false), true), false), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(false), PCanonicalString(false), false)), env)
-
-    ir = Ref("2", TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString)))
-    assertPType(ir, PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(true), true), true), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(true), PCanonicalString(true), true)), env)
   }
 
   // FIXME Void() doesn't work because we can't handle a void type in a tuple
@@ -339,7 +329,7 @@ class IRSuite extends HailSuite {
 
     // should not be able to infer physical type twice on one IR (i32na)
     node = ApplyUnaryPrimOp(Negate(), i32na)
-    intercept[RuntimeException](InferPType(node, Env.empty))
+    intercept[RuntimeException](InferPType(node))
 
     node = ApplyUnaryPrimOp(Negate(), I64(5))
     assertPType(node, PInt64(true))
@@ -853,26 +843,25 @@ class IRSuite extends HailSuite {
     var ir = MakeArray(FastSeq(), TArray(TInt32))
     assertPType(ir, PCanonicalArray(PInt32(true), true))
 
-    var ref = FastSeq(
-      Ref("1", TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString)) )
-    )
+    val eltType = TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString))
 
-    var env = Env[PType](
-      "1" -> PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(false), true), false), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(false), PCanonicalString(false), false)),
-      "2" -> PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(true), true), true), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(true), PCanonicalString(true), true))
-    )
+    val pTypes = Array[PType](
+      PCanonicalStruct(true,
+        "a" -> PCanonicalArray(PCanonicalArray(PInt32(false), true), false),
+        "b" -> PInt32(true),
+        "c" -> PCanonicalDict(PInt32(false), PCanonicalString(false), false)),
+      PCanonicalStruct(true,
+        "a" -> PCanonicalArray(PCanonicalArray(PInt32(true), true), true),
+        "b" -> PInt32(true),
+        "c" -> PCanonicalDict(PInt32(true), PCanonicalString(true), true)))
 
-    ir = MakeArray(ref, TArray(TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString))))
+    val unified = PCanonicalStruct(true,
+      "a" -> PCanonicalArray(PCanonicalArray(PInt32(false), true), false),
+      "b" -> PInt32(true),
+      "c" -> PCanonicalDict(PInt32(false), PCanonicalString(false), false))
 
-    assertPType(ir, PCanonicalArray(PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(false), true), false), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(false), PCanonicalString(false), false)), true), env)
-
-    ref = FastSeq(
-      Ref("1", TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString)) ),
-      Ref("2", TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString)) )
-    )
-
-    ir = MakeArray(ref, TArray(TStruct("a" -> TArray(TArray(TInt32)), "b" -> TInt32, "c" -> TDict(TInt32, TString))))
-    assertPType(ir, PCanonicalArray(PCanonicalStruct(true, "a" -> PCanonicalArray(PCanonicalArray(PInt32(false), true), false), "b" -> PInt32(true), "c" -> PCanonicalDict(PInt32(false), PCanonicalString(false), false)), true), env)
+    assertPType(MakeArray(Array(In(0, pTypes(0))), TArray(eltType)), PCanonicalArray(pTypes(0), true))
+    assertPType(MakeArray(Array(In(0, pTypes(0)), In(1, pTypes(1))), TArray(eltType)), PCanonicalArray(pTypes(0), true))
   }
 
   @Test def testMakeArrayInferPType() {
@@ -889,571 +878,571 @@ class IRSuite extends HailSuite {
 
   @Test def testGetNestedElementPTypesI32() {
     var types = Seq(PInt32(true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PInt32(true))
 
     types = Seq(PInt32(false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PInt32(false))
 
     types = Seq(PInt32(false), PInt32(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PInt32(false))
 
     types = Seq(PInt32(true), PInt32(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PInt32(true))
   }
 
   @Test def testGetNestedElementPTypesI64() {
     var types = Seq(PInt64(true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PInt64(true))
 
     types = Seq(PInt64(false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PInt64(false))
 
     types = Seq(PInt64(false), PInt64(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PInt64(false))
 
     types = Seq(PInt64(true), PInt64(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PInt64(true))
   }
 
   @Test def testGetNestedElementPFloat32() {
     var types = Seq(PFloat32(true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat32(true))
 
     types = Seq(PFloat32(false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat32(false))
 
     types = Seq(PFloat32(false), PFloat32(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat32(false))
 
     types = Seq(PFloat32(true), PFloat32(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat32(true))
   }
 
   @Test def testGetNestedElementPFloat64() {
     var types = Seq(PFloat64(true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat64(true))
 
     types = Seq(PFloat64(false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat64(false))
 
     types = Seq(PFloat64(false), PFloat64(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat64(false))
 
     types = Seq(PFloat64(true), PFloat64(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PFloat64(true))
   }
 
   @Test def testGetNestedElementPCanonicalString() {
     var types = Seq(PCanonicalString(true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalString(true))
 
     types = Seq(PCanonicalString(false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalString(false))
 
     types = Seq(PCanonicalString(false), PCanonicalString(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalString(false))
 
     types = Seq(PCanonicalString(true), PCanonicalString(true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalString(true))
   }
 
   @Test def testGetNestedPCanonicalArray() {
     var types = Seq(PCanonicalArray(PInt32(true), true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PInt32(true), true))
 
     types = Seq(PCanonicalArray(PInt32(true), false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PInt32(true), false))
 
     types = Seq(PCanonicalArray(PInt32(false), true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PInt32(false), true))
 
     types = Seq(PCanonicalArray(PInt32(false), false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PInt32(false), false))
 
     types = Seq(
       PCanonicalArray(PInt32(true), true),
       PCanonicalArray(PInt32(true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PInt32(true), true))
 
     types = Seq(
       PCanonicalArray(PInt32(false), true),
       PCanonicalArray(PInt32(true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PInt32(false), true))
 
     types = Seq(
       PCanonicalArray(PInt32(false), true),
       PCanonicalArray(PInt32(true), false)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PInt32(false), false))
 
     types = Seq(
       PCanonicalArray(PCanonicalArray(PInt32(true), true), true),
       PCanonicalArray(PCanonicalArray(PInt32(true), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PCanonicalArray(PInt32(true), true), true))
 
     types = Seq(
       PCanonicalArray(PCanonicalArray(PInt32(true), true), true),
       PCanonicalArray(PCanonicalArray(PInt32(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PCanonicalArray(PInt32(false), true), true))
 
     types = Seq(
       PCanonicalArray(PCanonicalArray(PInt32(true), false), true),
       PCanonicalArray(PCanonicalArray(PInt32(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PCanonicalArray(PInt32(false), false), true))
 
     types = Seq(
       PCanonicalArray(PCanonicalArray(PInt32(true), false), false),
       PCanonicalArray(PCanonicalArray(PInt32(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalArray(PCanonicalArray(PInt32(false), false), false))
   }
 
   @Test def testGetNestedPStream() {
     var types = Seq(PCanonicalStream(PInt32(true), true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PInt32(true), true))
 
     types = Seq(PCanonicalStream(PInt32(true), false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PInt32(true), false))
 
     types = Seq(PCanonicalStream(PInt32(false), true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PInt32(false), true))
 
     types = Seq(PCanonicalStream(PInt32(false), false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PInt32(false), false))
 
     types = Seq(
       PCanonicalStream(PInt32(true), true),
       PCanonicalStream(PInt32(true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PInt32(true), true))
 
     types = Seq(
       PCanonicalStream(PInt32(false), true),
       PCanonicalStream(PInt32(true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PInt32(false), true))
 
     types = Seq(
       PCanonicalStream(PInt32(false), true),
       PCanonicalStream(PInt32(true), false)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PInt32(false), false))
 
     types = Seq(
       PCanonicalStream(PCanonicalStream(PInt32(true), true), true),
       PCanonicalStream(PCanonicalStream(PInt32(true), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PCanonicalStream(PInt32(true), true), true))
 
     types = Seq(
       PCanonicalStream(PCanonicalStream(PInt32(true), true), true),
       PCanonicalStream(PCanonicalStream(PInt32(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PCanonicalStream(PInt32(false), true), true))
 
     types = Seq(
       PCanonicalStream(PCanonicalStream(PInt32(true), false), true),
       PCanonicalStream(PCanonicalStream(PInt32(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PCanonicalStream(PInt32(false), false), true))
 
     types = Seq(
       PCanonicalStream(PCanonicalStream(PInt32(true), false), false),
       PCanonicalStream(PCanonicalStream(PInt32(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStream(PCanonicalStream(PInt32(false), false), false))
   }
 
   @Test def testGetNestedElementPCanonicalDict() {
     var types = Seq(PCanonicalDict(PInt32(true), PCanonicalString(true), true))
-    var res  = InferPType.getNestedElementPTypes(types)
+    var res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalString(true), true))
 
     types = Seq(PCanonicalDict(PInt32(false), PCanonicalString(true), true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(false), PCanonicalString(true), true))
 
     types = Seq(PCanonicalDict(PInt32(true), PCanonicalString(false), true))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalString(false), true))
 
     types = Seq(PCanonicalDict(PInt32(true), PCanonicalString(true), false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalString(true), false))
 
     types = Seq(PCanonicalDict(PInt32(false), PCanonicalString(false), false))
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(false), PCanonicalString(false), false))
 
     types = Seq(
       PCanonicalDict(PInt32(true), PCanonicalString(true), true),
       PCanonicalDict(PInt32(true), PCanonicalString(true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalString(true), true))
 
     types = Seq(
       PCanonicalDict(PInt32(true), PCanonicalString(true), false),
       PCanonicalDict(PInt32(true), PCanonicalString(true), false)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalString(true), false))
 
     types = Seq(
       PCanonicalDict(PInt32(false), PCanonicalString(true), true),
       PCanonicalDict(PInt32(true), PCanonicalString(true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(false), PCanonicalString(true), true))
 
     types = Seq(
       PCanonicalDict(PInt32(false), PCanonicalString(true), true),
       PCanonicalDict(PInt32(true), PCanonicalString(false), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(false), PCanonicalString(false), true))
 
     types = Seq(
       PCanonicalDict(PInt32(false), PCanonicalString(true), false),
       PCanonicalDict(PInt32(true), PCanonicalString(false), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(false), PCanonicalString(false), false))
 
     types = Seq(
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(true), PCanonicalString(true), true), true),
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(true), PCanonicalString(true), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(true), PCanonicalString(true), true), true))
 
     types = Seq(
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(true), true), true),
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(true), PCanonicalString(true), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(true), true), true))
 
     types = Seq(
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(true), true), true),
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(true), PCanonicalString(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(false), true), true))
 
     types = Seq(
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(true), true), true),
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(true), PCanonicalString(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(false), true), true))
 
     types = Seq(
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(true), false), true),
       PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(true), PCanonicalString(false), true), true)
     )
-    res  = InferPType.getNestedElementPTypes(types)
+    res  = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalDict(PInt32(true), PCanonicalDict(PInt32(false), PCanonicalString(false), false), true))
   }
 
   @Test def testGetNestedElementPCanonicalStruct() {
     var types = Seq(PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(true)))
-    var res = InferPType.getNestedElementPTypes(types)
+    var res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(true)))
 
     types = Seq(PCanonicalStruct(false, "a" -> PInt32(true), "b" -> PInt32(true)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(false, "a" -> PInt32(true), "b" -> PInt32(true)))
 
     types = Seq(PCanonicalStruct(true, "a" -> PInt32(false), "b" -> PInt32(true)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PInt32(false), "b" -> PInt32(true)))
 
     types = Seq(PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(false)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(false)))
 
     types = Seq(PCanonicalStruct(false, "a" -> PInt32(false), "b" -> PInt32(false)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(false, "a" -> PInt32(false), "b" -> PInt32(false)))
 
     types = Seq(
       PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(true)),
       PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(true))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(true)))
 
     types = Seq(
       PCanonicalStruct(true, "a" -> PInt32(true), "b" -> PInt32(true)),
       PCanonicalStruct(true, "a" -> PInt32(false), "b" -> PInt32(false))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PInt32(false), "b" -> PInt32(false)))
 
     types = Seq(
       PCanonicalStruct(false, "a" -> PInt32(true), "b" -> PInt32(true)),
       PCanonicalStruct(true, "a" -> PInt32(false), "b" -> PInt32(false))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(false, "a" -> PInt32(false), "b" -> PInt32(false)))
 
     types = Seq(
       PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(true), "d" -> PInt32(true)),"b" -> PInt32(true))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(true), "d" -> PInt32(true)), "b" -> PInt32(true)))
 
     types = Seq(
       PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(false), "d" -> PInt32(true)),"b" -> PInt32(true))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(false), "d" -> PInt32(true)), "b" -> PInt32(true)))
 
     types = Seq(
       PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(false), "d" -> PInt32(false)), "b" -> PInt32(true)),
       PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(true), "d" -> PInt32(true)), "b" -> PInt32(true)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(false), "d" -> PInt32(false)), "b" -> PInt32(true)))
 
     types = Seq(
       PCanonicalStruct(true, "a" -> PCanonicalStruct(false, "c" -> PInt32(false), "d" -> PInt32(false)), "b" -> PInt32(true)),
       PCanonicalStruct(true, "a" -> PCanonicalStruct(true, "c" -> PInt32(true), "d" -> PInt32(true)), "b" -> PInt32(true)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalStruct(true, "a" -> PCanonicalStruct(false, "c" -> PInt32(false), "d" -> PInt32(false)), "b" -> PInt32(true)))
   }
 
   @Test def testGetNestedElementPCanonicalTuple() {
     var types = Seq(PCanonicalTuple(true, PInt32(true)))
-    var res = InferPType.getNestedElementPTypes(types)
+    var res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(true, PInt32(true)))
 
     types = Seq(PCanonicalTuple(false, PInt32(true)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(false, PInt32(true)))
 
     types = Seq(PCanonicalTuple(true, PInt32(false)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(true, PInt32(false)))
 
     types = Seq(PCanonicalTuple(false, PInt32(false)))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(false, PInt32(false)))
 
     types = Seq(
       PCanonicalTuple(true, PInt32(true)),
       PCanonicalTuple(true, PInt32(true))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(true, PInt32(true)))
 
     types = Seq(
       PCanonicalTuple(true, PInt32(true)),
       PCanonicalTuple(false, PInt32(true))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(false, PInt32(true)))
 
     types = Seq(
       PCanonicalTuple(true, PInt32(false)),
       PCanonicalTuple(false, PInt32(true))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(false, PInt32(false)))
 
     types = Seq(
       PCanonicalTuple(true, PCanonicalTuple(true, PInt32(true))),
       PCanonicalTuple(true, PCanonicalTuple(true, PInt32(false)))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(true, PCanonicalTuple(true, PInt32(false))))
 
     types = Seq(
       PCanonicalTuple(true, PCanonicalTuple(false, PInt32(true))),
       PCanonicalTuple(true, PCanonicalTuple(true, PInt32(false)))
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalTuple(true, PCanonicalTuple(false, PInt32(false))))
   }
 
   @Test def testGetNestedElementPCanonicalSet() {
     var types = Seq(PCanonicalSet(PInt32(true), true))
-    var res = InferPType.getNestedElementPTypes(types)
+    var res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PInt32(true), true))
 
     types = Seq(PCanonicalSet(PInt32(true), false))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PInt32(true), false))
 
     types = Seq(PCanonicalSet(PInt32(false), true))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PInt32(false), true))
 
     types = Seq(PCanonicalSet(PInt32(false), false))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PInt32(false), false))
 
     types = Seq(
       PCanonicalSet(PInt32(true), true),
       PCanonicalSet(PInt32(true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PInt32(true), true))
 
     types = Seq(
       PCanonicalSet(PInt32(false), true),
       PCanonicalSet(PInt32(true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PInt32(false), true))
 
     types = Seq(
       PCanonicalSet(PInt32(false), true),
       PCanonicalSet(PInt32(true), false)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PInt32(false), false))
 
     types = Seq(
       PCanonicalSet(PCanonicalSet(PInt32(true), true), true),
       PCanonicalSet(PCanonicalSet(PInt32(true), true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PCanonicalSet(PInt32(true), true), true))
 
     types = Seq(
       PCanonicalSet(PCanonicalSet(PInt32(true), true), true),
       PCanonicalSet(PCanonicalSet(PInt32(false), true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PCanonicalSet(PInt32(false), true), true))
 
     types = Seq(
       PCanonicalSet(PCanonicalSet(PInt32(true), false), true),
       PCanonicalSet(PCanonicalSet(PInt32(false), true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalSet(PCanonicalSet(PInt32(false), false), true))
   }
 
   @Test def testGetNestedElementPCanonicalInterval() {
     var types = Seq(PCanonicalInterval(PInt32(true), true))
-    var res = InferPType.getNestedElementPTypes(types)
+    var res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(true), true))
 
     types = Seq(PCanonicalInterval(PInt32(true), false))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(true), false))
 
     types = Seq(PCanonicalInterval(PInt32(false), true))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(false), true))
 
     types = Seq(PCanonicalInterval(PInt32(false), false))
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(false), false))
 
     types = Seq(
       PCanonicalInterval(PInt32(true), true),
       PCanonicalInterval(PInt32(true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(true), true))
 
     types = Seq(
       PCanonicalInterval(PInt32(false), true),
       PCanonicalInterval(PInt32(true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(false), true))
 
     types = Seq(
       PCanonicalInterval(PInt32(true), true),
       PCanonicalInterval(PInt32(true), false)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(true), false))
 
     types = Seq(
       PCanonicalInterval(PInt32(false), true),
       PCanonicalInterval(PInt32(true), false)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PInt32(false), false))
 
     types = Seq(
       PCanonicalInterval(PCanonicalInterval(PInt32(true), true), true),
       PCanonicalInterval(PCanonicalInterval(PInt32(true), true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PCanonicalInterval(PInt32(true), true), true))
 
     types = Seq(
       PCanonicalInterval(PCanonicalInterval(PInt32(true), false), true),
       PCanonicalInterval(PCanonicalInterval(PInt32(true), true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PCanonicalInterval(PInt32(true), false), true))
 
     types = Seq(
       PCanonicalInterval(PCanonicalInterval(PInt32(false), true), true),
       PCanonicalInterval(PCanonicalInterval(PInt32(true), true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PCanonicalInterval(PInt32(false), true), true))
 
     types = Seq(
       PCanonicalInterval(PCanonicalInterval(PInt32(true), false), true),
       PCanonicalInterval(PCanonicalInterval(PInt32(false), true), true)
     )
-    res = InferPType.getNestedElementPTypes(types)
+    res = InferPType.getCompatiblePType(types)
     assert(res == PCanonicalInterval(PCanonicalInterval(PInt32(false), false), true))
   }
 
@@ -1529,6 +1518,17 @@ class IRSuite extends HailSuite {
     assertEvalsTo(GetTupleElement(na, 0), null)
   }
 
+    @Test def testLetBoundPrunedTuple(): Unit = {
+    implicit val execStrats = ExecStrategy.unoptimizedCompileOnly
+    val t2 = MakeTuple(FastSeq((2, I32(5))))
+
+    val letBoundTuple = bindIR(t2) { tupleRef =>
+      GetTupleElement(tupleRef, 2)
+    }
+
+    assertEvalsTo(letBoundTuple, 5)
+  }
+
   @Test def testArrayRef() {
     assertEvalsTo(ArrayRef(MakeArray(FastIndexedSeq(I32(5), NA(TInt32)), TArray(TInt32)), I32(0)), 5)
     assertEvalsTo(ArrayRef(MakeArray(FastIndexedSeq(I32(5), NA(TInt32)), TArray(TInt32)), I32(1)), null)
@@ -1563,11 +1563,13 @@ class IRSuite extends HailSuite {
     val lit6 = ToStream(Literal(TArray(TFloat64), FastIndexedSeq(0d, -1d, 2.5d, -3d, 4d, null)))
     val range6dup = StreamRange(0, 6, 1)
 
-    def zipToTuple(behavior: ArrayZipBehavior, irs: IR*): IR = ToArray(StreamZip(
+    def zip(behavior: ArrayZipBehavior, irs: IR*): IR = StreamZip(
       irs.toFastIndexedSeq,
       irs.indices.map(_.toString),
       MakeTuple.ordered(irs.zipWithIndex.map { case (ir, i) => Ref(i.toString, ir.typ.asInstanceOf[TStream].elementType) }),
-      behavior))
+      behavior
+    )
+    def zipToTuple(behavior: ArrayZipBehavior, irs: IR*): IR = ToArray(zip(behavior, irs: _*))
 
     for (b <- Array(ArrayZipBehavior.TakeMinLength, ArrayZipBehavior.ExtendNA)) {
       assertEvalSame(zipToTuple(b, range12), FastIndexedSeq())
@@ -1586,6 +1588,11 @@ class IRSuite extends HailSuite {
       assertEvalSame(zipToTuple(b, range12), FastIndexedSeq())
       assertEvalSame(zipToTuple(b, empty), FastIndexedSeq())
     }
+
+    assertEvalsTo(StreamLen(zip(ArrayZipBehavior.TakeMinLength, range6, range8)), 6)
+    assertEvalsTo(StreamLen(zip(ArrayZipBehavior.ExtendNA, range6, range8)), 8)
+    assertEvalsTo(StreamLen(zip(ArrayZipBehavior.AssertSameLength, range8, range8)), 8)
+    assertEvalsTo(StreamLen(zip(ArrayZipBehavior.AssumeSameLength, range8, range8)), 8)
 
     // https://github.com/hail-is/hail/issues/8359
     is.hail.TestUtils.assertThrows[HailException](zipToTuple(ArrayZipBehavior.AssertSameLength, range6, range8): IR, "zip: length mismatch": String)
@@ -1752,6 +1759,29 @@ class IRSuite extends HailSuite {
     assertEvalsTo(LowerBoundOnOrderedCollection(dwoutna, NA(TInt32), onKey = true), 2)
   }
 
+  @Test def testStreamLen(): Unit = {
+    val a = StreamLen(MakeStream(Seq(I32(3), NA(TInt32), I32(7)), TStream(TInt32)))
+    assertEvalsTo(a, 3)
+
+    val missing = StreamLen(NA(TStream(TInt64)))
+    assertEvalsTo(missing, null)
+
+    val range1 = StreamLen(StreamRange(1, 11, 1))
+    assertEvalsTo(range1, 10)
+    val range2 = StreamLen(StreamRange(20, 40, 2))
+    assertEvalsTo(range2, 10)
+    val range3 = StreamLen(StreamRange(-10, 5, 1))
+    assertEvalsTo(range3, 15)
+    val mappedRange = StreamLen(mapIR(StreamRange(2, 7, 1)) { ref => maxIR(ref, 3)})
+    assertEvalsTo(mappedRange, 5)
+
+    val streamOfStreams = mapIR(rangeIR(5)) { elementRef => rangeIR(elementRef) }
+    assertEvalsTo(StreamLen(flatMapIR(streamOfStreams){ x => x}), 4 + 3 + 2 + 1)
+
+    val filteredRange = StreamLen(StreamFilter(rangeIR(12), "x", irToPrimitiveIR(Ref("x", TInt32)) < 5))
+    assertEvalsTo(filteredRange, 5)
+  }
+
   @Test def testStreamTake() {
     val naa = NA(TStream(TInt32))
     val a = MakeStream(Seq(I32(3), NA(TInt32), I32(7)), TStream(TInt32))
@@ -1762,6 +1792,7 @@ class IRSuite extends HailSuite {
     assertEvalsTo(ToArray(StreamTake(a, I32(2))), FastIndexedSeq(3, null))
     assertEvalsTo(ToArray(StreamTake(a, I32(5))), FastIndexedSeq(3, null, 7))
     assertFatal(ToArray(StreamTake(a, I32(-1))), "StreamTake: negative length")
+    assertEvalsTo(StreamLen(StreamTake(a, 2)), 2)
   }
 
   @Test def testStreamDrop() {
@@ -1774,6 +1805,8 @@ class IRSuite extends HailSuite {
     assertEvalsTo(ToArray(StreamDrop(a, I32(2))), FastIndexedSeq(7))
     assertEvalsTo(ToArray(StreamDrop(a, I32(5))), FastIndexedSeq())
     assertFatal(ToArray(StreamDrop(a, I32(-1))), "StreamDrop: negative num")
+
+    assertEvalsTo(StreamLen(StreamDrop(a, 1)), 2)
   }
 
   def toNestedArray(stream: IR): IR = {
@@ -1793,7 +1826,12 @@ class IRSuite extends HailSuite {
     assertEvalsTo(toNestedArray(StreamGrouped(a, I32(5))), FastIndexedSeq(FastIndexedSeq(3, null, 7)))
     assertFatal(toNestedArray(StreamGrouped(a, I32(0))), "StreamGrouped: nonpositive size")
 
-    val r = StreamRange(I32(0), I32(10), I32(1))
+    val r = rangeIR(10)
+
+    // test when inner streams are unused
+    assertEvalsTo(streamForceCount(StreamGrouped(rangeIR(10), 2)), 5)
+
+    assertEvalsTo(StreamLen(StreamGrouped(r, 2)), 5)
 
     def takeFromEach(stream: IR, take: IR, fromEach: IR): IR = {
       val innerType = coerce[TStream](stream.typ)
@@ -1815,6 +1853,8 @@ class IRSuite extends HailSuite {
       Seq(
         MakeStruct(Seq("a" -> I32(3), "b" -> I32(1))),
         MakeStruct(Seq("a" -> I32(3), "b" -> I32(3))),
+        MakeStruct(Seq("a" -> NA(TInt32), "b" -> I32(-1))),
+        MakeStruct(Seq("a" -> NA(TInt32), "b" -> I32(-2))),
         MakeStruct(Seq("a" -> I32(1), "b" -> I32(2))),
         MakeStruct(Seq("a" -> I32(1), "b" -> I32(4))),
         MakeStruct(Seq("a" -> I32(1), "b" -> I32(6))),
@@ -1825,9 +1865,14 @@ class IRSuite extends HailSuite {
     assertEvalsTo(toNestedArray(group(naa)), null)
     assertEvalsTo(toNestedArray(group(a)),
                   FastIndexedSeq(FastIndexedSeq(Row(3, 1), Row(3, 3)),
+                                 FastIndexedSeq(Row(null, -1)),
+                                 FastIndexedSeq(Row(null, -2)),
                                  FastIndexedSeq(Row(1, 2), Row(1, 4), Row(1, 6)),
                                  FastIndexedSeq(Row(4, null))))
     assertEvalsTo(toNestedArray(group(MakeStream(Seq(), TStream(structType)))), FastIndexedSeq())
+
+    // test when inner streams are unused
+    assertEvalsTo(streamForceCount(group(a)), 5)
 
     def takeFromEach(stream: IR, take: IR): IR = {
       val innerType = coerce[TStream](stream.typ)
@@ -1836,10 +1881,14 @@ class IRSuite extends HailSuite {
 
     assertEvalsTo(toNestedArray(takeFromEach(a, I32(1))),
                   FastIndexedSeq(FastIndexedSeq(Row(3, 1)),
+                                 FastIndexedSeq(Row(null, -1)),
+                                 FastIndexedSeq(Row(null, -2)),
                                  FastIndexedSeq(Row(1, 2)),
                                  FastIndexedSeq(Row(4, null))))
     assertEvalsTo(toNestedArray(takeFromEach(a, I32(2))),
                   FastIndexedSeq(FastIndexedSeq(Row(3, 1), Row(3, 3)),
+                                 FastIndexedSeq(Row(null, -1)),
+                                 FastIndexedSeq(Row(null, -2)),
                                  FastIndexedSeq(Row(1, 2), Row(1, 4)),
                                  FastIndexedSeq(Row(4, null))))
   }
@@ -2253,49 +2302,242 @@ class IRSuite extends HailSuite {
       FastIndexedSeq(FastIndexedSeq(4.0)))
   }
 
-  @Test def testLeftJoinRightDistinct() {
+  private def join(left: IR, right: IR, lKeys: IndexedSeq[String], rKeys: IndexedSeq[String], rightDistinct: Boolean, joinType: String): IR = {
+    val joinF = { (l: IR, r: IR) =>
+      def getL(field: String): IR = GetField(Ref("_left", l.typ), field)
+      def getR(field: String): IR = GetField(Ref("_right", r.typ), field)
+      Let("_right", r,
+          Let("_left", l,
+              MakeStruct(
+                (lKeys, rKeys).zipped.map { case (lk, rk) => lk -> Coalesce(Seq(getL(lk), getR(rk))) }
+                  ++ coerce[TStruct](l.typ).fields.filter(f => !lKeys.contains(f.name)).map { f =>
+                  f.name -> GetField(Ref("_left", l.typ), f.name)
+                } ++ coerce[TStruct](r.typ).fields.filter(f => !rKeys.contains(f.name)).map { f =>
+                  f.name -> GetField(Ref("_right", r.typ), f.name)
+                })))
+    }
+    val mkStream = if (rightDistinct) StreamJoinRightDistinct.apply _ else StreamJoin.apply _
+    ToArray(mkStream(left, right, lKeys, rKeys, "_l", "_r",
+                     joinF(Ref("_l", coerce[TStream](left.typ).elementType), Ref("_r", coerce[TStream](right.typ).elementType)),
+                     joinType))
+  }
+
+  @Test def testJoinRightDistinct() {
     implicit val execStrats = ExecStrategy.javaOnly
 
-    def join(left: IR, right: IR, keys: IndexedSeq[String]): IR = {
-      val compF = { (l: IR, r: IR) =>
-        ApplyComparisonOp(Compare(coerce[TStruct](l.typ).select(keys)._1), SelectFields(l, keys), SelectFields(r, keys))
-      }
-      val joinF = { (l: IR, r: IR) =>
-        Let("_right", r, InsertFields(l, coerce[TStruct](r.typ).fields.filter(f => !keys.contains(f.name)).map { f =>
-          f.name -> GetField(Ref("_right", r.typ), f.name)
-        }))
-      }
-      ToArray(StreamLeftJoinDistinct(left, right, "_l", "_r",
-        compF(Ref("_l", coerce[TStream](left.typ).elementType), Ref("_r", coerce[TStream](right.typ).elementType)),
-        joinF(Ref("_l", coerce[TStream](left.typ).elementType), Ref("_r", coerce[TStream](right.typ).elementType))))
-    }
-
-    def joinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer]): IR = {
+    def joinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer], joinType: String): IR = {
       join(
-        MakeStream.unify(left.zipWithIndex.map { case (n, idx) => MakeStruct(FastIndexedSeq("k1" -> (if (n == null) NA(TInt32) else I32(n)), "k2" -> Str("x"), "a" -> I64(idx))) }),
-        MakeStream.unify(right.zipWithIndex.map { case (n, idx) => MakeStruct(FastIndexedSeq("b" -> I32(idx), "k2" -> Str("x"), "k1" -> (if (n == null) NA(TInt32) else I32(n)), "c" -> Str("foo"))) }),
-        FastIndexedSeq("k1", "k2"))
+        MakeStream.unify(left.zipWithIndex.map { case (n, idx) => MakeStruct(FastIndexedSeq("lk1" -> (if (n == null) NA(TInt32) else I32(n)), "lk2" -> Str("x"), "a" -> I64(idx))) }),
+        MakeStream.unify(right.zipWithIndex.map { case (n, idx) => MakeStruct(FastIndexedSeq("b" -> I32(idx), "rk2" -> Str("x"), "rk1" -> (if (n == null) NA(TInt32) else I32(n)), "c" -> Str("foo"))) }),
+        FastIndexedSeq("lk1", "lk2"),
+        FastIndexedSeq("rk1", "rk2"),
+        rightDistinct = true,
+        joinType)
     }
+    def leftJoinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer]): IR =
+      joinRows(left, right, "left")
+    def outerJoinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer]): IR =
+      joinRows(left, right, "outer")
 
-    assertEvalsTo(joinRows(Array[Integer](0, null), Array[Integer](1, null)), FastIndexedSeq(
+    assertEvalsTo(
+      join(
+        NA(TStream(TStruct("k1" -> TInt32, "k2" -> TString, "a" -> TInt64))),
+        MakeStream.unify(Seq(MakeStruct(FastIndexedSeq("b" -> I32(0), "k2" -> Str("x"), "k1" -> I32(3), "c" -> Str("foo"))))),
+        FastIndexedSeq("k1", "k2"),
+        FastIndexedSeq("k1", "k2"),
+        true,
+        "left"),
+      null)
+
+    assertEvalsTo(
+      join(
+        MakeStream.unify(Seq(MakeStruct(FastIndexedSeq("k1" -> I32(0), "k2" -> Str("x"), "a" -> I64(3))))),
+        NA(TStream(TStruct("b" -> TInt32, "k2" -> TString, "k1" -> TInt32, "c" -> TString))),
+        FastIndexedSeq("k1", "k2"),
+        FastIndexedSeq("k1", "k2"),
+        true,
+        "left"),
+      null)
+
+    assertEvalsTo(leftJoinRows(Array[Integer](0, null), Array[Integer](1, null)), FastIndexedSeq(
       Row(0, "x", 0L, null, null),
-      Row(null, "x", 1L, 1, "foo")))
+      Row(null, "x", 1L, null, null)))
 
-    assertEvalsTo(joinRows(Array[Integer](0, 1, 2), Array[Integer](1)), FastIndexedSeq(
+    assertEvalsTo(outerJoinRows(Array[Integer](0, null), Array[Integer](1, null)), FastIndexedSeq(
+      Row(0, "x", 0L, null, null),
+      Row(1, "x", null, 0, "foo"),
+      Row(null, "x", 1L, null, null),
+      Row(null, "x", null, 1, "foo")))
+
+    assertEvalsTo(leftJoinRows(Array[Integer](0, 1, 2), Array[Integer](1)), FastIndexedSeq(
       Row(0, "x", 0L, null, null),
       Row(1, "x", 1L, 0, "foo"),
       Row(2, "x", 2L, null, null)))
 
-    assertEvalsTo(joinRows(Array[Integer](0, 1, 2), Array[Integer](-1, 0, 0, 1, 1, 2, 2, 3)), FastIndexedSeq(
+    assertEvalsTo(leftJoinRows(Array[Integer](0, 1, 2), Array[Integer](-1, 0, 0, 1, 1, 2, 2, 3)), FastIndexedSeq(
       Row(0, "x", 0L, 1, "foo"),
       Row(1, "x", 1L, 3, "foo"),
       Row(2, "x", 2L, 5, "foo")))
 
-    assertEvalsTo(joinRows(Array[Integer](0, 1, 1, 2), Array[Integer](-1, 0, 0, 1, 1, 2, 2, 3)), FastIndexedSeq(
+    assertEvalsTo(leftJoinRows(Array[Integer](0, 1, 1, 2), Array[Integer](-1, 0, 0, 1, 1, 2, 2, 3)), FastIndexedSeq(
       Row(0, "x", 0L, 1, "foo"),
       Row(1, "x", 1L, 3, "foo"),
       Row(1, "x", 2L, 3, "foo"),
       Row(2, "x", 3L, 5, "foo")))
+  }
+
+  @Test def testStreamJoin() {
+    implicit val execStrats = ExecStrategy.javaOnly
+
+    def joinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer], joinType: String): IR = {
+      join(
+        MakeStream.unify(left.zipWithIndex.map { case (n, idx) => MakeStruct(FastIndexedSeq("lk" -> (if (n == null) NA(TInt32) else I32(n)), "l" -> I32(idx))) }),
+        MakeStream.unify(right.zipWithIndex.map { case (n, idx) => MakeStruct(FastIndexedSeq("rk" -> (if (n == null) NA(TInt32) else I32(n)), "r" -> I32(idx))) }),
+        FastIndexedSeq("lk"),
+        FastIndexedSeq("rk"),
+        false,
+        joinType)
+    }
+    def leftJoinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer]): IR =
+      joinRows(left, right, "left")
+    def outerJoinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer]): IR =
+      joinRows(left, right, "outer")
+    def innerJoinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer]): IR =
+      joinRows(left, right, "inner")
+    def rightJoinRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer]): IR =
+      joinRows(left, right, "right")
+
+    assertEvalsTo(leftJoinRows(Array[Integer](1, 1, 2, 2, null, null), Array[Integer](0, 0, 1, 1, 3, 3, null, null)), FastIndexedSeq(
+      Row(1, 0, 2),
+      Row(1, 0, 3),
+      Row(1, 1, 2),
+      Row(1, 1, 3),
+      Row(2, 2, null),
+      Row(2, 3, null),
+      Row(null, 4, null),
+      Row(null, 5, null)))
+
+    assertEvalsTo(outerJoinRows(Array[Integer](1, 1, 2, 2, null, null), Array[Integer](0, 0, 1, 1, 3, 3, null, null)), FastIndexedSeq(
+      Row(0, null, 0),
+      Row(0, null, 1),
+      Row(1, 0, 2),
+      Row(1, 0, 3),
+      Row(1, 1, 2),
+      Row(1, 1, 3),
+      Row(2, 2, null),
+      Row(2, 3, null),
+      Row(3, null, 4),
+      Row(3, null, 5),
+      Row(null, 4, null),
+      Row(null, 5, null),
+      Row(null, null, 6),
+      Row(null, null, 7)))
+
+    assertEvalsTo(innerJoinRows(Array[Integer](1, 1, 2, 2, null, null), Array[Integer](0, 0, 1, 1, 3, 3, null, null)), FastIndexedSeq(
+      Row(1, 0, 2),
+      Row(1, 0, 3),
+      Row(1, 1, 2),
+      Row(1, 1, 3)))
+
+    assertEvalsTo(rightJoinRows(Array[Integer](1, 1, 2, 2, null, null), Array[Integer](0, 0, 1, 1, 3, 3, null, null)), FastIndexedSeq(
+      Row(0, null, 0),
+      Row(0, null, 1),
+      Row(1, 0, 2),
+      Row(1, 0, 3),
+      Row(1, 1, 2),
+      Row(1, 1, 3),
+      Row(3, null, 4),
+      Row(3, null, 5),
+      Row(null, null, 6),
+      Row(null, null, 7)))
+  }
+
+  @Test def testStreamMerge() {
+    implicit val execStrats = ExecStrategy.javaOnly
+
+    def mergeRows(left: IndexedSeq[Integer], right: IndexedSeq[Integer], key: Int): IR = {
+      val typ = TStream(TStruct("k" -> TInt32, "sign" -> TInt32, "idx" -> TInt32))
+      ToArray(StreamMerge(
+        if (left == null)
+          NA(typ)
+        else
+          MakeStream(left.zipWithIndex.map { case (n, idx) =>
+            MakeStruct(FastIndexedSeq(
+              "k" -> (if (n == null) NA(TInt32) else I32(n)),
+              "sign" -> I32(1),
+              "idx" -> I32(idx)))
+          }, typ),
+        if (right == null)
+          NA(typ)
+        else
+          MakeStream(right.zipWithIndex.map { case (n, idx) =>
+            MakeStruct(FastIndexedSeq(
+              "k" -> (if (n == null) NA(TInt32) else I32(n)),
+              "sign" -> I32(-1),
+              "idx" -> I32(idx)))
+          }, typ),
+        FastIndexedSeq("k", "sign").take(key)))
+    }
+
+    assertEvalsTo(mergeRows(Array[Integer](1, 1, 2, 2, null, null), Array[Integer](0, 0, 1, 1, 3, 3, null, null), 1), FastIndexedSeq(
+      Row(0, -1, 0),
+      Row(0, -1, 1),
+      Row(1, 1, 0),
+      Row(1, 1, 1),
+      Row(1, -1, 2),
+      Row(1, -1, 3),
+      Row(2, 1, 2),
+      Row(2, 1, 3),
+      Row(3, -1, 4),
+      Row(3, -1, 5),
+      Row(null, 1, 4),
+      Row(null, 1, 5),
+      Row(null, -1, 6),
+      Row(null, -1, 7)))
+
+    // right stream ends first
+    assertEvalsTo(mergeRows(Array[Integer](1, 1, 2, 2), Array[Integer](0, 0, 1, 1), 1), FastIndexedSeq(
+      Row(0, -1, 0),
+      Row(0, -1, 1),
+      Row(1, 1, 0),
+      Row(1, 1, 1),
+      Row(1, -1, 2),
+      Row(1, -1, 3),
+      Row(2, 1, 2),
+      Row(2, 1, 3)))
+
+    // compare on two key fields
+    assertEvalsTo(mergeRows(Array[Integer](1, 1, 2, 2, null, null), Array[Integer](0, 0, 1, 1, 3, 3, null, null), 2), FastIndexedSeq(
+      Row(0, -1, 0),
+      Row(0, -1, 1),
+      Row(1, -1, 2),
+      Row(1, -1, 3),
+      Row(1, 1, 0),
+      Row(1, 1, 1),
+      Row(2, 1, 2),
+      Row(2, 1, 3),
+      Row(3, -1, 4),
+      Row(3, -1, 5),
+      Row(null, 1, 4),
+      Row(null, 1, 5),
+      Row(null, -1, 6),
+      Row(null, -1, 7)))
+
+    // right stream empty
+    assertEvalsTo(mergeRows(Array[Integer](1, 2, null), Array[Integer](), 1), FastIndexedSeq(
+      Row(1, 1, 0),
+      Row(2, 1, 1),
+      Row(null, 1, 2)))
+
+    // left stream empty
+    assertEvalsTo(mergeRows(Array[Integer](), Array[Integer](1, 2, null), 1), FastIndexedSeq(
+      Row(1, -1, 0),
+      Row(2, -1, 1),
+      Row(null, -1, 2)))
+
+    // one stream missing
+    assertEvalsTo(mergeRows(null, Array[Integer](1, 2, null), 1), null)
+    assertEvalsTo(mergeRows(Array[Integer](1, 2, null), null, 1), null)
   }
 
   @Test def testDie() {
@@ -2372,12 +2614,12 @@ class IRSuite extends HailSuite {
       (0 until 10).map(i => FastIndexedSeq(1, i, i, i)) ++ FastIndexedSeq(FastIndexedSeq(1)))
   }
 
-  @Test def testArrayAggScan() {
+  @Test def testStreamAggScan() {
     implicit val execStrats = ExecStrategy.compileOnly
 
     val eltType = TStruct("x" -> TCall, "y" -> TInt32)
 
-    val ir = ToArray(StreamAggScan(ToStream(In(0, TArray(eltType))),
+    val ir = (StreamAggScan(ToStream(In(0, TArray(eltType))),
       "foo",
       GetField(Ref("foo", eltType), "y") +
         GetField(ApplyScanOp(
@@ -2386,16 +2628,19 @@ class IRSuite extends HailSuite {
           AggSignature(CallStats(), FastIndexedSeq(TInt32), FastIndexedSeq(TCall))
         ), "AN")))
 
-    assertEvalsTo(ir,
-      args = FastIndexedSeq(
-        FastIndexedSeq(
-          Row(null, 1),
-          Row(Call2(0, 0), 2),
-          Row(Call2(0, 1), 3),
-          Row(Call2(1, 1), 4),
-          null,
-          Row(null, 5)) -> TArray(eltType)),
+    val input = FastIndexedSeq(
+      Row(null, 1),
+      Row(Call2(0, 0), 2),
+      Row(Call2(0, 1), 3),
+      Row(Call2(1, 1), 4),
+      null,
+      Row(null, 5)) -> TArray(eltType)
+
+    assertEvalsTo(ToArray(ir),
+      args = FastIndexedSeq(input),
       expected = FastIndexedSeq(1 + 0, 2 + 0, 3 + 2, 4 + 4, null, 5 + 6))
+
+    assertEvalsTo(StreamLen(ir), args=FastIndexedSeq(input), 6)
   }
 
   @Test def testInsertFields() {
@@ -2631,20 +2876,20 @@ class IRSuite extends HailSuite {
     val call = Ref("call", TCall)
 
     val collectSig = AggSignature(Collect(), Seq(), Seq(TInt32))
+    val pCollectSig = PhysicalAggSig(Collect(), CollectStateSig(PInt32()))
 
     val sumSig = AggSignature(Sum(), Seq(), Seq(TInt64))
+    val pSumSig = PhysicalAggSig(Sum(), TypedStateSig(PInt64(true)))
 
     val callStatsSig = AggSignature(CallStats(), Seq(TInt32), Seq(TCall))
+    val pCallStatsSig = PhysicalAggSig(CallStats(), CallStatsStateSig())
 
     val takeBySig = AggSignature(TakeBy(), Seq(TInt32), Seq(TFloat64, TInt32))
 
     val countSig = AggSignature(Count(), Seq(), Seq())
     val count = ApplyAggOp(FastIndexedSeq.empty, FastIndexedSeq.empty, countSig)
 
-    val groupSignature = AggStateSignature(
-      Map(Group() -> AggSignature(Group(), FastIndexedSeq(TVoid), FastIndexedSeq(TInt32, TVoid))),
-      Group(),
-      Some(FastIndexedSeq(sumSig.singletonContainer)))
+    val groupSignature = GroupedAggSig(PInt32(true), FastSeq(pSumSig))
 
     val table = TableRange(100, 10)
 
@@ -2663,6 +2908,7 @@ class IRSuite extends HailSuite {
 
     val irs = Array(
       i, I64(5), F32(3.14f), F64(3.14), str, True(), False(), Void(),
+      UUID4(),
       Cast(i, TFloat64),
       CastRename(NA(TStruct("a" -> TInt32)), TStruct("b" -> TInt32)),
       NA(TInt32), IsNA(i),
@@ -2691,6 +2937,7 @@ class IRSuite extends HailSuite {
       NDArrayFilter(nd, FastIndexedSeq(NA(TArray(TInt64)), NA(TArray(TInt64)))),
       ArrayRef(a, i),
       ArrayLen(a),
+      StreamLen(st),
       StreamRange(I32(0), I32(5), I32(1)),
       StreamRange(I32(0), I32(5), I32(1)),
       ArraySort(st, b),
@@ -2704,39 +2951,45 @@ class IRSuite extends HailSuite {
       StreamTake(st, I32(10)),
       StreamDrop(st, I32(10)),
       StreamMap(st, "v", v),
+      StreamMerge(
+        StreamMap(StreamRange(0, 2, 1), "x", MakeStruct(FastSeq("x" -> Ref("x", TInt32)))),
+        StreamMap(StreamRange(0, 3, 1), "x", MakeStruct(FastSeq("x" -> Ref("x", TInt32)))),
+        FastSeq("x")),
       StreamZip(FastIndexedSeq(st, st), FastIndexedSeq("foo", "bar"), True(), ArrayZipBehavior.TakeMinLength),
       StreamFilter(st, "v", b),
       StreamFlatMap(sta, "v", ToStream(a)),
       StreamFold(st, I32(0), "x", "v", v),
       StreamFold2(StreamFold(st, I32(0), "x", "v", v)),
       StreamScan(st, I32(0), "x", "v", v),
-      StreamLeftJoinDistinct(StreamRange(0, 2, 1), StreamRange(0, 3, 1), "l", "r", I32(0), I32(1)),
+      StreamJoinRightDistinct(
+        StreamMap(StreamRange(0, 2, 1), "x", MakeStruct(FastSeq("x" -> Ref("x", TInt32)))),
+        StreamMap(StreamRange(0, 3, 1), "x", MakeStruct(FastSeq("x" -> Ref("x", TInt32)))),
+        FastIndexedSeq("x"), FastIndexedSeq("x"), "l", "r", I32(1), "left"),
       StreamFor(st, "v", Void()),
       StreamAgg(st, "x", ApplyAggOp(FastIndexedSeq.empty, FastIndexedSeq(Cast(Ref("x", TInt32), TInt64)), sumSig)),
       StreamAggScan(st, "x", ApplyScanOp(FastIndexedSeq.empty, FastIndexedSeq(Cast(Ref("x", TInt32), TInt64)), sumSig)),
       RunAgg(Begin(FastSeq(
-        InitOp(0, FastIndexedSeq(Begin(FastIndexedSeq(InitOp(0, FastSeq(), sumSig)))), groupSignature, Group()),
-        SeqOp(0, FastSeq(I32(1), SeqOp(0, FastSeq(), sumSig)), groupSignature, Group()))),
-        AggStateValue(0, groupSignature), FastIndexedSeq(groupSignature)),
+        InitOp(0, FastIndexedSeq(Begin(FastIndexedSeq(InitOp(0, FastSeq(), pSumSig)))), groupSignature),
+        SeqOp(0, FastSeq(I32(1), SeqOp(0, FastSeq(), pSumSig)), groupSignature))),
+        AggStateValue(0, groupSignature.state), FastIndexedSeq(groupSignature.state)),
       RunAggScan(StreamRange(I32(0), I32(1), I32(1)),
         "foo",
-        InitOp(0, FastIndexedSeq(Begin(FastIndexedSeq(InitOp(0, FastSeq(), sumSig)))), groupSignature, Group()),
-        SeqOp(0, FastSeq(Ref("foo", TInt32), SeqOp(0, FastSeq(), sumSig)), groupSignature, Group()),
-        AggStateValue(0, groupSignature),
-        FastIndexedSeq(groupSignature)
-        ),
+        InitOp(0, FastIndexedSeq(Begin(FastIndexedSeq(InitOp(0, FastSeq(), pSumSig)))), groupSignature),
+        SeqOp(0, FastSeq(Ref("foo", TInt32), SeqOp(0, FastSeq(), pSumSig)), groupSignature),
+        AggStateValue(0, groupSignature.state),
+        FastIndexedSeq(groupSignature.state)),
       AggFilter(True(), I32(0), false),
       AggExplode(NA(TStream(TInt32)), "x", I32(0), false),
       AggGroupBy(True(), I32(0), false),
       ApplyAggOp(FastIndexedSeq.empty, FastIndexedSeq(I32(0)), collectSig),
       ApplyAggOp(FastIndexedSeq(I32(2)), FastIndexedSeq(call), callStatsSig),
       ApplyAggOp(FastIndexedSeq(I32(10)), FastIndexedSeq(F64(-2.11), I32(4)), takeBySig),
-      InitOp(0, FastIndexedSeq(I32(2)), AggStateSignature(callStatsSig), callStatsSig.op),
-      SeqOp(0, FastIndexedSeq(i), AggStateSignature(collectSig), collectSig.op),
-      CombOp(0, 1, collectSig.singletonContainer),
-      ResultOp(0, FastSeq(collectSig.singletonContainer)),
-      SerializeAggs(0, 0, BufferSpec.default, FastSeq(collectSig.singletonContainer)),
-      DeserializeAggs(0, 0, BufferSpec.default, FastSeq(collectSig.singletonContainer)),
+      InitOp(0, FastIndexedSeq(I32(2)), pCallStatsSig),
+      SeqOp(0, FastIndexedSeq(i), pCollectSig),
+      CombOp(0, 1, pCollectSig),
+      ResultOp(0, FastIndexedSeq(pCollectSig)),
+      SerializeAggs(0, 0, BufferSpec.default, FastSeq(pCollectSig.state)),
+      DeserializeAggs(0, 0, BufferSpec.default, FastSeq(pCollectSig.state)),
       Begin(FastIndexedSeq(Void())),
       MakeStruct(FastIndexedSeq("x" -> i)),
       SelectFields(s, FastIndexedSeq("x", "z")),
@@ -2774,12 +3027,26 @@ class IRSuite extends HailSuite {
       ReadPartition(Str("foo"),
         TStruct("foo" -> TInt32),
         PartitionNativeReader(TypedCodecSpec(PCanonicalStruct("foo" -> PInt32(), "bar" -> PCanonicalString()), BufferSpec.default))),
+      WritePartition(
+        MakeStream(FastSeq(), TStream(TStruct())), NA(TString),
+        PartitionNativeWriter(TypedCodecSpec(PType.canonical(TStruct()), BufferSpec.default), "path", None, None)),
+      WriteMetadata(
+        NA(TStruct("global" -> TString, "partitions" -> TStruct("filePath" -> TString, "partitionCounts" -> TInt64))),
+        MetadataNativeWriter("path", overwrite = false,
+          RVDSpecMaker(
+            TypedCodecSpec(PType.canonical(TStruct("a" -> TInt32)), BufferSpec.default),
+            RVDPartitioner.unkeyed(1)),
+          RVDSpecMaker(
+            TypedCodecSpec(PType.canonical(TStruct()), BufferSpec.default),
+            new RVDPartitioner(TStruct("a" -> TInt32), Array[Interval](), 1)),
+          TableType(TStruct("a" -> TInt32), FastIndexedSeq("a"), TStruct()))
+      ),
       ReadValue(Str("foo"), TypedCodecSpec(PCanonicalStruct("foo" -> PInt32(), "bar" -> PCanonicalString()), BufferSpec.default), TStruct("foo" -> TInt32)),
       WriteValue(I32(1), Str("foo"), TypedCodecSpec(PInt32(), BufferSpec.default)),
       LiftMeOut(I32(1)),
       RelationalLet("x", I32(0), I32(0)),
       TailLoop("y", IndexedSeq("x" -> I32(0)), Recur("y", FastSeq(I32(4)), TInt32))
-    )
+      )
     irs.map(x => Array(x))
   }
 
@@ -3104,12 +3371,6 @@ class IRSuite extends HailSuite {
 
     def sm = ApplySeeded("incr_s", FastSeq(NA(TBoolean)), 0L, TBoolean)
 
-    def mt = ApplySeeded("incr_m", FastSeq(True()), 0L, TBoolean)
-
-    def mf = ApplySeeded("incr_m", FastSeq(True()), 0L, TBoolean)
-
-    def mm = ApplySeeded("incr_m", FastSeq(NA(TBoolean)), 0L, TBoolean)
-
     def vt = ApplySeeded("incr_v", FastSeq(True()), 0L, TBoolean)
 
     def vf = ApplySeeded("incr_v", FastSeq(True()), 0L, TBoolean)
@@ -3118,7 +3379,6 @@ class IRSuite extends HailSuite {
 
     // baseline
     test(st, true, 1); test(sf, true, 1); test(sm, true, 1)
-    test(mt, true, 1); test(mf, true, 1); test(mm, true, 1)
     test(vt, true, 1); test(vf, true, 1); test(vm, true, 0)
 
     // if
@@ -3126,10 +3386,6 @@ class IRSuite extends HailSuite {
     test(If(st, i, True()), true, 1)
     test(If(sf, i, True()), true, 1)
     test(If(sm, i, True()), true, 1)
-
-    test(If(mt, i, True()), true, 1)
-    test(If(mf, i, True()), true, 1)
-    test(If(mm, i, True()), true, 1)
 
     test(If(vt, i, True()), true, 1)
     test(If(vf, i, True()), true, 1)
@@ -3140,10 +3396,6 @@ class IRSuite extends HailSuite {
     test(If(i, sf, True()), true, 1)
     test(If(i, sm, True()), true, 1)
 
-    test(If(i, mt, True()), true, 1)
-    test(If(i, mf, True()), true, 1)
-    test(If(i, mm, True()), true, 1)
-
     test(If(i, vt, True()), true, 1)
     test(If(i, vf, True()), true, 1)
     test(If(i, vm, True()), true, 0)
@@ -3152,10 +3404,6 @@ class IRSuite extends HailSuite {
     test(If(i, True(), st), false, 1)
     test(If(i, True(), sf), false, 1)
     test(If(i, True(), sm), false, 1)
-
-    test(If(i, True(), mt), false, 1)
-    test(If(i, True(), mf), false, 1)
-    test(If(i, True(), mm), false, 1)
 
     test(If(i, True(), vt), false, 1)
     test(If(i, True(), vf), false, 1)
@@ -3428,5 +3676,30 @@ class IRSuite extends HailSuite {
     for (v <- Array(value, null)) {
       assertEvalsTo(ToArray(readArray), FastIndexedSeq(v -> pt.virtualType), Array.fill(10)(v).toFastIndexedSeq)
     }
+  }
+
+  @Test def testUUID4() {
+    val single = UUID4()
+    val hex = "[0-9a-f]"
+    val format = s"$hex{8}-$hex{4}-$hex{4}-$hex{4}-$hex{12}"
+    // 12345678-1234-5678-1234-567812345678
+    assertEvalsTo(
+      bindIR(single){ s =>
+        invoke("regexMatch", TBoolean, Str(format), s) &&
+          invoke("length", TInt32, s).ceq(I32(36))
+      }, true)
+
+    val stream = mapIR(rangeIR(5)) { _ => single }
+
+    def selfZip(s: IR, n: Int) = StreamZip(Array.fill(n)(s), Array.tabulate(n)(i => s"$i"),
+      MakeArray(Array.tabulate(n)(i => Ref(s"$i", TString)), TArray(TString)),
+      ArrayZipBehavior.AssumeSameLength)
+
+    def assertNumDistinct(s: IR, expected: Int) =
+      assertEvalsTo(ArrayLen(CastToArray(ToSet(s))), expected)
+
+    assertNumDistinct(stream, 5)
+    assertNumDistinct(flatten(selfZip(stream, 2)), 10)
+    assertNumDistinct(bindIR(ToArray(stream))(a => selfZip(ToStream(a), 2)), 5)
   }
 }

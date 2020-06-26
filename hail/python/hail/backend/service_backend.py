@@ -1,25 +1,54 @@
+import os
 import requests
 
+from hail.utils import FatalError
 from hail.expr.types import dtype
-from hail.expr.table_type import *
-from hail.expr.matrix_type import *
-from hail.expr.blockmatrix_type import *
+from hail.expr.table_type import ttable
+from hail.expr.matrix_type import tmatrix
+from hail.expr.blockmatrix_type import tblockmatrix
 
-from hailtop.config import get_deploy_config
+from hailtop.config import get_deploy_config, get_user_config
 from hailtop.auth import service_auth_headers
 from hailtop.utils import retry_response_returning_functions
 from hail.ir.renderer import CSERenderer
 
 from .backend import Backend
+from ..hail_logging import PythonOnlyLogger
 
 
 class ServiceBackend(Backend):
-    def __init__(self, deploy_config=None):
+    def __init__(self, billing_project: str = None, bucket: str = None, *, deploy_config=None, skip_logging_configuration: bool = False):
+        if billing_project is None:
+            billing_project = get_user_config().get('batch', 'billing_project', fallback=None)
+        if billing_project is None:
+            billing_project = os.environ.get('HAIL_BILLING_PROJECT')
+        if billing_project is None:
+            raise ValueError(
+                "No billing project.  Call 'init_service' with the billing "
+                "project, set the HAIL_BILLING_PROJECT environment variable, "
+                "or run 'hailctl config set batch/billing_project "
+                "MY_BILLING_PROJECT'")
+        self._billing_project = billing_project
+
+        if bucket is None:
+            bucket = get_user_config().get('batch', 'bucket', fallback=None)
+        if bucket is None:
+            raise ValueError(
+                f'the bucket parameter of ServiceBackend must be set '
+                f'or run `hailctl config set batch/bucket '
+                f'MY_BUCKET`')
+        self._bucket = bucket
+
         if not deploy_config:
             deploy_config = get_deploy_config()
         self.url = deploy_config.base_url('query')
         self.headers = service_auth_headers(deploy_config, 'query')
         self._fs = None
+        self._logger = PythonOnlyLogger(skip_logging_configuration)
+
+    @property
+    def logger(self):
+        return self._logger
 
     @property
     def fs(self):
@@ -38,10 +67,15 @@ class ServiceBackend(Backend):
 
     def execute(self, ir, timed=False):
         code = self._render(ir)
+        body = {
+            'code': code,
+            'billing_project': self._billing_project,
+            'bucket': self._bucket
+        }
         resp = retry_response_returning_functions(
             requests.post,
-            f'{self.url}/execute', json=code, headers=self.headers)
-        if resp.status_code == 400:
+            f'{self.url}/execute', json=body, headers=self.headers)
+        if resp.status_code == 400 or resp.status_code == 500:
             raise FatalError(resp.text)
         resp.raise_for_status()
         resp_json = resp.json()
@@ -56,7 +90,7 @@ class ServiceBackend(Backend):
         resp = retry_response_returning_functions(
             requests.post,
             f'{self.url}/type/{kind}', json=code, headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             raise FatalError(resp.text)
         resp.raise_for_status()
 
@@ -82,7 +116,7 @@ class ServiceBackend(Backend):
         resp = retry_response_returning_functions(
             requests.post,
             f'{self.url}/references/create', json=config, headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -100,7 +134,7 @@ class ServiceBackend(Backend):
                 'mt_contigs': mt_contigs,
                 'par': par
             }, headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -111,7 +145,7 @@ class ServiceBackend(Backend):
             f'{self.url}/references/delete',
             json={'name': name},
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -122,7 +156,7 @@ class ServiceBackend(Backend):
             f'{self.url}/references/get',
             json={'name': name},
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -138,7 +172,7 @@ class ServiceBackend(Backend):
             f'{self.url}/references/sequence/set',
             json={'name': name, 'fasta_file': fasta_file, 'index_file': index_file},
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -149,7 +183,7 @@ class ServiceBackend(Backend):
             f'{self.url}/references/sequence/delete',
             json={'name': name},
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -161,7 +195,7 @@ class ServiceBackend(Backend):
             json={'name': name, 'chain_file': chain_file,
                   'dest_reference_genome': dest_reference_genome},
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -172,7 +206,7 @@ class ServiceBackend(Backend):
             f'{self.url}/references/liftover/remove',
             json={'name': name, 'dest_reference_genome': dest_reference_genome},
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -183,7 +217,7 @@ class ServiceBackend(Backend):
             f'{self.url}/parse-vcf-metadata',
             json={'path': path},
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()
@@ -201,7 +235,7 @@ class ServiceBackend(Backend):
                 'skip_invalid_loci': skip_invalid_loci
             },
             headers=self.headers)
-        if resp.status_code == 400:
+        if resp.status_code == 400 or resp.status_code == 500:
             resp_json = resp.json()
             raise FatalError(resp_json['message'])
         resp.raise_for_status()

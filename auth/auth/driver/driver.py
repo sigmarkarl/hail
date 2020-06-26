@@ -5,15 +5,11 @@ import base64
 import logging
 import secrets
 import string
-import concurrent
 import asyncio
+import aiohttp
 import kubernetes_asyncio as kube
-import google.auth.transport.requests
-import google.oauth2.id_token
-import google.cloud.storage
-import googleapiclient.http
-import googleapiclient.discovery
-from hailtop.utils import blocking_to_async, time_msecs
+from hailtop.utils import time_msecs
+from hailtop import aiogoogle
 from gear import create_session, Database
 
 log = logging.getLogger('auth.driver')
@@ -28,69 +24,6 @@ is_test_deployment = DEFAULT_NAMESPACE != 'default'
 
 class DatabaseConflictError(Exception):
     pass
-
-
-class GoogleClient:
-    def __init__(self, credentials):
-        # Google API Python clients are not thread safe, create Http object per request
-        # https://github.com/googleapis/google-api-python-client/blob/master/docs/thread_safety.md
-        def build_request(http, *args, **kwargs):  # pylint: disable=unused-argument
-            import google_auth_httplib2
-            new_http = google_auth_httplib2.AuthorizedHttp(credentials=credentials)
-            return googleapiclient.http.HttpRequest(new_http, *args, **kwargs)
-
-        self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=40)
-
-        # https://googleapis.dev/python/storage/latest/index.html
-        self.storage_client = google.cloud.storage.Client(credentials=credentials)
-
-        self.iam_client = googleapiclient.discovery.build('iam', 'v1', cache_discovery=False, credentials=credentials, requestBuilder=build_request)
-
-    def _create_service_account(self, name, body):
-        return self.iam_client.projects().serviceAccounts().create(  # pylint: disable=no-member
-            name=name, body=body).execute()
-
-    async def create_service_account(self, name, body):
-        return await blocking_to_async(self.thread_pool, self._create_service_account, name, body)
-
-    def _delete_service_account(self, gsa_email):
-        self.iam_client.projects().serviceAccounts().delete(  # pylint: disable=no-member
-            name=f'projects/{PROJECT}/serviceAccounts/{gsa_email}'
-        ).execute()
-
-    async def delete_service_account(self, gsa_email):
-        return await blocking_to_async(self.thread_pool, self._delete_service_account, gsa_email)
-
-    def _create_service_account_key(self, gsa_email):
-        return self.iam_client.projects().serviceAccounts().keys().create(  # pylint: disable=no-member
-            name=f'projects/{PROJECT}/serviceAccounts/{gsa_email}',
-            body={}
-        ).execute()
-
-    async def create_service_account_key(self, gsa_email):
-        return await blocking_to_async(self.thread_pool, self._create_service_account_key, gsa_email)
-
-    def _create_bucket(self, name):
-        bucket = self.storage_client.bucket(name)
-        bucket.create()
-        return bucket
-
-    async def create_bucket(self, name):
-        return await blocking_to_async(self.thread_pool, self._create_bucket, name)
-
-    def _delete_bucket(self, name):
-        bucket = self.storage_client.bucket(name)
-        bucket.delete()
-
-    async def delete_bucket(self, name):
-        return await blocking_to_async(self.thread_pool, self._delete_bucket, name)
-
-    @staticmethod
-    def _save_acl(acl):
-        acl.save()
-
-    async def save_acl(self, acl):
-        return await blocking_to_async(self.thread_pool, self._save_acl, acl)
 
 
 class EventHandler:
@@ -115,7 +48,7 @@ class EventHandler:
             except Exception:
                 end_time = time_msecs()
 
-                log.exception(f'caught exception in event handler loop')
+                log.exception('caught exception in event handler loop')
 
                 t = delay_secs * random.uniform(0.7, 1.3)
                 await asyncio.sleep(t)
@@ -151,7 +84,7 @@ class SessionResource:
         if self.session_id is None:
             return
 
-        await self.db.just_execute(f'''
+        await self.db.just_execute('''
 DELETE FROM sessions
 WHERE session_id = %s;
 ''',
@@ -200,8 +133,8 @@ class K8sSecretResource:
 
 
 class GSAResource:
-    def __init__(self, google_client, gsa_email=None):
-        self.google_client = google_client
+    def __init__(self, iam_client, gsa_email=None):
+        self.iam_client = iam_client
         self.gsa_email = gsa_email
 
     async def create(self, username):
@@ -211,9 +144,9 @@ class GSAResource:
 
         await self._delete(gsa_email)
 
-        service_account = await self.google_client.create_service_account(
-            name=f'projects/{PROJECT}',
-            body={
+        service_account = await self.iam_client.post(
+            '/serviceAccounts',
+            json={
                 "accountId": username,
                 "serviceAccount": {
                     "displayName": username
@@ -222,15 +155,16 @@ class GSAResource:
         assert service_account['email'] == gsa_email
         self.gsa_email = gsa_email
 
-        key = await self.google_client.create_service_account_key(self.gsa_email)
+        key = await self.iam_client.post(
+            f'/serviceAccounts/{self.gsa_email}/keys')
 
         return (self.gsa_email, key)
 
     async def _delete(self, gsa_email):
         try:
-            await self.google_client.delete_service_account(gsa_email)
-        except googleapiclient.errors.HttpError as e:
-            if e.resp.status == 404:
+            await self.iam_client.delete(f'/serviceAccounts/{gsa_email}/keys')
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
                 pass
             else:
                 raise
@@ -240,41 +174,6 @@ class GSAResource:
             return
         await self._delete(self.gsa_email)
         self.gsa_email = None
-
-
-class BucketResource:
-    def __init__(self, google_client, name=None):
-        self.google_client = google_client
-        self.name = name
-
-    async def create(self, name, gsa_email):
-        assert self.name is None
-
-        await self._delete(name)
-
-        bucket = await self.google_client.create_bucket(name)
-        self.name = name
-
-        acl = bucket.acl
-        acl.user(gsa_email).grant_write()
-        acl.user(gsa_email).grant_read()
-        await self.google_client.save_acl(acl)
-
-        default_object_acl = bucket.default_object_acl
-        default_object_acl.user(gsa_email).grant_read()
-        await self.google_client.save_acl(default_object_acl)
-
-    async def _delete(self, name):
-        try:
-            await self.google_client.delete_bucket(name)
-        except google.cloud.exceptions.NotFound:
-            pass
-
-    async def delete(self):
-        if self.name is None:
-            return
-        await self._delete(self.name)
-        self.name = None
 
 
 class DatabaseResource:
@@ -341,7 +240,7 @@ database={config['db']}
 
         # no DROP USER IF EXISTS in current db version
         row = await self.db_instance.execute_and_fetchone(
-            f'SELECT 1 FROM mysql.user WHERE User = %s;', (name,))
+            'SELECT 1 FROM mysql.user WHERE User = %s;', (name,))
         if row is not None:
             await self.db_instance.just_execute(f"DROP USER '{name}';")
 
@@ -390,7 +289,7 @@ async def _create_user(app, user, cleanup):
     db_instance = app['db_instance']
     db = app['db']
     k8s_client = app['k8s_client']
-    google_client = app['google_client']
+    iam_client = app['iam_client']
 
     alnum = string.ascii_lowercase + string.digits
     token = ''.join([secrets.choice(alnum) for _ in range(5)])
@@ -422,7 +321,7 @@ async def _create_user(app, user, cleanup):
 
     gsa_email = user['gsa_email']
     if gsa_email is None:
-        gsa = GSAResource(google_client)
+        gsa = GSAResource(iam_client)
         cleanup.append(gsa.delete)
 
         # length of gsa account_id must be >= 6
@@ -438,14 +337,6 @@ async def _create_user(app, user, cleanup):
             'key.json': base64.b64decode(key['privateKeyData']).decode('utf-8')
         })
         updates['gsa_key_secret_name'] = gsa_key_secret_name
-
-    bucket_name = user['bucket_name']
-    if bucket_name is None:
-        bucket_name = f'hail-{ident_token}'
-        bucket = BucketResource(google_client)
-        cleanup.append(bucket.delete)
-        await bucket.create(bucket_name, gsa_email)
-        updates['bucket_name'] = bucket_name
 
     namespace_name = user['namespace_name']
     if namespace_name is None and user['is_developer'] == 1:
@@ -495,7 +386,7 @@ async def delete_user(app, user):
     db_instance = app['db_instance']
     db = app['db']
     k8s_client = app['k8s_client']
-    google_client = app['google_client']
+    iam_client = app['iam_client']
 
     tokens_secret_name = user['tokens_secret_name']
     if tokens_secret_name is not None:
@@ -506,18 +397,13 @@ async def delete_user(app, user):
 
     gsa_email = user['gsa_email']
     if gsa_email is not None:
-        gsa = GSAResource(google_client, gsa_email)
+        gsa = GSAResource(iam_client, gsa_email)
         await gsa.delete()
 
     gsa_key_secret_name = user['gsa_key_secret_name']
     if gsa_key_secret_name is not None:
         gsa_key_secret = K8sSecretResource(k8s_client, gsa_key_secret_name, BATCH_PODS_NAMESPACE)
         await gsa_key_secret.delete()
-
-    bucket_name = user['bucket_name']
-    if bucket_name is not None:
-        bucket = BucketResource(google_client, bucket_name)
-        await bucket.delete()
 
     namespace_name = user['namespace_name']
     if namespace_name is not None:
@@ -576,13 +462,8 @@ async def async_main():
         k8s_client = kube.client.CoreV1Api()
         app['k8s_client'] = k8s_client
 
-        credentials = google.oauth2.service_account.Credentials.from_service_account_file(
-            '/gsa-key/key.json',
-            scopes=[
-                'https://www.googleapis.com/auth/cloud-platform',
-                'https://www.googleapis.com/auth/devstorage.full_control'
-            ])
-        app['google_client'] = GoogleClient(credentials)
+        app['iam_client'] = aiogoogle.IAmClient(
+            PROJECT, credentials=aiogoogle.Credentials.from_file('/gsa-key/key.json'))
 
         users_changed_event = asyncio.Event()
         app['users_changed_event'] = users_changed_event

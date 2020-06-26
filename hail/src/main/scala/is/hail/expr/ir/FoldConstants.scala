@@ -1,6 +1,6 @@
 package is.hail.expr.ir
 
-import is.hail.expr.types.virtual.TStream
+import is.hail.types.virtual.TStream
 import is.hail.utils.HailException
 
 object FoldConstants {
@@ -16,8 +16,10 @@ object FoldConstants {
            _: RelationalRef |
            _: RelationalLet |
            _: ApplySeeded |
+           _: UUID4 |
            _: ApplyAggOp |
            _: ApplyScanOp |
+           _: AggLet |
            _: Begin |
            _: MakeNDArray |
            _: NDArrayShape |

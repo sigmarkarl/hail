@@ -1,17 +1,22 @@
 package is.hail.expr.ir
 
+import is.hail.backend.spark.SparkBackend
 import is.hail.utils._
-import is.hail.expr.types.virtual.{TBoolean, TInt32, TInt64, TString, TStruct, Type}
-import is.hail.io.compress.{BGzipCodec, BGzipInputStream}
-import is.hail.io.fs.{FS, Positioned, PositionedInputStream, SeekableInputStream}
+import is.hail.types.virtual.{TBoolean, TInt32, TInt64, TString, TStruct, Type}
+import is.hail.io.compress.BGzipInputStream
+import is.hail.io.fs.{FS, FileStatus, Positioned, PositionedInputStream, BGZipCompressionCodec}
 import org.apache.commons.io.input.{CountingInputStream, ProxyInputStream}
 import org.apache.hadoop.io.compress.SplittableCompressionCodec
+import org.apache.spark.{Partition, TaskContext}
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.Row
+
+import scala.annotation.meta.param
 
 abstract class CloseableIterator[T] extends Iterator[T] with AutoCloseable
 
 object GenericLines {
-  def read(fs: FS, contexts: IndexedSeq[Any]): GenericLines = {
+  def read(fs: FS, contexts: IndexedSeq[Any], gzAsBGZ: Boolean): GenericLines = {
 
     val fsBc = fs.broadcast
     val body: (Any) => CloseableIterator[GenericLine] = { (context: Any) =>
@@ -27,11 +32,13 @@ object GenericLines {
         private val is: PositionedInputStream = {
           val fs = fsBc.value
           val rawIS = fs.openNoCompression(file)
-          val codec = fs.getCodec(file)
+          val codec = fs.getCodecFromPath(file, gzAsBGZ)
           if (codec == null) {
+            assert(split)
             rawIS.seek(start)
             rawIS
-          } else if (codec.isInstanceOf[BGzipCodec]) {
+          } else if (codec == BGZipCompressionCodec) {
+            assert(split)
             splitCompressed = true
             val bgzIS = new BGzipInputStream(rawIS, start, end, SplittableCompressionCodec.READ_MODE.BYBLOCK)
             new ProxyInputStream(bgzIS) with Positioned {
@@ -39,7 +46,7 @@ object GenericLines {
             }
           } else {
             assert(!split)
-            new CountingInputStream(codec.createInputStream(rawIS)) with Positioned {
+            new CountingInputStream(codec.makeInputStream(rawIS)) with Positioned {
               def getPosition: Long = getByteCount
             }
           }
@@ -64,9 +71,9 @@ object GenericLines {
             // load new block
             bufOffset = is.getPosition
             val nRead = is.read(buf)
-            if (nRead == -1)
+            if (nRead == -1) {
               eof = true
-            else {
+            } else {
               bufPos = 0
               bufMark = nRead
               assert(!splitCompressed || virtualOffsetBlockOffset(bufOffset) == 0)
@@ -99,15 +106,13 @@ object GenericLines {
             return
           }
 
-          line.offset = offset
-
           var sawcr = false
           var linePos = 0
 
           while (true) {
             if (eof) {
               assert(linePos > 0)
-              line.lineLength = linePos
+              line.setLine(offset, linePos)
               return
             }
 
@@ -165,7 +170,7 @@ object GenericLines {
 
             if (eol) {
               assert(linePos > 0)
-              line.lineLength = linePos
+              line.setLine(offset, linePos)
               return
             }
           }
@@ -193,6 +198,7 @@ object GenericLines {
           assert(line != null)
           assert(line.lineLength > 0)
           consumed = true
+
           line
         }
 
@@ -217,28 +223,36 @@ object GenericLines {
 
   def read(
     fs: FS,
-    files: IndexedSeq[String],
-    blockSizeInMB: Option[Int],
+    fileStatuses0: IndexedSeq[FileStatus],
     nPartitions: Option[Int],
+    blockSizeInMB: Option[Int],
+    minPartitions: Option[Int],
+    gzAsBGZ: Boolean,
     allowSerialRead: Boolean
   ): GenericLines = {
-    val statuses = fs.globAllStatuses(files)
-      .filter(_.getLen > 0)
-    val totalSize = statuses.map(_.getLen).sum
+    val fileStatuses = fileStatuses0.filter(_.getLen > 0)
+    val totalSize = fileStatuses.map(_.getLen).sum
 
-    val contexts = statuses.flatMap { status =>
+    var totalPartitions = nPartitions match {
+      case Some(nPartitions) => nPartitions
+      case None =>
+        val blockSizeInB = blockSizeInMB.getOrElse(128) * 1024 * 1024
+        (totalSize.toDouble / blockSizeInB + 0.5).toInt
+    }
+    minPartitions match {
+      case Some(minPartitions) =>
+        if (totalPartitions < minPartitions)
+          totalPartitions = minPartitions
+      case None =>
+    }
+
+    val contexts = fileStatuses.flatMap { status =>
       val size = status.getLen
-      val codec = fs.getCodec(status.getPath)
+      val codec = fs.getCodecFromPath(status.getPath, gzAsBGZ)
 
-      val splittable = codec == null || codec.isInstanceOf[BGzipCodec]
+      val splittable = codec == null || codec == BGZipCompressionCodec
       if (splittable) {
-        var fileNParts = nPartitions match {
-          case Some(nPartitions) =>
-            ((nPartitions.toDouble * size) / totalSize + 0.5).toInt
-          case None =>
-            val blockSizeInB = blockSizeInMB.getOrElse(128) * 1024 * 1024
-            (size.toDouble / blockSizeInB + 0.5).toInt
-        }
+        var fileNParts = ((totalPartitions.toDouble * size) / totalSize + 0.5).toInt
         if (fileNParts == 0)
           fileNParts = 1
 
@@ -246,7 +260,7 @@ object GenericLines {
         val partScan = parts.scanLeft(0L)(_ + _)
         Iterator.range(0, fileNParts)
           .map { i =>
-            var start = partScan(i)
+            val start = partScan(i)
             var end = partScan(i + 1)
             if (codec != null)
               end = makeVirtualOffset(end, 0)
@@ -262,25 +276,13 @@ object GenericLines {
       }
     }
 
-    GenericLines.read(fs, contexts)
+    GenericLines.read(fs, contexts, gzAsBGZ)
   }
 
   def collect(lines: GenericLines): IndexedSeq[String] = {
     lines.contexts.flatMap { context =>
       using(lines.body(context)) { it =>
-        it.map { line =>
-          var n = line.lineLength
-          assert(n > 0)
-          val lineData = line.data
-          // strip line delimiter to match behavior of Spark textFile
-          if (lineData(n - 1) == '\n') {
-            n -= 1
-            if (n > 0 && lineData(n - 1) == '\r')
-              n -= 1
-          } else if (lineData(n - 1) == '\r')
-            n -= 1
-          new String(lineData, 0, n)
-        }.toArray
+        it.map(_.toString).toArray
       }
     }
   }
@@ -289,13 +291,67 @@ object GenericLines {
 class GenericLine(
   val file: String,
   // possibly virtual
-  var offset: Long,
+  private var _offset: Long,
   var data: Array[Byte],
-  var lineLength: Int) {
+  private var _lineLength: Int) {
   def this(file: String) = this(file, 0, null, 0)
+
+  private var _str: String = null
+
+  def setLine(newOffset: Long, newLength: Int): Unit = {
+    _offset = newOffset
+    _lineLength = newLength
+    _str = null
+  }
+
+  def offset: Long = _offset
+
+  def lineLength: Int = _lineLength
+
+  override def toString: String = {
+    if (_str == null) {
+      var n = lineLength
+      assert(n > 0)
+      // strip line delimiter to match behavior of Spark textFile
+      if (data(n - 1) == '\n') {
+        n -= 1
+        if (n > 0 && data(n - 1) == '\r')
+          n -= 1
+      } else if (data(n - 1) == '\r')
+        n -= 1
+      _str = new String(data, 0, n)
+    }
+    _str
+  }
+}
+
+class GenericLinesRDDPartition(val index: Int, val context: Any) extends Partition
+
+class GenericLinesRDD(
+  @(transient@param) contexts: IndexedSeq[Any],
+  body: (Any) => CloseableIterator[GenericLine]
+) extends RDD[GenericLine](SparkBackend.sparkContext("GenericLinesRDD"), Seq()) {
+
+  protected def getPartitions: Array[Partition] =
+    contexts.iterator.zipWithIndex.map { case (c, i) =>
+      new GenericLinesRDDPartition(i, c)
+    }.toArray
+
+  def compute(split: Partition, context: TaskContext): Iterator[GenericLine] = {
+    val it = body(split.asInstanceOf[GenericLinesRDDPartition].context)
+    TaskContext.get.addTaskCompletionListener { _ =>
+      it.close()
+    }
+    it
+  }
 }
 
 class GenericLines(
   val contextType: Type,
   val contexts: IndexedSeq[Any],
-  val body: (Any) => CloseableIterator[GenericLine])
+  val body: (Any) => CloseableIterator[GenericLine]) {
+
+  def nPartitions: Int = contexts.length
+
+  def toRDD(): RDD[GenericLine] = new GenericLinesRDD(contexts, body)
+}

@@ -15,7 +15,7 @@ else:
         try:
             sp.check_output(args, stderr=sp.STDOUT, **kwargs)
         except sp.CalledProcessError as e:
-            print(e.output).decode()
+            print(e.output.decode())
             raise e
 
 
@@ -85,6 +85,14 @@ if role == 'Master':
         'PYSPARK_PYTHON': '/opt/conda/default/bin/python',
         'PYSPARK_DRIVER_PYTHON': '/opt/conda/default/bin/python',
     }
+
+    # VEP ENV
+    try:
+        vep_config_uri = get_metadata('VEP_CONFIG_URI')
+    except Exception:
+        pass
+    else:
+        env_to_set["VEP_CONFIG_URI"] = vep_config_uri
 
     print('setting environment')
 

@@ -22,6 +22,126 @@ Please note that **forward compatibility should not be expected, especially
 relating to file formats**: this means that it may not be possible to use
 an earlier version of Hail to read files written in a later version.
 
+## Version 0.2.47
+
+Released 2020-06-23
+
+### Bug fixes
+- (hail#9009) Fix memory leak when counting per-partition. This caused excessive memory use in `BlockMatrix.write_from_entry_expr`, and likely in many other places.
+- (hail#9006) Fix memory leak in `hl.export_bgen`. 
+- (hail#9001) Fix double close error that showed up on Azure Cloud. 
+
+## Version 0.2.46
+
+Released 2020-06-17
+
+### Site
+- (hail#8955) Natural language documentation search
+
+### Bug fixes
+- (hail#8981) Fix BlockMatrix OOM triggered by the MatrixWriteBlockMatrix WriteBlocksRDD method
+
+---
+
+## Version 0.2.45
+
+Release 2020-06-15
+
+### Bug fixes
+
+- (hail#8948) Fix integer overflow error when reading files >2G with
+  `hl.import_plink`.
+- (hail#8903) Fix Python type annotations for empty collection constructors and
+  `hl.shuffle`.
+- (hail#8942) Refactored VCF combiner to support other GVCF schemas.
+- (hail#8941) Fixed `hl.import_plink` with multiple data partitions.
+
+### hailctl dataproc
+
+- (hail#8946) Fix bug when a user specifies packages in `hailctl dataproc start`
+  that are also dependencies of the Hail package.
+- (hail#8939) Support tuples in `hailctl dataproc describe`.
+
+---
+
+## Version 0.2.44
+
+Release 2020-06-06
+
+### New Features
+
+- (hail#8914) `hl.export_vcf` can now export tables as sites-only VCFs.
+- (hail#8894) Added `hl.shuffle` function to randomly permute arrays.
+- (hail#8854) Add `composable` option to parallel text export for use with `gsutil compose`.
+
+### Bug fixes
+
+- (hail#8883) Fix an issue related to failures in pipelines with `force_bgz=True`.
+
+### Performance
+
+- (hail#8887) Substantially improve the performance of `hl.experimental.import_gtf`.
+
+---
+
+## Version 0.2.43
+
+Released 2020-05-28
+
+### Bug fixes
+
+- (hail#8867) Fix a major correctness bug ocurring when calling BlockMatrix.transpose on sparse, non-symmetric BlockMatrices.
+- (hail#8876) Fixed "ChannelClosedException: null" in `{Table, MatrixTable}.write`.
+
+---
+
+## Version 0.2.42
+
+Released 2020-05-27
+
+### New Features
+
+- (hail#8822) Add optional non-centrality parameter to `hl.pchisqtail`.
+- (hail#8861) Add `contig_recoding` option to `hl.experimental.run_combiner`.
+
+### Bug fixes
+
+- (hail#8863) Fixes VCF combiner to successfully import GVCFs with alleles called as <NON_REF>.
+- (hail#8845) Fixed issue where accessing an element of an ndarray in a call to Table.transmute would fail.
+- (hail#8855) Fix crash in `filter_intervals`.
+
+---
+
+## Version 0.2.41
+
+Released 2020-05-15
+
+### Bug fixes
+
+- (hail#8799)(hail#8786) Fix ArrayIndexOutOfBoundsException seen in pipelines that reuse a tuple value.
+
+### hailctl dataproc
+
+- (hail#8790) Use configured compute zone as default for `hailctl dataproc connect` and `hailctl dataproc modify`.
+
+---
+
+## Version 0.2.40
+
+Released 2020-05-12
+
+### VCF Combiner
+
+ - (hail#8706) Add option to key by both locus and alleles for final output.
+
+### Bug fixes
+
+ - (hail#8729) Fix assertion error in `Table.group_by(...).aggregate(...)`
+ - (hail#8708) Fix assertion error in reading tables and matrix tables with `_intervals` option.
+ - (hail#8756) Fix return type of `LocusExpression.window` to use locus's reference genome instead of default RG.
+
+---
+
 ## Version 0.2.39
 
 Released 2020-04-29
@@ -912,8 +1032,8 @@ Released 2018-12-07
 
  - (hail#4845) The [or_error](https://hail.is/docs/0.2/functions/core.html#hail.expr.builders.CaseBuilder.or_error) method in `hl.case` and `hl.switch` statements now takes a string expression rather than a string literal, allowing more informative messages for errors and assertions.
  - (hail#4865) We use this new `or_error` functionality in methods that require biallelic variants to include an offending variant in the error message.
- - (hail#4820) Added [hl.reversed](https://hail.is/docs/0.2/functions/collections.html?highlight=reversed#hail.expr.functions.reversed) for reversing arrays and strings.
- - (hail#4895) Added `include_strand` option to the [hl.liftover](https://hail.is/docs/0.2/functions/genetics.html?highlight=liftover#hail.expr.functions.liftover) function.
+ - (hail#4820) Added [hl.reversed](https://hail.is/docs/0.2/functions/collections.html#hail.expr.functions.reversed) for reversing arrays and strings.
+ - (hail#4895) Added `include_strand` option to the [hl.liftover](https://hail.is/docs/0.2/functions/genetics.html#hail.expr.functions.liftover) function.
 
 
 ### Performance improvements

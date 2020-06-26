@@ -2,9 +2,9 @@ package is.hail.expr.ir
 
 import is.hail.HailSuite
 import is.hail.expr.Nat
-import is.hail.expr.types._
-import is.hail.expr.types.physical.PStruct
-import is.hail.expr.types.virtual._
+import is.hail.types._
+import is.hail.types.physical.PStruct
+import is.hail.types.virtual._
 import is.hail.methods.{ForceCountMatrixTable, ForceCountTable}
 import is.hail.rvd.RVD
 import is.hail.utils._
@@ -536,6 +536,7 @@ class PruneSuite extends HailSuite {
   val empty = TStruct.empty
   val justA = TStruct("a" -> TInt32)
   val justB = TStruct("b" -> TInt32)
+  val aAndB = TStruct("a" -> TInt32, "b" -> TInt32)
   val justARequired = TStruct("a" -> TInt32)
   val justBRequired = TStruct("b" -> TInt32)
 
@@ -600,24 +601,32 @@ class PruneSuite extends HailSuite {
               TStream(TStream(justB)), Array(TStream(TStruct("a" -> TInt32, "b" -> TInt32)), null))
   }
 
+  @Test def testStreamMergeMemo() {
+    val st2 = st.deepCopy()
+    checkMemo(
+      StreamMerge(
+        st, st2,
+        FastSeq("a")),
+      TStream(justB), Array(TStream(aAndB), TStream(aAndB)))
+  }
+
   @Test def testStreamZipMemo() {
     val a2 = st.deepCopy()
     val a3 = st.deepCopy()
     for (b <- Array(ArrayZipBehavior.ExtendNA, ArrayZipBehavior.TakeMinLength, ArrayZipBehavior.AssertSameLength)) {
-
-    checkMemo(StreamZip(
-      FastIndexedSeq(st, a2, a3),
-      FastIndexedSeq("foo", "bar", "baz"),
-      Let("foo1", GetField(Ref("foo", ref.typ), "b"), Let("bar2", GetField(Ref("bar", ref.typ), "a"), False())), b),
-      TStream(TBoolean), Array(TStream(justB), TStream(justA), TStream(empty), null))
+      checkMemo(StreamZip(
+        FastIndexedSeq(st, a2, a3),
+        FastIndexedSeq("foo", "bar", "baz"),
+        Let("foo1", GetField(Ref("foo", ref.typ), "b"), Let("bar2", GetField(Ref("bar", ref.typ), "a"), False())), b),
+        TStream(TBoolean), Array(TStream(justB), TStream(justA), TStream(empty), null))
     }
+
     checkMemo(StreamZip(
       FastIndexedSeq(st, a2, a3),
       FastIndexedSeq("foo", "bar", "baz"),
       Let("foo1", GetField(Ref("foo", ref.typ), "b"), Let("bar2", GetField(Ref("bar", ref.typ), "a"), False())),
       ArrayZipBehavior.AssumeSameLength),
       TStream(TBoolean), Array(TStream(justB), TStream(justA), null, null))
-
   }
 
   @Test def testStreamFilterMemo() {
@@ -647,20 +656,39 @@ class PruneSuite extends HailSuite {
       Array(TStream(justA), null, null))
   }
 
-  @Test def testStreamLeftJoinDistinct() {
+  @Test def testStreamJoinRightDistinct() {
     val l = Ref("l", ref.typ)
     val r = Ref("r", ref.typ)
-    checkMemo(StreamLeftJoinDistinct(st, st, "l", "r",
-      ApplyComparisonOp(LT(TInt32), GetField(l, "a"), GetField(r, "a")),
-      MakeStruct(FastIndexedSeq("a" -> GetField(l, "a"), "b" -> GetField(l, "b"), "c" -> GetField(l, "c"), "d" -> GetField(r, "b"), "e" -> GetField(r, "c")))),
-      TStream(justA),
-      Array(TStream(justA), TStream(justA), null, justA))
+    checkMemo(
+      StreamJoinRightDistinct(st, st, FastIndexedSeq("a"), FastIndexedSeq("a"), "l", "r",
+        MakeStruct(FastIndexedSeq("a" -> GetField(l, "a"), "b" -> GetField(l, "b"), "c" -> GetField(l, "c"), "d" -> GetField(r, "b"), "e" -> GetField(r, "c"))),
+        "left"),
+      TStream(TStruct("b" -> TInt32, "d" -> TInt32)),
+      Array(
+        TStream(TStruct("a" -> TInt32, "b" -> TInt32)),
+        TStream(TStruct("a" -> TInt32, "b" -> TInt32)),
+        TStruct("b" -> TInt32, "d" -> TInt32)))
   }
 
   @Test def testStreamForMemo() {
     checkMemo(StreamFor(st, "foo", Begin(FastIndexedSeq(GetField(Ref("foo", ref.typ), "a")))),
       TVoid,
       Array(TStream(justA), null))
+  }
+
+  @Test def testMakeNDArrayMemo(): Unit = {
+    checkMemo(
+      MakeNDArray(
+        Ref("x", TArray(TStruct("a" -> TInt32, "b" -> TInt64))),
+        Ref("y", TTuple(TInt32, TInt32)),
+        True()),
+      TNDArray(TStruct("a" -> TInt32), Nat(2)),
+      Array(
+        TArray(TStruct("a" -> TInt32)),
+        TTuple(TInt32, TInt32),
+        TBoolean
+      )
+    )
   }
 
   @Test def testNDArrayMapMemo(): Unit = {
@@ -1136,6 +1164,13 @@ class PruneSuite extends HailSuite {
                  })
   }
 
+  @Test def testStreamMergeRebuild() {
+    checkRebuild(
+      StreamMerge(MakeStream(Seq(NA(ts)), TStream(ts)), MakeStream(Seq(NA(ts)), TStream(ts)), FastIndexedSeq("a")),
+      TStream(subsetTS("b")),
+      (_: BaseIR, r: BaseIR) => r.typ == TStream(subsetTS("a", "b")))
+  }
+
   @Test def testStreamZipRebuild() {
     val a2 = st.deepCopy()
     val a3 = st.deepCopy()
@@ -1416,5 +1451,29 @@ class PruneSuite extends HailSuite {
     checkRebuild(takeByAgg, TArray(TStruct("y" -> TInt32)), { (_: BaseIR, reb: BaseIR) =>
       val a = reb.asInstanceOf[ApplyAggOp]
       a.seqOpArgs == FastIndexedSeq(MakeStruct(FastSeq(("y", y))), MakeStruct(FastSeq(("x", x), ("y", y))))})
+  }
+
+  @Test def testStreamFold2() {
+    val eltType = TStruct("a" -> TInt32, "b" -> TInt32)
+    val accum1Type = TStruct("c" -> TInt32, "d" -> TInt32)
+
+    val ir0 = StreamFold2(
+      NA(TStream(eltType)),
+      FastSeq("1" -> NA(accum1Type)),
+      "elt",
+      FastSeq(
+        MakeStruct(FastSeq(
+          "c" -> GetField(Ref("elt", eltType), "a"),
+          "d" -> GetField(Ref("1", accum1Type), "c")))),
+      Ref("1", TStruct("c" -> TInt32, "d" -> TInt32)))
+
+    def checker(original: IR, rebuilt: IR): Boolean = {
+      val r = rebuilt.asInstanceOf[StreamFold2]
+      r.typ == TStruct("c" -> TInt32)
+      r.a.typ == TStream(TStruct("a" -> TInt32))
+      r.accum(0)._2.typ == r.typ
+    }
+
+    checkRebuild(ir0, TStruct("c" -> TInt32), checker)
   }
 }

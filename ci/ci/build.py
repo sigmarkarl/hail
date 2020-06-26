@@ -2,15 +2,14 @@ import abc
 import os.path
 import json
 import logging
-from collections import defaultdict
+from collections import defaultdict, Counter
 from shlex import quote as shq
 import yaml
 import jinja2
 from hailtop.utils import RETRY_FUNCTION_SCRIPT, flatten
 from .utils import generate_token
-from .constants import BUCKET
 from .environment import GCP_PROJECT, GCP_ZONE, DOMAIN, IP, CI_UTILS_IMAGE, \
-    DEFAULT_NAMESPACE, BATCH_PODS_NAMESPACE, KUBERNETES_SERVER_URL
+    DEFAULT_NAMESPACE, BATCH_PODS_NAMESPACE, KUBERNETES_SERVER_URL, BUCKET
 from .globals import is_test_deployment
 
 log = logging.getLogger('ci')
@@ -76,6 +75,10 @@ class StepParameters:
         self.name_step = name_step
 
 
+class BuildConfigurationError(Exception):
+    pass
+
+
 class BuildConfiguration:
     def __init__(self, code, config_str, scope, requested_step_names=()):
         config = yaml.safe_load(config_str)
@@ -138,6 +141,12 @@ class Step(abc.ABC):
 
         self.name = json['name']
         if 'dependsOn' in json:
+            duplicates = [
+                name
+                for name, count in Counter(json['dependsOn']).items()
+                if count > 1]
+            if duplicates:
+                raise BuildConfigurationError(f'found duplicate dependencies of {self.name}: {duplicates}')
             self.deps = [params.name_step[d] for d in json['dependsOn'] if params.name_step[d]]
         else:
             self.deps = []
@@ -194,7 +203,7 @@ class Step(abc.ABC):
             return DeployStep.from_json(params)
         if kind in ('createDatabase', 'createDatabase2'):
             return CreateDatabaseStep.from_json(params)
-        raise ValueError(f'unknown build step kind: {kind}')
+        raise BuildConfigurationError(f'unknown build step kind: {kind}')
 
     def __eq__(self, other):
         return isinstance(other, self.__class__) and self.name == other.name
@@ -249,7 +258,7 @@ class BuildImageStep(Step):
         if self.inputs:
             input_files = []
             for i in self.inputs:
-                input_files.append((f'{BUCKET}/build/{batch.attributes["token"]}{i["from"]}', f'/io/{os.path.basename(i["to"])}'))
+                input_files.append((f'gs://{BUCKET}/build/{batch.attributes["token"]}{i["from"]}', f'/io/{os.path.basename(i["to"])}'))
         else:
             input_files = None
 
@@ -359,7 +368,11 @@ date
 gcloud -q auth activate-service-account \
   --key-file=/secrets/gcr-push-service-account-key/gcr-push-service-account-key.json
 
-gcloud -q container images untag {shq(self.image)}
+until gcloud -q container images untag {shq(self.image)} || ! gcloud -q container images describe {shq(self.image)}
+do
+    echo 'failed, will sleep 2 and retry'
+    sleep 2
+done
 
 date
 true
@@ -432,14 +445,14 @@ class RunImageStep(Step):
         if self.inputs:
             input_files = []
             for i in self.inputs:
-                input_files.append((f'{BUCKET}/build/{batch.attributes["token"]}{i["from"]}', i["to"]))
+                input_files.append((f'gs://{BUCKET}/build/{batch.attributes["token"]}{i["from"]}', i["to"]))
         else:
             input_files = None
 
         if self.outputs:
             output_files = []
             for o in self.outputs:
-                output_files.append((o["from"], f'{BUCKET}/build/{batch.attributes["token"]}{o["to"]}'))
+                output_files.append((o["from"], f'gs://{BUCKET}/build/{batch.attributes["token"]}{o["to"]}'))
         else:
             output_files = None
 
@@ -499,7 +512,7 @@ class CreateNamespaceStep(Step):
         elif params.scope == 'dev':
             self._name = params.code.namespace
         else:
-            raise ValueError(f"{params.scope} is not a valid scope for creating namespace")
+            raise BuildConfigurationError(f"{params.scope} is not a valid scope for creating namespace")
 
     def wrapped_job(self):
         if self.job:
@@ -644,7 +657,11 @@ date
 set -x
 date
 
-kubectl delete namespace {self._name}
+until kubectl delete namespace --ignore-not-found=true {self._name}
+do
+    echo 'failed, will sleep 2 and retry'
+    sleep 2
+done
 
 date
 true
@@ -819,7 +836,9 @@ class CreateDatabaseStep(Step):
         self.shutdowns = shutdowns
 
         self.inputs = inputs
-        self.job = None
+        self.create_passwords_job = None
+        self.create_database_job = None
+        self.cleanup_job = None
 
         if params.scope == 'dev':
             self.database_server_config_namespace = params.code.namespace
@@ -843,12 +862,18 @@ class CreateDatabaseStep(Step):
             self.admin_username = generate_token()
             self.user_username = generate_token()
 
+        self.admin_password_file = f'/io/{self.admin_username}.pwd'
+        self.user_password_file = f'/io/{self.user_username}.pwd'
+
         self.admin_secret_name = f'sql-{self.database_name}-admin-config'
         self.user_secret_name = f'sql-{self.database_name}-user-config'
 
     def wrapped_job(self):
-        if self.job:
-            return [self.job]
+        if self.cleanup_job:
+            return [self.cleanup_job]
+        if self.create_passwords_job:
+            assert self.create_database_job is not None
+            return [self.create_passwords_job, self.create_database_job]
         return []
 
     @staticmethod
@@ -876,38 +901,57 @@ class CreateDatabaseStep(Step):
             '_name': self._name,
             'admin_username': self.admin_username,
             'user_username': self.user_username,
+            'admin_password_file': self.admin_password_file,
+            'user_password_file': self.user_password_file,
             'cant_create_database': self.cant_create_database,
             'migrations': self.migrations,
             'shutdowns': self.shutdowns
         }
 
-        create_script = f'''
+        create_passwords_script = f'''
+set -ex
+
+LC_ALL=C tr -dc '[:alnum:]' </dev/urandom | head -c 16 > {self.admin_password_file}
+LC_ALL=C tr -dc '[:alnum:]' </dev/urandom | head -c 16 > {self.user_password_file}
+'''
+
+        create_database_script = f'''
 set -ex
 
 python3 create_database.py {shq(json.dumps(create_database_config))}
 '''
 
+        input_files = []
         if self.inputs:
-            input_files = []
             for i in self.inputs:
-                input_files.append((f'{BUCKET}/build/{batch.attributes["token"]}{i["from"]}', i["to"]))
-        else:
-            input_files = None
+                input_files.append((f'gs://{BUCKET}/build/{batch.attributes["token"]}{i["from"]}', i["to"]))
+        password_files_input = [
+            (f'gs://{BUCKET}/build/{batch.attributes["token"]}/{self.admin_password_file}', self.admin_password_file),
+            (f'gs://{BUCKET}/build/{batch.attributes["token"]}/{self.user_password_file}', self.user_password_file)]
+        input_files.extend(password_files_input)
 
-        self.job = batch.create_job(CI_UTILS_IMAGE,
-                                    command=['bash', '-c', create_script],
-                                    attributes={'name': self.name},
-                                    secrets=[{
-                                        'namespace': self.database_server_config_namespace,
-                                        'name': 'database-server-config',
-                                        'mount_path': '/sql-config'
-                                    }],
-                                    service_account={
-                                        'namespace': BATCH_PODS_NAMESPACE,
-                                        'name': 'ci-agent'
-                                    },
-                                    input_files=input_files,
-                                    parents=self.deps_parents())
+        self.create_passwords_job = batch.create_job(
+            CI_UTILS_IMAGE,
+            command=['bash', '-c', create_passwords_script],
+            attributes={'name': self.name + "_create_passwords"},
+            output_files=[(x[1], x[0]) for x in password_files_input],
+            parents=self.deps_parents())
+
+        self.create_database_job = batch.create_job(
+            CI_UTILS_IMAGE,
+            command=['bash', '-c', create_database_script],
+            attributes={'name': self.name},
+            secrets=[{
+                'namespace': self.database_server_config_namespace,
+                'name': 'database-server-config',
+                'mount_path': '/sql-config'
+            }],
+            service_account={
+                'namespace': BATCH_PODS_NAMESPACE,
+                'name': 'ci-agent'
+            },
+            input_files=input_files,
+            parents=[self.create_passwords_job])
 
     def cleanup(self, batch, scope, parents):
         if scope in ['deploy', 'dev'] or self.cant_create_database:
@@ -916,24 +960,34 @@ python3 create_database.py {shq(json.dumps(create_database_config))}
         cleanup_script = f'''
 set -ex
 
-cat | mysql --defaults-extra-file=/sql-config/sql-config.cnf <<EOF
-DROP DATABASE \\`{self._name}\\`;
-DROP USER '{self.admin_username}';
-DROP USER '{self.user_username}';
+commands=$(mktemp)
+
+cat >$commands <<EOF
+DROP DATABASE IF EXISTS \\`{self._name}\\`;
+DROP USER IF EXISTS '{self.admin_username}';
+DROP USER IF EXISTS '{self.user_username}';
 EOF
+
+until mysql --defaults-extra-file=/sql-config/sql-config.cnf <$commands
+do
+    echo 'failed, will sleep 2 and retry'
+    sleep 2
+done
+
 '''
 
-        self.job = batch.create_job(CI_UTILS_IMAGE,
-                                    command=['bash', '-c', cleanup_script],
-                                    attributes={'name': f'cleanup_{self.name}'},
-                                    secrets=[{
-                                        'namespace': self.database_server_config_namespace,
-                                        'name': 'database-server-config',
-                                        'mount_path': '/sql-config'
-                                    }],
-                                    service_account={
-                                        'namespace': BATCH_PODS_NAMESPACE,
-                                        'name': 'ci-agent'
-                                    },
-                                    parents=parents,
-                                    always_run=True)
+        self.cleanup_job = batch.create_job(
+            CI_UTILS_IMAGE,
+            command=['bash', '-c', cleanup_script],
+            attributes={'name': f'cleanup_{self.name}'},
+            secrets=[{
+                'namespace': self.database_server_config_namespace,
+                'name': 'database-server-config',
+                'mount_path': '/sql-config'
+            }],
+            service_account={
+                'namespace': BATCH_PODS_NAMESPACE,
+                'name': 'ci-agent'
+            },
+            parents=parents,
+            always_run=True)

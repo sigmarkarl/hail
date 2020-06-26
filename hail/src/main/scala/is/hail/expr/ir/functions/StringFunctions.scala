@@ -4,8 +4,8 @@ import is.hail.annotations.{Region, StagedRegionValueBuilder}
 import is.hail.asm4s
 import is.hail.asm4s._
 import is.hail.expr.ir._
-import is.hail.expr.types.physical._
-import is.hail.expr.types.virtual._
+import is.hail.types.physical._
+import is.hail.types.virtual._
 import is.hail.utils._
 import java.util.Locale
 import java.time.{Instant, ZoneId}
@@ -143,6 +143,14 @@ object StringFunctions extends RegistryFunctions {
       unwrapReturn(r, rt)(str)
     }
 
+    registerEmitCode1("showStr", tv("T"), TString, {
+      (_: Type, _: PType) => PCanonicalString(true)
+    }) { case (r, rt, a) =>
+      val annotation = Code(a.setup, a.m).muxAny(Code._null(boxedTypeInfo(a.pt)), boxArg(r, a.pt)(a.v))
+      val str = r.mb.getType(a.pt.virtualType).invoke[Any, String]("showStr", annotation)
+      EmitCode.present(PCode(rt, unwrapReturn(r, rt)(str)))
+    }
+
     registerEmitCode2("showStr", tv("T"), TInt32, TString, {
       (_: Type, _: PType, truncType: PType) => PCanonicalString(truncType.required)
     }) { case (r, rt, a, trunc) =>
@@ -274,7 +282,7 @@ object StringFunctions extends RegistryFunctions {
     })(thisClass, "strptime")
 
     registerPCode("parse_json", Array(TString), TTuple(tv("T")),
-      (rType: Type, _: Seq[PType]) => PType.canonical(rType, true), typeParams = Array(tv("T"))) { case (er, resultType, Array(s: PStringCode)) =>
+      (rType: Type, _: Seq[PType]) => PType.canonical(rType, true), typeParameters = Array(tv("T"))) { case (er, resultType, Array(s: PStringCode)) =>
 
       PCode(resultType, StringFunctions.unwrapReturn(er, resultType)(
         Code.invokeScalaObject2[String, Type, Row](JSONAnnotationImpex.getClass, "irImportAnnotation",

@@ -423,6 +423,21 @@ class Tests(unittest.TestCase):
         self.assertTrue(left.all(hl.sorted(left.interval_matches.map(lambda x: x.i))
                                  == hl.range(0, hl.min(left.idx % 10, 10 - left.idx % 10))))
 
+    def test_interval_product_join_long_key(self):
+        left = hl.utils.range_table(50, n_partitions=8)
+        intervals = hl.utils.range_table(25)
+        intervals = intervals.key_by(
+            interval=hl.interval(
+                1 + (intervals.idx // 5) * 10 + (intervals.idx % 5),
+                (1 + intervals.idx // 5) * 10 - (intervals.idx % 5)),
+            k2=1)
+        intervals = intervals.checkpoint('/tmp/bar.ht', overwrite=True)
+        intervals = intervals.annotate(i=intervals.idx % 5)
+        intervals = intervals.key_by('interval')
+        left = left.annotate(interval_matches=intervals.index(left.idx, all_matches=True))
+        self.assertTrue(left.all(hl.sorted(left.interval_matches.map(lambda x: x.i))
+                                 == hl.range(0, hl.min(left.idx % 10, 10 - left.idx % 10))))
+
     def test_join_with_empty(self):
         kt = hl.utils.range_table(10)
         kt2 = kt.head(0)
@@ -1454,6 +1469,9 @@ def test_group_within_partitions():
     ht = hl.utils.range_table(100).naive_coalesce(10)
     filter_then_group = ht.filter(ht.idx % 2 == 0)._group_within_partitions("grouped_fields", 5).collect()
     assert filter_then_group[0] == hl.Struct(idx=0, grouped_fields=[hl.Struct(idx=0), hl.Struct(idx=2), hl.Struct(idx=4), hl.Struct(idx=6), hl.Struct(idx=8)])
+
+    # Test that names other than "grouped_fields" work
+    assert "foo" in t._group_within_partitions("foo", 1).collect()[0]
 
 
 def test_group_within_partitions_after_explode():

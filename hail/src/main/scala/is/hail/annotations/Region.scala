@@ -2,7 +2,7 @@ package is.hail.annotations
 
 import is.hail.asm4s
 import is.hail.asm4s.{Code, coerce}
-import is.hail.expr.types.physical._
+import is.hail.types.physical._
 import is.hail.utils._
 
 object Region {
@@ -76,10 +76,14 @@ object Region {
     Memory.memcpy(dstOff, srcOff, n)
 
   def setMemory(offset: Long, size: Long, b: Byte): Unit = {
-    var x = 0L
-    while (x < size) {
-      Memory.storeByte(offset + x, b)
-      x += 1
+    if (size < (1 << 10)) {
+      var x = 0L
+      while (x < size) {
+        Memory.storeByte(offset + x, b)
+        x += 1
+      }
+    } else {
+      Memory.memset(offset, size, b)
     }
   }
 

@@ -5,9 +5,9 @@ import java.io._
 import is.hail.annotations._
 import is.hail.asm4s._
 import is.hail.expr.ir.{EmitClassBuilder, EmitFunctionBuilder, ExecuteContext}
-import is.hail.expr.types.encoded._
-import is.hail.expr.types.physical._
-import is.hail.expr.types.virtual._
+import is.hail.types.encoded._
+import is.hail.types.physical._
+import is.hail.types.virtual._
 
 object TypedCodecSpec {
   def apply(pt: PType, bufferSpec: BufferSpec): TypedCodecSpec = {
@@ -31,6 +31,10 @@ final case class TypedCodecSpec(_eType: EType, _vType: Type, _bufferSpec: Buffer
 
   def decodedPType(requestedType: Type): PType = {
     encodedType.decodedPType(requestedType)
+  }
+
+  def decodedPType(): PType = {
+    encodedType.decodedPType(_vType)
   }
 
   def buildDecoder(ctx: ExecuteContext, requestedType: Type): (PType, (InputStream) => Decoder) = {
